@@ -871,6 +871,10 @@ impl<'s> Loader<'s, '_> {
         };
         let depth_test = self.depth_mode(path, &p.depthtest, "depthtest")?;
         let depth_write = self.depth_mode(path, &p.depthwrite, "depthwrite")?;
+        let mut constants = self
+            .constants(&p.constantshadervalues)
+            .at("constantshadervalues")?;
+        self.user_shader_values(path, &p.usershadervalues, &mut constants);
         Ok(MaterialPass {
             shader,
             blending,
@@ -880,10 +884,41 @@ impl<'s> Loader<'s, '_> {
             textures: self.texture_map(&p.textures),
             user_textures: self.texture_map(&p.usertextures),
             combos: self.combos(&p.combos).at("combos")?,
-            constants: self
-                .constants(&p.constantshadervalues)
-                .at("constantshadervalues")?,
+            constants,
         })
+    }
+
+    /// `usershadervalues` (`{"<user property>": "<material constant>"}`, absent from spec 02):
+    /// the constant follows the property, like a `constantshadervalues` entry written
+    /// `{"user": "<property>", "value": …}`, and replaces such an entry. Unknown properties
+    /// leave the constant as it is (warning).
+    fn user_shader_values(
+        &mut self,
+        path: &str,
+        raw: &RawMap<'_, Json<'_>>,
+        constants: &mut Vec<Constant>,
+    ) {
+        if raw.kind != JsonKind::Object {
+            return;
+        }
+        for (property, key) in raw.sorted() {
+            let Json::Str(key) = key else {
+                self.warn(path, format!("usershadervalues.{property}: not a string"));
+                continue;
+            };
+            let Some(setting) = self.b.property_setting(property) else {
+                self.warn(
+                    path,
+                    format!("usershadervalues: unknown user property `{property}`"),
+                );
+                continue;
+            };
+            let name = self.intern(key);
+            match constants.iter_mut().find(|c| c.name == name) {
+                Some(c) => c.setting = setting,
+                None => constants.push(Constant { name, setting }),
+            }
+        }
     }
 
     fn depth_mode(

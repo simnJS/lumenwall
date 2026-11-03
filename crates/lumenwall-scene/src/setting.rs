@@ -203,6 +203,21 @@ impl Binder<'_> {
         Ok(id)
     }
 
+    /// A setting that follows user property `name` without condition (§4.4), registered like a
+    /// bound setting. `None` when the project declares no such property.
+    pub fn property_setting(&mut self, name: &str) -> Option<SettingId> {
+        let pid = self.props.find(name)?;
+        let mut value = Value::null();
+        value.assign_bound(self.props.get(pid).value(), None);
+        let meta = SettingMeta {
+            property: Some(pid),
+            ..SettingMeta::default()
+        };
+        let id = self.settings.push(value, meta);
+        self.props.subscribe(pid, id, None);
+        Some(id)
+    }
+
     /// Analyses a setting whose value is frozen at load ("instantané"): same algorithm, bound
     /// properties are read once, nothing is registered.
     pub fn snapshot(

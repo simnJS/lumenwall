@@ -246,6 +246,13 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
   - fallback fonts: DejaVu Sans then Liberation Sans (Segoe UI then Arial on Windows, and
     `systemfont_<name>` as `<name>.ttf` there), then Wallpaper Engine's `fonts/NotoSans-Regular.ttf`;
     they are also used for glyphs the wallpaper's font lacks.
+- An image without `size` takes the `width`/`height` of its model before the real size of its
+  main texture (spec 02 Q26: unused by the reference). Evidence: deep_space's `background` model
+  (1920×1080 over a 480×270 flow mask) covers the screen in its WE preview; the reference draws it
+  as a 480×270 inset (rule 5).
+- Particle materials: `usershadervalues` (`{"<user property>": "<material constant>"}`) set the
+  constant from the property at load and on every property change (shimmering_particles tints
+  its motes with `schemecolor`/`color2`). Image materials get it from `lumenwall-scene`.
 - Puppet layer clocks advance by at most 0.25 s per frame: the engine clock keeps running while
   an output is paused, and spec 08 §9.3 excludes the pause (QO-P18). Animations only slow down
   below 4 fps.

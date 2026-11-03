@@ -1041,6 +1041,7 @@ raw_struct! {
         usertextures: RawSeq<RawTexEntry<'a>> = "usertextures",
         combos: RawMap<'a, Json<'a>> = "combos",
         constantshadervalues: RawMap<'a, RawSetting<'a>> = "constantshadervalues",
+        usershadervalues: RawMap<'a, Json<'a>> = "usershadervalues",
     }
 }
 

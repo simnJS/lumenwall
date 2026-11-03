@@ -61,7 +61,7 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 | Q23 | Becoming Null keeps the text view, `// parity:` | 3 |
 | Q24 | Float boolean view by truncation (0.5 → false), `// parity:` | 3 |
 | Q25 | n/a (`lumenwall-particles`) | — |
-| Q26 | Model `width`/`height` stored, unused | 3 |
+| Q26 | Model `width`/`height` stored; `lumenwall-engine` sizes an image without `size` with them (deep_space preview) | 5 |
 | Q27 | Image whose material has no pass: not set up, warning (no global failure) | 2 |
 | Q28 | Magenta-tint compatibility pass reproduced, `// parity:` | 3 |
 | Q29 | Combo values written as integer strings (`"1"`) accepted; other strings stay a typed error | 2 |
@@ -72,6 +72,11 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 - Q2 (8-digit hex), Q5, Q6, Q7, Q9, Q10, Q12, Q13, Q16 (effects), Q17, Q18, Q19, Q27, Q29, Q30, Q31: see the table.
 - A UTF-8 byte order mark at the start of a JSON file is skipped.
+- Material passes read `usershadervalues` (`{"<user property>": "<material constant>"}`, absent
+  from spec 02): the constant becomes a setting bound to the property (live, like a
+  `{"user": …}` constant) and replaces a `constantshadervalues` entry of the same name. Unknown
+  properties are a warning. Used by eagleflag (flag colours), neon_sunset, shimmering_particles
+  (particle materials, read by `lumenwall-engine`).
 - Object `dependencies` also accept objects `{ "id", "index", "type" }` (written by Wallpaper Engine for particle links, spec 05 A7.8): their `id` is used as the dependency (strict integer); `index` and `type` are not kept. Spec 02 §7.2 only describes integers.
 - Spec ambiguity: §13.3 says "group" scale/angles for types other than image and text, while §7.2 says particles use their re-read settings. Particles use their own settings (§7.2).
 - A passthrough image with at least one effect is created even when all its effects are hidden at setup. `ImagePasses::draws` is then false (nothing drawn), so it can appear when an effect becomes visible.

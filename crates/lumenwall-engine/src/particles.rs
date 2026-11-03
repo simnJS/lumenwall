@@ -28,6 +28,9 @@ struct ParticleMaterial {
     combos: Vec<(String, i32)>,
     overbright: f32,
     constants: serde_json::Map<String, Json>,
+    /// `usershadervalues`: `(user property, material constant)`; the constant follows the
+    /// property (same key as for image materials, see `lumenwall-scene`).
+    user_constants: Vec<(String, String)>,
 }
 
 fn read_material(vfs: &Vfs, path: &str) -> Result<ParticleMaterial, String> {
@@ -81,6 +84,15 @@ fn read_material(vfs: &Vfs, path: &str) -> Result<ParticleMaterial, String> {
             .get("constantshadervalues")
             .and_then(Json::as_object)
             .cloned()
+            .unwrap_or_default(),
+        user_constants: pass
+            .get("usershadervalues")
+            .and_then(Json::as_object)
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(p, k)| Some((p.clone(), k.as_str()?.to_owned())))
+                    .collect()
+            })
             .unwrap_or_default(),
     })
 }
@@ -140,6 +152,8 @@ pub struct PendingParticle {
     visible: Box<[SettingId]>,
     /// `(uniform, values, integer)` from the material constants.
     constants: Vec<(String, [f32; 4], bool)>,
+    /// `(user property, uniform, integer)` of the `usershadervalues` constants.
+    user_constants: Vec<(String, String, bool)>,
 }
 
 /// A particle system of a running scene.
@@ -152,6 +166,8 @@ pub struct ParticleRuntime {
     overbright: f32,
     visible: Box<[SettingId]>,
     drawn: bool,
+    /// `(user property, slot, integer)`: constants rewritten when the property changes.
+    user_constants: Vec<(String, UniformSlot, bool)>,
 }
 
 fn blend(b: PBlend) -> BlendMode {
@@ -338,16 +354,30 @@ pub fn prepare(
         // spec 05 §12.1: slot 0 is forced to the material's first texture.
         desc = desc.with_slot(0, SlotBinding::texture(t.id()));
     }
+    let mut user_constants = Vec::new();
     let constants = shader
         .constants
         .iter()
         .map(|c| {
+            let int = c.components == 0;
+            let bound = material
+                .user_constants
+                .iter()
+                .find(|(_, key)| *key == c.key)
+                .and_then(|(prop, _)| s.properties.iter().find(|(n, _)| n == prop));
+            if let Some((prop, value)) = bound {
+                user_constants.push((prop.clone(), c.uniform.clone(), int));
+                // Property values arrive as `property_json` writes them (numbers, "x y z w").
+                if let Some(v) = constant_floats(value) {
+                    return (c.uniform.clone(), v, int);
+                }
+            }
             let v = material
                 .constants
                 .get(&c.key)
                 .and_then(constant_floats)
                 .unwrap_or(c.default);
-            (c.uniform.clone(), v, c.components == 0)
+            (c.uniform.clone(), v, int)
         })
         .collect();
     Ok(PendingParticle {
@@ -358,6 +388,7 @@ pub fn prepare(
         overbright: material.overbright,
         visible: s.visible.clone(),
         constants,
+        user_constants,
     })
 }
 
@@ -377,6 +408,11 @@ impl PendingParticle {
                 }
             }
         }
+        let user_constants = self
+            .user_constants
+            .into_iter()
+            .filter_map(|(prop, name, int)| Some((prop, b.uniform(pass, &name)?, int)))
+            .collect();
         let u = |n: &str| b.uniform(pass, n);
         let slots = Slots {
             model: u("g_ModelMatrix"),
@@ -410,6 +446,7 @@ impl PendingParticle {
             overbright: self.overbright,
             visible: self.visible,
             drawn: false,
+            user_constants,
         })
     }
 }
@@ -517,9 +554,21 @@ impl ParticleRuntime {
         fl(sh, &s.refract, &[u.refract_amount]);
     }
 
-    /// Re-applies a user property to the values bound to it.
-    pub fn set_property(&mut self, name: &str, value: &Json) {
+    /// Re-applies a user property to the values and material constants bound to it.
+    pub fn set_property(&mut self, scene: &mut RenderScene, name: &str, value: &Json) {
         self.system.set_user_property_json(name, value);
+        for (prop, slot, int) in &self.user_constants {
+            if prop != name {
+                continue;
+            }
+            if let Some(v) = constant_floats(value) {
+                if *int {
+                    scene.shadow_mut().write_ints(slot, &[v[0] as i32]);
+                } else {
+                    scene.shadow_mut().write_floats(slot, &v);
+                }
+            }
+        }
     }
 
     /// Live particles (statistics).
@@ -558,7 +607,8 @@ mod tests {
             "materials/p.json",
             br#"{"passes":[{"blending":"additive","shader":"genericparticle",
                 "textures":[null,"particle/drop"],"combos":{"spritesheet":1},
-                "constantshadervalues":{"ui_editor_properties_overbright":{"value":1.5}}}]}"#,
+                "constantshadervalues":{"ui_editor_properties_overbright":{"value":1.5}},
+                "usershadervalues":{"schemecolor":"color1","bad":3}}]}"#,
         );
         let mut vfs = Vfs::new();
         vfs.mount_adapter("/", Adapter::Memory(files));
@@ -568,6 +618,10 @@ mod tests {
         assert_eq!(m.texture.as_deref(), Some("particle/drop"));
         assert_eq!(m.combos, vec![("SPRITESHEET".to_owned(), 1)]);
         assert_eq!(m.overbright, 1.5);
+        assert_eq!(
+            m.user_constants,
+            vec![("schemecolor".to_owned(), "color1".to_owned())]
+        );
         assert!(read_material(&vfs, "materials/missing.json").is_err());
     }
 

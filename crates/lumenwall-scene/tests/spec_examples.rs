@@ -1765,3 +1765,32 @@ fn hostile_inputs_do_not_panic() {
         PropertyOverrides::new(),
     );
 }
+
+#[test]
+fn user_shader_values_bind_material_constants() {
+    // `usershadervalues` (eagleflag, shimmering_particles, neon_sunset): property → constant.
+    let mut f = base_files(&scene_with(ortho(), &img_obj("")));
+    f.insert(
+        "materials/fond.json".into(),
+        br#"{ "passes": [ { "shader": "flag", "textures": [ "fond" ],
+              "constantshadervalues": { "color1": "0 0 0", "Strength": 0.3 },
+              "usershadervalues": { "schemecolor": "color1", "speed": "color2",
+                                    "missing": "color3", "bad": 4 } } ] }"#
+            .to_vec(),
+    );
+    let mut p = load(&f);
+    let b = p.build(&f, &BuildOptions::new(1920, 1080)).unwrap();
+    let passes = b.image_passes[0].clone().unwrap();
+    let o = ObjectIndex::new(0);
+    let c = p.pass_constants(o, &passes, 0, &["color1", "color2", "color3", "Strength"]);
+    let ConstantSource::Setting(color1) = c[0] else {
+        panic!("color1 not bound: {:?}", c[0]);
+    };
+    assert_eq!(p.value(color1).vec3(), Vec3::new(0.2, 0.4, 0.8));
+    assert!(matches!(c[1], ConstantSource::Setting(id) if p.value(id).float() == 1.5));
+    assert_eq!(c[2], ConstantSource::Default);
+    assert!(matches!(c[3], ConstantSource::Setting(id) if p.value(id).float() == 0.3));
+    // The constant follows the property.
+    p.set_property_text("schemecolor", "1 0 0").unwrap();
+    assert_eq!(p.value(color1).vec3(), Vec3::new(1.0, 0.0, 0.0));
+}
