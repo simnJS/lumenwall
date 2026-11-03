@@ -367,6 +367,15 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
 - A positional wallpaper without `-w`/`-r` runs on every output as a desktop wallpaper (decided
   for the product; the reference opens a 640×480 window). Lives in the `lumenwall` glue.
 - Screenshots read `_rt_FullFrameBuffer` and always write PNG.
+- An image's composites A/B (spec 04 §8.9) get the image size only when its chain writes them
+  (chain planned in creation order from the declared targets, checked again on the prepared
+  passes) or when a material, effect or pass target of the wallpaper names them
+  (`_rt_imageLayerComposite_<id>_a/_b` among the project's strings); the others are 1×1 and
+  would only hold zeros. Identical pixels on every installed scene; render targets of
+  3463520581 515 → 384 MiB (headless, textures included), 1960765686 380 → 190 MiB. A layer
+  that a script creates later and that names a composite of a load-time image left 1×1 would
+  read zeros at another `g_TextureNResolution` (no installed wallpaper does), as would an effect
+  made visible later if effect visibility becomes live.
 - SceneScript, following Wallpaper Engine where the reference's data model contradicts its
   documented API (`docs/PARITY-POLICY.md` rules 4–5, `// we-doc:`):
   - `scale`, `angles` and `visible` scripts of images, texts and particles drive the copy the

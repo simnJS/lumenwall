@@ -375,11 +375,23 @@ impl RenderTargetPool {
         size: (u32, u32),
         sampler: SamplerKey,
     ) -> PingPong {
+        self.create_composites_sized(ctx, id, (size, size), sampler)
+    }
+
+    /// [`Self::create_composites`] with a size for A and one for B: a composite the chain never
+    /// writes and no material names holds only zeros and can be 1×1 (lumenwall-engine decides).
+    pub fn create_composites_sized(
+        &mut self,
+        ctx: &GpuContext,
+        id: i64,
+        (size_a, size_b): ((u32, u32), (u32, u32)),
+        sampler: SamplerKey,
+    ) -> PingPong {
         let (na, nb) = composite_names(id);
         let root = self.scene_scope();
         PingPong {
-            a: self.create(ctx, root, &na, size, sampler),
-            b: self.create(ctx, root, &nb, size, sampler),
+            a: self.create(ctx, root, &na, size_a, sampler),
+            b: self.create(ctx, root, &nb, size_b, sampler),
         }
     }
 }

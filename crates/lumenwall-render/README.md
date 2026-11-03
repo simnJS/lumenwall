@@ -91,7 +91,7 @@ Reuse the same `ShaderId` for identical translated shaders (same source + combos
 
 ### Images (`lumenwall-scene` → `ImageSpec` + `ImagePass`)
 
-- `RenderTargetPool::create_scene_targets` before the objects, `create_composites(id, tronc(S), sampler)` per image, `new_scope` + `create(name, scaled_size(S, scale))` for effect `fbos`, `create_bloom_targets` / `create_bloom_composites` after the objects. Names are resolved with `resolve(scope, name)` at load time.
+- `RenderTargetPool::create_scene_targets` before the objects, `create_composites(id, tronc(S), sampler)` per image (or `create_composites_sized` with a size for A and one for B), `new_scope` + `create(name, scaled_size(S, scale))` for effect `fbos`, `create_bloom_targets` / `create_bloom_composites` after the objects. Names are resolved with `resolve(scope, name)` at load time.
 - `ImageSpec`: `S`, parsed `Alignment`, main texture and its `(storage, content)` sizes, `animated`, `passthrough`, `fullscreen`, composites, scene target, `final_to_scene`.
 - `ImagePass` per pass, in order (material passes, effect passes, tint and `colorBlendMode` passes): shader, the material's **own** blend (see below), cull, resolved `target`, slot sources (`SlotSource::Texture` = highest-priority ready candidate, `SlotSource::Previous` = `bind previous`).
 - `add_image` writes static uniforms (`g_ModelMatrix`, copy/identity MVPs, identity engine matrices, texel sizes, ones for alpha/colour/brightness, `g_TextureNResolution` from the bound textures) and appends the draws in render order. Other uniforms: `SceneBuilder::uniform(pass, name)` once → `UniformSlot`, then `shadow_mut().write_floats / write_ints / write_mat4` (at load or any frame).
@@ -172,7 +172,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 ## Deviations
 
 - `blending: normal` disables the blend unit instead of computing `src·1 + dst·0`: identical bits on UNORM targets, cheaper.
-- `_rt_shadowAtlas` is allocated 1×1 (never filled, samples as transparent black; only its resolution vector differs). The bloom image's B composite is 1×1 (never written, unreachable by name).
+- `_rt_shadowAtlas` is allocated 1×1 (never filled, samples as transparent black; only its resolution vector differs). The bloom image's B composite is 1×1 (never written, unreachable by name). lumenwall-engine does the same for every image composite its chain never writes and no material names (`create_composites_sized`): it would only hold zeros.
 - Targets of `tronc(S/scale) = 0` are clamped to 1 pixel (zero-sized textures are invalid; crash fix).
 - `ClampToBorder` render targets need `ADDRESS_MODE_CLAMP_TO_BORDER`; without it they clamp to edge (warning). The output `border` clamp mode is emulated in the composition shader, identical result.
 - Bloom: the internal WGSL shaders are approximations of the WE asset materials (same passes, inputs, sizes and constants); parity requires the translated WE shaders through `BloomShaders`, which `lumenwall-engine` provides (its output matches a CPU evaluation of the WE shaders to ±2/255 on the reference wallpaper).
@@ -184,7 +184,6 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 - Text objects (R8 glyph texture, `text_matrix` is ready). Video wallpapers use `yuv` + `video_device` (lumenwall-video). Web wallpapers (lumenwall-engine `web`) import the browser's DMA-BUFs through wgpu-hal into a `RenderTargetPool` target (`resize` + `Compositor::rebind` on size changes).
 - Added for the integration (`lumenwall-engine`): vertex streams for particles (`SceneBuilder::add_stream`, `Geometry::Stream`, `RenderScene::write_stream`, inputs matched by name through `ShaderInterface::vertex_input_names`, never bundled) and puppet meshes (`add_image_with_puppet`, `PuppetGeometry`). A `PuppetGeometry` with one `SkinVertex` per vertex becomes `Geometry::Skinned`: slot 0 and the skin buffer (slot 1) are both bound at the mesh's first vertex, indices drawn with base 0, still bundled. `ImageHandle::puppet_vertices` / `puppet_passes` give the caller the vertex range (CPU skinning through `set_vertices`) and the passes whose `g_Bones` it writes (GPU skinning). The engine supplies the palette; nothing here knows about bones.
 - Real WE shaders: depends on `lumenwall-shader` emitting the binding contract above.
-- Lazy allocation of image B composites when the chain never writes B (memory).
 - Load-op `Clear` instead of `Load` for passes that fully overwrite their target (saves bandwidth on tiled/integrated GPUs; needs a coverage guarantee to stay parity-safe).
 
 ## Tests
