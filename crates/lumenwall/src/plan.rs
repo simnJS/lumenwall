@@ -22,9 +22,10 @@ use crate::cli::{CliArgs, CliMode, TargetSettings};
 use crate::config::Config;
 use crate::services::{PlaylistCatalog, WallpaperResolver};
 use crate::settings::{
-    Clamp, DEFAULT_AUTOMUTE, DEFAULT_FPS, DEFAULT_SCREENSHOT_DELAY, DEFAULT_VOLUME, HwDecode,
-    Layer, RenderDebug, Scaling, ScreenshotFormat, WallpaperRef, WallpaperSource, WindowGeometry,
-    clamp_volume, validate_fps, validate_screenshot_delay,
+    Clamp, DEFAULT_AUTOMUTE, DEFAULT_FPS, DEFAULT_GPU_RELEASE_DELAY, DEFAULT_SCREENSHOT_DELAY,
+    DEFAULT_VOLUME, HwDecode, Layer, RenderDebug, Scaling, ScreenshotFormat, WallpaperRef,
+    WallpaperSource, WindowGeometry, clamp_volume, validate_fps, validate_gpu_release_delay,
+    validate_screenshot_delay,
 };
 
 /// Identifies a render target: the window (`default` viewport), an output, or a span group.
@@ -167,6 +168,8 @@ pub struct ExecutionPlan {
     pub hwdec: HwDecode,
     pub audio: AudioPlan,
     pub fullscreen_pause: FullscreenPausePlan,
+    /// Seconds every output stays paused before the GPU is released; 0 = never.
+    pub gpu_release_delay: u32,
     pub input: InputPlan,
     pub particles: bool,
     pub assets_dir: Option<PathBuf>,
@@ -556,6 +559,10 @@ pub fn build_with(
                 || file.fullscreen_pause_only_active.unwrap_or(false),
             ignore_app_ids,
         },
+        gpu_release_delay: file
+            .gpu_release_delay
+            .and_then(|d| validate_gpu_release_delay(d).ok())
+            .unwrap_or(DEFAULT_GPU_RELEASE_DELAY),
         input: InputPlan {
             mouse: !s.disable_mouse && file.mouse.unwrap_or(true),
             parallax: !s.disable_parallax && file.parallax.unwrap_or(true),
@@ -587,6 +594,7 @@ pub enum PlanChange {
     HwDecode,
     Audio,
     FullscreenPause,
+    GpuRelease,
     Input,
     Particles,
     AssetsDir,
@@ -630,6 +638,10 @@ pub fn diff(old: &ExecutionPlan, new: &ExecutionPlan) -> Vec<PlanChange> {
         (
             old.fullscreen_pause != new.fullscreen_pause,
             PlanChange::FullscreenPause,
+        ),
+        (
+            old.gpu_release_delay != new.gpu_release_delay,
+            PlanChange::GpuRelease,
         ),
         (old.input != new.input, PlanChange::Input),
         (old.particles != new.particles, PlanChange::Particles),

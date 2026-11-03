@@ -92,6 +92,9 @@ pub use lumenwall_platform::Layer;
 /// `--hwdec`: video decoder choice (spec 07 §14.1).
 pub use lumenwall_video::HwDecode;
 
+/// Default [`EnginePlan::gpu_release`]: 5 minutes.
+pub const DEFAULT_GPU_RELEASE: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Everything the engine needs for a run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnginePlan {
@@ -104,6 +107,9 @@ pub struct EnginePlan {
     /// Video decoding (`--hwdec`).
     pub hwdec: HwDecode,
     pub pause: PausePlan,
+    /// Once every output has been paused this long, the GPU device, the surfaces' swap chains
+    /// and every GPU resource are released, and rebuilt when an output resumes. `None`: never.
+    pub gpu_release: Option<std::time::Duration>,
     pub mouse: bool,
     pub parallax: bool,
     pub particles: bool,
@@ -128,6 +134,7 @@ impl Default for EnginePlan {
             audio: AudioPlan::default(),
             hwdec: HwDecode::Auto,
             pause: PausePlan::default(),
+            gpu_release: Some(DEFAULT_GPU_RELEASE),
             mouse: true,
             parallax: true,
             particles: true,

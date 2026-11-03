@@ -9,7 +9,10 @@
 //! are reused, new ones are read and built before anything is released (a failure leaves the
 //! engine unchanged), outputs are rebound, and the surfaces are reopened only when the layout,
 //! layer or pause policy demands it. Without any wallpaper the engine closes its surfaces and
-//! GPU device and sleeps until a plan brings one back.
+//! GPU device and sleeps until a plan brings one back. After a long pause it releases the GPU
+//! and keeps only the surfaces (see [`release`]).
+
+mod release;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -181,6 +184,10 @@ struct Running {
     stats: Stats,
     screenshot: Option<(PathBuf, u32)>,
     rendered: u64,
+    /// Since when no output needed the GPU ([`release::gpu_unused`]).
+    idle_since: Option<Instant>,
+    /// Start of a GPU restore, until its first frame is presented.
+    restored_at: Option<Instant>,
 }
 
 /// An output the platform reported, kept across layout changes.
@@ -207,6 +214,8 @@ pub struct Engine {
     states: Vec<TargetState>,
     waker: EngineWaker,
     running: Option<Running>,
+    /// Surfaces, audio and clock kept while the GPU is released after a long pause.
+    dormant: Option<release::Dormant>,
     monitor: EngineMonitor,
     known: Vec<Known>,
     user_paused: bool,
@@ -224,6 +233,7 @@ impl Engine {
             states: Vec::new(),
             waker: EngineWaker::default(),
             running: None,
+            dormant: None,
             monitor: EngineMonitor::default(),
             known: Vec::new(),
             user_paused: false,
@@ -393,7 +403,6 @@ impl Engine {
             }
         }
         let stats_enabled = std::env::var_os("LUMENWALL_STATS").is_some_and(|v| v != "0");
-        let instance = GpuInstance::new(None);
         let first = early
             .iter()
             .find_map(|e| match e {
@@ -401,29 +410,7 @@ impl Engine {
                 _ => None,
             })
             .ok_or("no output")?;
-        let built = (|| {
-            let first_surface = create_wgpu_surface(&instance, surfaces.as_ref(), first)?;
-            let ctx = instance
-                .into_context(
-                    &ContextOptions {
-                        pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
-                        // Timestamp queries are allowed so that statistics can time the GPU
-                        // on demand; nothing is measured until someone asks.
-                        profiling: true,
-                        // Video wallpapers: decode queues on the render device (zero copy).
-                        video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
-                            && self
-                                .wallpapers
-                                .iter()
-                                .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
-                        ..ContextOptions::default()
-                    },
-                    &[&first_surface],
-                )
-                .map_err(|e| e.to_string())?;
-            Ok::<_, String>((first_surface, ctx))
-        })();
-        let (first_surface, ctx) = match built {
+        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first) {
             Ok(b) => b,
             Err(e) => {
                 self.waker.detach();
@@ -471,6 +458,8 @@ impl Engine {
             },
             screenshot: self.plan.screenshot.clone(),
             rendered: 0,
+            idle_since: None,
+            restored_at: None,
         };
         let mut first_surface = Some((first, first_surface));
         for ev in early {
@@ -484,6 +473,45 @@ impl Engine {
         }
         self.publish(Some(&running), Change::Outputs);
         Ok(running)
+    }
+
+    /// Instance, device and the GPU surface of `first`, whose adapter must present it.
+    fn open_gpu(
+        &self,
+        surfaces: &dyn WallpaperSurface,
+        first: OutputId,
+    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
+        let t0 = Instant::now();
+        let instance = GpuInstance::new(None);
+        let t1 = Instant::now();
+        let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
+        let t2 = Instant::now();
+        let ctx = instance
+            .into_context(
+                &ContextOptions {
+                    pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
+                    // Timestamp queries are allowed so that statistics can time the GPU on
+                    // demand; nothing is measured until someone asks.
+                    profiling: true,
+                    // Video wallpapers: decode queues on the render device (zero copy).
+                    video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
+                        && self
+                            .wallpapers
+                            .iter()
+                            .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
+                    ..ContextOptions::default()
+                },
+                &[&first_surface],
+            )
+            .map_err(|e| e.to_string())?;
+        let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+        tracing::debug!(
+            "GPU opened: instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
+            ms(t0, t1),
+            ms(t1, t2),
+            ms(t2, Instant::now())
+        );
+        Ok((first_surface, ctx))
     }
 
     /// Ends scripts and releases the surfaces and the GPU device.
@@ -515,15 +543,45 @@ impl Engine {
         control: &mut dyn FnMut() -> Option<EngineControl>,
     ) -> Result<Stopped, String> {
         let mut running = self.running.take();
+        // A failed GPU restore is retried after the next platform event, not in a loop.
+        let mut restore_failed = false;
         let result = loop {
             if let Some(stop) = self.drain_control(&mut running, control) {
                 break Ok(stop);
+            }
+            if running.is_none() && self.dormant.is_some() {
+                // GPU released: platform events only, until an output shows a wallpaper.
+                if !restore_failed && self.dormant_should_wake() {
+                    match self.restore_gpu() {
+                        Ok(r) => running = Some(r),
+                        Err(e) => {
+                            tracing::error!("GPU not restored: {e}");
+                            restore_failed = true;
+                        }
+                    }
+                    continue;
+                }
+                match self.wait_dormant() {
+                    Ok(Some(stop)) => break Ok(stop),
+                    Ok(None) => restore_failed = false,
+                    Err(e) => break Err(e),
+                }
+                continue;
+            }
+            // After the controls and the previous events: a pause starts the idle clock here,
+            // and the wait below ends when the release is due.
+            if self.check_release(&mut running) {
+                continue;
             }
             let Some(r) = running.as_mut() else {
                 self.waker.idle_wait();
                 continue;
             };
-            let wait = video_deadline(r).map_or(Wait::Block, Wait::Until);
+            let deadline = match (video_deadline(r), self.release_deadline(r)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let wait = deadline.map_or(Wait::Block, Wait::Until);
             if let Err(e) = r.surfaces.wait(wait) {
                 break Err(e.to_string());
             }
@@ -548,6 +606,7 @@ impl Engine {
         if let Some(r) = running.take() {
             self.close_running(r);
         }
+        self.close_dormant();
         result
     }
 
@@ -563,11 +622,25 @@ impl Engine {
                 EngineControl::SetFps(fps) => self.set_fps(running.as_mut(), fps),
                 EngineControl::SetProperties(props) => {
                     self.plan.properties = props;
+                    // A visible output held by a user pause previews the change: the released
+                    // GPU comes back for that frame (and goes again after the delay).
+                    if self.dormant_visible()
+                        && let Err(e) = self.wake_for_control(running)
+                    {
+                        tracing::error!("GPU not restored: {e}");
+                    }
                     self.apply_properties(running.as_mut());
                 }
                 EngineControl::SetPaused(paused) => self.set_user_paused(running.as_mut(), paused),
                 EngineControl::Reload { plan, done } => {
-                    let result = self.reload(running, *plan);
+                    // A released GPU comes back first (a plan without wallpaper closes all).
+                    let woken = if plan.targets.is_empty() {
+                        self.close_dormant();
+                        Ok(())
+                    } else {
+                        self.wake_for_control(running)
+                    };
+                    let result = woken.and_then(|()| self.reload(running, *plan));
                     if let Err(e) = &result {
                         tracing::error!("new settings not applied: {e}");
                     }
@@ -590,6 +663,8 @@ impl Engine {
             for w in r.webs.iter_mut().flatten() {
                 w.set_fps(self.plan.fps);
             }
+        } else if let Some(d) = &mut self.dormant {
+            d.surfaces_mut().set_max_fps(self.plan.fps);
         }
     }
 
@@ -642,6 +717,10 @@ impl Engine {
         self.user_paused = paused;
         tracing::info!("{}", if paused { "paused" } else { "resumed" });
         let Some(r) = r else {
+            if let Some(d) = &mut self.dormant {
+                // Released GPU: the restore resumes the sound if an output shows again.
+                d.audio().set_paused(paused);
+            }
             self.publish(None, Change::State);
             return;
         };
@@ -1005,12 +1084,22 @@ impl Engine {
                 .sum();
             self.monitor.set_gpu_memory(r.ctx.memory().bytes() + video);
         }
+        // A released GPU is still an active engine: its surfaces stay, paused.
+        let active = r.is_some() || self.dormant.is_some();
         let outputs = self
             .known
             .iter()
             .map(|k| {
-                let shown = k.live && r.is_some();
+                let shown = k.live && active;
                 let out = r.and_then(|r| r.outputs.iter().find(|o| o.name == k.info.name));
+                let paused = match (out, &self.dormant) {
+                    (Some(o), _) => o.paused.then(|| pause_cause(o.reasons)),
+                    (None, Some(d)) if k.live => {
+                        let reasons = d.surfaces().pause_reasons(k.info.id);
+                        (!reasons.is_empty()).then(|| pause_cause(reasons))
+                    }
+                    _ => None,
+                };
                 OutputReport {
                     name: k.info.name.clone(),
                     description: k.info.description.clone(),
@@ -1024,7 +1113,7 @@ impl Engine {
                     } else {
                         None
                     },
-                    paused: out.filter(|o| o.paused).map(|o| pause_cause(o.reasons)),
+                    paused,
                 }
             })
             .collect();
@@ -1046,7 +1135,7 @@ impl Engine {
             .collect();
         self.monitor.publish(
             EngineReport {
-                active: r.is_some(),
+                active,
                 user_paused: self.user_paused,
                 outputs,
                 targets,
@@ -1057,22 +1146,7 @@ impl Engine {
 
     /// Records (or refreshes) a platform output in the known list.
     fn note_output(&mut self, r: &Running, id: OutputId) {
-        let Some(info) = r.surfaces.output(id) else {
-            return;
-        };
-        match self.known.iter_mut().find(|k| k.info.name == info.name) {
-            Some(k) => {
-                k.info = info.clone();
-                k.live = true;
-            }
-            None => {
-                self.known.push(Known {
-                    info: info.clone(),
-                    live: true,
-                });
-                self.known.sort_by(|a, b| a.info.name.cmp(&b.info.name));
-            }
-        }
+        note_known(&mut self.known, r.surfaces.output(id));
     }
 
     fn handle_event(
@@ -1298,6 +1372,19 @@ impl Engine {
     }
 
     fn render(&mut self, r: &mut Running, id: OutputId) {
+        let rendered = r.rendered;
+        self.render_output(r, id);
+        if r.rendered != rendered
+            && let Some(t) = r.restored_at.take()
+        {
+            tracing::info!(
+                "first frame {:.0} ms after the GPU restore began",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    fn render_output(&mut self, r: &mut Running, id: OutputId) {
         let Some(oi) = r.outputs.iter().position(|o| o.id == id) else {
             return;
         };
@@ -1446,6 +1533,26 @@ impl Engine {
         }
         if let Some((cpu, gpu)) = measured {
             self.sample_frame(r, oi, cpu, gpu);
+        }
+    }
+}
+
+/// Records (or refreshes) a platform output in the known list.
+fn note_known(known: &mut Vec<Known>, info: Option<&OutputInfo>) {
+    let Some(info) = info else {
+        return;
+    };
+    match known.iter_mut().find(|k| k.info.name == info.name) {
+        Some(k) => {
+            k.info = info.clone();
+            k.live = true;
+        }
+        None => {
+            known.push(Known {
+                info: info.clone(),
+                live: true,
+            });
+            known.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         }
     }
 }
@@ -1820,7 +1927,11 @@ fn render_web(r: &mut Running, oi: usize, start: Instant) -> Option<(Duration, O
     }
     let o = &mut r.outputs[oi];
     let mut measured = None;
-    if o.dirty || o.shown_serial != w.serial {
+    if w.serial == 0 {
+        // Nothing painted yet (start, or restore after a GPU release): the window keeps its
+        // current image until the page's first frame instead of showing an empty one.
+        o.dirty = false;
+    } else if o.dirty || o.shown_serial != w.serial {
         match o.surface.acquire(&r.ctx) {
             Ok(Some(frame)) => {
                 let mut enc =

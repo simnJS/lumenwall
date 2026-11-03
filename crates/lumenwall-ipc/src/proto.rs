@@ -399,6 +399,11 @@ pub struct Settings {
     pub volume: f32,
     /// Start the daemon with the desktop session.
     pub autostart: bool,
+    /// Seconds every output stays paused before the daemon releases the GPU (device, video
+    /// memory, driver threads); 0 = never. `None` in a request leaves it unchanged; a daemon
+    /// without the setting leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_release_delay_s: Option<u32>,
 }
 
 impl Default for Settings {
@@ -413,6 +418,7 @@ impl Default for Settings {
             muted: false,
             volume: 0.5,
             autostart: false,
+            gpu_release_delay_s: None,
         }
     }
 }

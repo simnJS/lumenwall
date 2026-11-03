@@ -236,6 +236,9 @@ pub const DEFAULT_VOLUME: u8 = 64;
 pub const REFERENCE_DEFAULT_VOLUME: u8 = 15;
 /// Default of `automute`: off. Deviation: the reference mutes by default; see the README.
 pub const DEFAULT_AUTOMUTE: bool = false;
+/// Default of `gpu-release-delay`: seconds every output stays paused before the GPU is
+/// released (Lumenwall extension; 0 = never).
+pub const DEFAULT_GPU_RELEASE_DELAY: u32 = 300;
 
 /// Clamps a parsed volume to `[0, 128]` (spec 07 §2.2).
 pub fn clamp_volume(volume: i64) -> u8 {
@@ -269,6 +272,14 @@ pub fn validate_screenshot_delay(delay: i64) -> Result<u32, String> {
         return Err("the screenshot delay must be zero or positive".into());
     }
     Ok(delay.min(i64::from(MAX_SCREENSHOT_DELAY)) as u32)
+}
+
+/// Validates `gpu-release-delay` (seconds, 0 = never).
+pub fn validate_gpu_release_delay(secs: i64) -> Result<u32, String> {
+    if secs < 0 {
+        return Err("the delay must be zero (never) or a number of seconds".into());
+    }
+    u32::try_from(secs).map_err(|_| "the delay is too large".to_string())
 }
 
 /// Rendering debug switches (spec 07 §20).

@@ -139,6 +139,8 @@ fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
             only_active: plan.fullscreen_pause.only_active,
             ignore_app_ids: plan.fullscreen_pause.ignore_app_ids.clone(),
         },
+        gpu_release: (plan.gpu_release_delay > 0)
+            .then(|| std::time::Duration::from_secs(u64::from(plan.gpu_release_delay))),
         mouse: plan.input.mouse,
         parallax: plan.input.parallax,
         particles: plan.particles,
