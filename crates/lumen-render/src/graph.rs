@@ -19,7 +19,10 @@ use crate::error::{RenderError, Result};
 use crate::math::{VERTEX_SIZE, Vertex};
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
 use crate::targets::{RT_FORMAT, RenderTargetPool, RtId};
-use crate::texture::{GpuTexture, SamplerKey, TextureUpload, default_texture, upload_texture};
+use crate::texture::{
+    GpuTexture, SamplerKey, TextureUpload, VolumeUpload, default_texture, default_volume,
+    upload_texture, upload_volume,
+};
 
 /// Handle of a compiled shader in a scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -346,6 +349,14 @@ impl<'c> SceneBuilder<'c> {
         Ok(TextureId(self.textures.len() as u32 - 1))
     }
 
+    /// Upload a volume (3D) texture, bound like any texture: slots the shader declares as
+    /// `texture_3d` sample it, 2D slots read the default texture instead.
+    pub fn add_volume_texture(&mut self, upload: &VolumeUpload<'_>) -> Result<TextureId> {
+        let t = upload_volume(self.ctx, upload)?;
+        self.textures.push(t);
+        Ok(TextureId(self.textures.len() as u32 - 1))
+    }
+
     #[must_use]
     pub fn texture(&self, id: TextureId) -> Option<&GpuTexture> {
         self.textures.get(id.0 as usize)
@@ -532,8 +543,15 @@ impl<'c> SceneBuilder<'c> {
         });
         ctx.note_resources(2);
 
+        // The 1×1×1 volume exists only when a shader has a `texture_3d` slot.
+        let default_volume = self
+            .shaders
+            .iter()
+            .any(|s| s.interface().volume_slots != 0)
+            .then(|| default_volume(ctx));
         let mut scene = RenderScene {
             default_texture: default_texture(ctx),
+            default_volume,
             targets: std::mem::take(&mut self.targets),
             textures: std::mem::take(&mut self.textures),
             interfaces: self.shaders.iter().map(|s| s.interface().clone()).collect(),
@@ -713,6 +731,8 @@ pub struct RenderScene {
     targets: RenderTargetPool,
     textures: Vec<GpuTexture>,
     default_texture: GpuTexture,
+    /// Bound to `texture_3d` slots without a volume texture (only when a shader has one).
+    default_volume: Option<GpuTexture>,
     interfaces: Vec<ShaderInterface>,
     dynbuf: DynamicBuffer,
     index_buffer: Option<wgpu::Buffer>,
@@ -720,7 +740,8 @@ pub struct RenderScene {
     default_attrs: wgpu::Buffer,
     uniform_layout: wgpu::BindGroupLayout,
     uniform_bg: wgpu::BindGroup,
-    texture_layouts: HashMap<u8, (wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
+    /// By `(slots, volume slots)` of the shader interface.
+    texture_layouts: HashMap<(u8, u8), (wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
     passes: Vec<CompiledPass>,
     ops: Vec<Op>,
     segments: Vec<Segment>,
@@ -743,10 +764,11 @@ impl RenderScene {
     fn texture_layout(
         &mut self,
         ctx: &GpuContext,
-        slots: u8,
+        key: (u8, u8),
     ) -> &(wgpu::BindGroupLayout, wgpu::PipelineLayout) {
+        let (slots, volumes) = key;
         let uniform_layout = &self.uniform_layout;
-        self.texture_layouts.entry(slots).or_insert_with(|| {
+        self.texture_layouts.entry(key).or_insert_with(|| {
             let mut entries = Vec::new();
             for n in 0..MAX_SLOTS as u32 {
                 if slots & (1 << n) == 0 {
@@ -757,7 +779,11 @@ impl RenderScene {
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: if volumes & (1 << n) == 0 {
+                            wgpu::TextureViewDimension::D2
+                        } else {
+                            wgpu::TextureViewDimension::D3
+                        },
                         multisampled: false,
                     },
                     count: None,
@@ -915,7 +941,7 @@ impl RenderScene {
             p.clone()
         } else {
             let unclipped = ctx.caps().unclipped_depth;
-            let (_, pl) = self.texture_layout(ctx, iface.slots);
+            let (_, pl) = self.texture_layout(ctx, (iface.slots, iface.volume_slots));
             let pl = pl.clone();
             let scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
             let p = ctx
@@ -1046,20 +1072,40 @@ impl RenderScene {
         };
     }
 
+    /// View and sampler of a slot. A `volume` slot (`texture_3d`) only takes a volume
+    /// texture, a 2D slot only 2D textures and targets; anything else reads the default
+    /// (0, 0, 0, 1) of the right dimension.
     fn view_and_sampler(
         &self,
         ctx: &GpuContext,
         b: Option<SlotBinding>,
         hazard: Option<(RtId, RtId)>,
+        volume: bool,
     ) -> (&wgpu::TextureView, wgpu::Sampler) {
         let b = b.unwrap_or(SlotBinding {
             texture: TextureRef::Default,
             sampler: None,
         });
+        if volume {
+            let tex = match b.texture {
+                TextureRef::Texture(t) => self
+                    .textures
+                    .get(t.0 as usize)
+                    .filter(|tex| tex.is_volume()),
+                _ => None,
+            };
+            let tex = match (tex, &self.default_volume) {
+                (Some(tex), _) | (None, Some(tex)) => tex,
+                // Unreachable: the default volume exists when a shader has a volume slot.
+                (None, None) => &self.default_texture,
+            };
+            let key = b.sampler.unwrap_or(tex.sampler_key());
+            return (tex.view(), ctx.volume_sampler(key));
+        }
         let (view, key) = match b.texture {
             TextureRef::Texture(t) => match self.textures.get(t.0 as usize) {
-                Some(tex) => (tex.view(), tex.sampler_key()),
-                None => (
+                Some(tex) if !tex.is_volume() => (tex.view(), tex.sampler_key()),
+                _ => (
                     self.default_texture.view(),
                     self.default_texture.sampler_key(),
                 ),
@@ -1104,8 +1150,9 @@ impl RenderScene {
         }
 
         for i in 0..self.passes.len() {
-            let slots_mask = self.interfaces[self.passes[i].shader.0 as usize].slots;
-            self.texture_layout(ctx, slots_mask);
+            let iface = &self.interfaces[self.passes[i].shader.0 as usize];
+            let (slots_mask, volume_mask) = (iface.slots, iface.volume_slots);
+            self.texture_layout(ctx, (slots_mask, volume_mask));
             let pass = &self.passes[i];
             let hazard = pass.hazard_scratch.map(|s| (pass.desc.target, s));
             let variants: Vec<Option<TextureRef>> = if pass.desc.slot0_variants.is_empty() {
@@ -1113,7 +1160,7 @@ impl RenderScene {
             } else {
                 pass.desc.slot0_variants.iter().copied().map(Some).collect()
             };
-            let (bgl, _) = &self.texture_layouts[&slots_mask];
+            let (bgl, _) = &self.texture_layouts[&(slots_mask, volume_mask)];
             let mut groups = Vec::with_capacity(variants.len());
             for v in variants {
                 let mut views = Vec::new();
@@ -1130,7 +1177,8 @@ impl RenderScene {
                             sampler: b.and_then(|b| b.sampler),
                         });
                     }
-                    views.push((n as u32, self.view_and_sampler(ctx, b, hazard)));
+                    let volume = volume_mask & (1 << n) != 0;
+                    views.push((n as u32, self.view_and_sampler(ctx, b, hazard, volume)));
                 }
                 let mut entries = Vec::with_capacity(views.len() * 2);
                 for (n, (view, sampler)) in &views {

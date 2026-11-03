@@ -53,4 +53,4 @@ pub use math::{UvRange, Vertex};
 pub use shader::ShaderDesc;
 pub use surface::OutputSurface;
 pub use targets::{RenderTargetPool, RtId};
-pub use texture::{MipLevel, TexFlags, TexelFormat, TextureUpload};
+pub use texture::{MipLevel, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload};

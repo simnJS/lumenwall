@@ -51,7 +51,9 @@ pub enum PassKind {
 pub struct PassDesc {
     /// What is drawn.
     pub kind: PassKind,
-    /// Blending after the first/last swap of §12.6.
+    /// The material pass's **own** blending (`normal` for copy passes). The first/last swap of
+    /// §12.6 (spec 04 §9.8) is not applied here: the renderer's chain planner applies it once,
+    /// to the passes it actually draws (see the README, "Blending contract").
     pub blending: Blending,
     /// Override.
     pub over: OverrideRef,
@@ -136,7 +138,7 @@ fn is_render_target(name: &str) -> bool {
 impl Project {
     /// Builds the render passes of an image with the current setting values (§12.2, §12.6).
     /// Effect visibility is read now: call again when a bound property changes to toggle
-    /// effects live.
+    /// effects live. Blending modes are the materials' own (no first/last swap).
     pub fn image_passes(&self, obj: ObjectIndex) -> Option<ImagePasses> {
         let scene = self.scene.as_ref()?;
         let image = scene.objects.get(obj.index())?.as_image()?;
@@ -271,13 +273,8 @@ impl Project {
                 constants: vec![],
             });
         }
-        if out.passes.len() > 1 {
-            let first = out.passes[0].blending;
-            out.passes[0].blending = Blending::Normal;
-            if let Some(last) = out.passes.last_mut() {
-                last.blending = first;
-            }
-        }
+        // The first/last blending swap of §12.6 belongs to the renderer (spec 04 §9.8), which
+        // applies it to the final chain (after debug filters, with the puppet rule).
         out.draws = !(model.passthrough && !any_visible);
         Some(out)
     }

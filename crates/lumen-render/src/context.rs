@@ -214,7 +214,8 @@ pub struct GpuContext {
     pipeline_cache_path: Option<PathBuf>,
     memory: MemoryCounter,
     resources: AtomicU64,
-    samplers: Mutex<HashMap<SamplerKey, wgpu::Sampler>>,
+    /// Shared samplers by `(key, volume)`.
+    samplers: Mutex<HashMap<(SamplerKey, bool), wgpu::Sampler>>,
 }
 
 impl GpuContext {
@@ -389,11 +390,22 @@ impl GpuContext {
     /// Shared sampler for a key (created once).
     #[must_use]
     pub fn sampler(&self, key: SamplerKey) -> wgpu::Sampler {
+        self.sampler_for(key, false)
+    }
+
+    /// Shared sampler of a volume (3D) texture: like [`Self::sampler`] without anisotropy,
+    /// which has no meaning for volumes (spec 01 A.1).
+    #[must_use]
+    pub fn volume_sampler(&self, key: SamplerKey) -> wgpu::Sampler {
+        self.sampler_for(key, true)
+    }
+
+    fn sampler_for(&self, key: SamplerKey, volume: bool) -> wgpu::Sampler {
         let mut map = self
             .samplers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(s) = map.get(&key) {
+        if let Some(s) = map.get(&(key, volume)) {
             return s.clone();
         }
         let address = match key.address {
@@ -422,12 +434,12 @@ impl GpuContext {
             lod_max_clamp: if key.mipmaps { 32.0 } else { 0.0 },
             compare: None,
             // Anisotropy 8 only when every filter is linear (wgpu rule, spec 04 §24.7).
-            anisotropy_clamp: if key.nearest { 1 } else { 8 },
+            anisotropy_clamp: if key.nearest || volume { 1 } else { 8 },
             border_color: (address == wgpu::AddressMode::ClampToBorder)
                 .then_some(wgpu::SamplerBorderColor::TransparentBlack),
         });
         self.note_resources(1);
-        map.insert(key, sampler.clone());
+        map.insert((key, volume), sampler.clone());
         sampler
     }
 

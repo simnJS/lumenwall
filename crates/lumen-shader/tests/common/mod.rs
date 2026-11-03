@@ -80,7 +80,7 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
                     matches!(
                         m.types[g.ty].inner,
                         TypeInner::Image {
-                            dim: ImageDimension::D2,
+                            dim: ImageDimension::D2 | ImageDimension::D3,
                             arrayed: false,
                             class: ImageClass::Sampled { kind: naga::ScalarKind::Float, multi: false }
                         }

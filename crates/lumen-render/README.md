@@ -7,6 +7,7 @@ GPU foundation of the Lumen scene renderer (wgpu 30): device and outputs, textur
 - `specs/04-rendu-scene-effets.md` (main source: §0–§17, §21, §24, open questions Q1–Q25).
 - `specs/03-shaders.md` §11–§13 (render states, engine uniforms, matrices), §3.4 (vertex attributes), §2.4 (`commands/copy`).
 - `specs/05-particules.md` §12 (vertex formats, used for sizing only; particles are not wired yet).
+- `specs/01-formats-binaires.md` amendment A.1 (volume textures, as prepared by `lumen-formats`).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`, `docs/TESTING.md` (reference wallpaper used only to size the benchmark: pass count and target scales).
 - Public documentation and API of `wgpu` 30.0.1 and `naga` 30.0.1.
 
@@ -18,17 +19,17 @@ No upstream code, fork or snippet was consulted.
 |---|---|
 | `context` | `GpuInstance` (surfaces from raw-window-handle 0.6) → `GpuContext`: Vulkan on Linux, Vulkan then DX12 on Windows (adapter ranking `adapter_rank`), one device for every output, `MemoryHints::MemoryUsage`, optional features `TEXTURE_COMPRESSION_BC`, `ADDRESS_MODE_CLAMP_TO_BORDER`, `DEPTH_CLIP_CONTROL`, `PIPELINE_CACHE`, timestamps. On-disk `PipelineCache` (Vulkan), shared sampler cache, GPU memory and resource counters, uncaptured GPU errors logged instead of aborting. |
 | `surface` | `OutputSurface`: `PresentMode::Fifo`, opaque alpha, never sRGB (non-sRGB view of an sRGB-only swap chain), occlusion/timeout → skip the frame, lost/outdated → reconfigure. |
-| `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. |
+| `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; `VolumeUpload` (3D, uncompressed, all mips) → volume `GpuTexture` (`is_volume`, `depth`); sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. |
 | `targets` | `RenderTargetPool`: RGBA8 UNORM targets, scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. |
 | `blend` | WE `blending` → `wgpu::BlendState` (§14), RGB-only write mask, culling, `FrontFace::Cw` (verified by test). |
-| `shader` | Pass binding contract, reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation, GPU module creation under an error scope. |
+| `shader` | Pass binding contract (2D and 3D texture slots), reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation, GPU module creation under an error scope. |
 | `dynbuf` | One buffer for frame globals + every pass uniform block (dynamic offsets) + image vertices; CPU shadow with change detection and one `write_buffer` per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. |
-| `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind groups per slot-0 variant (animated textures), automatic hazard copies, consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. |
-| `chain` | §9.8/§10/§11.6: destinations, inputs, `previous`, A/B ping-pong, geometry case, matrix kind, blend transfer, RGB-only last pass (pure, unit tested with the spec examples). |
+| `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind group layouts per (slots, volume slots), bind groups per slot-0 variant (animated textures), automatic hazard copies, consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. |
+| `chain` | §9.8/§10/§11.6: destinations, inputs, `previous`, A/B ping-pong, geometry case, matrix kind, blend transfer (the only place it is applied, see "Blending contract"), RGB-only last pass (pure, unit tested with the spec examples). |
 | `image` | `add_image` (chain plan → passes, geometry, static matrices) and `ImageHandle::update` (rect, alignment, rotation pivot, `M_ecran` with parallax, scene geometry) every frame. |
 | `math` | `ortho`, `lookAt`, camera `P = ortho · T(eye)`, auto projection, pointer, parallax, hierarchy, alignment, rect, rotation, `M_copie`, `uMax/vMax`, quads in the spec vertex order, text matrix. |
 | `compose` | `uv_range` (stretch/fill/fit/default with the exact truncations), span (`bounding_box`, `span_range`), vertical flip, `Compositor`/`OutputComposer` (one fullscreen triangle, blending off, alpha 1, clamp/border/repeat). |
-| `bloom` | §17 as five generic passes; `BloomShaders` takes the translated WE asset shaders, `BloomShaders::internal()` provides WGSL stand-ins. |
+| `bloom` | §17 as five generic passes; `BloomShaders` takes the translated WE asset shaders (what `lumen-engine` feeds), `BloomShaders::internal()` provides WGSL stand-ins (tests, installs without the WE shaders). |
 | `headless` | `HeadlessOutput`, `read_texture_rgba8`, `write_png`. |
 | `stats` | `GpuTimer` (timestamps, 3-slot async readback, never stalls), `FrameStats`, `allocator_bytes`. |
 
@@ -57,13 +58,15 @@ let mut output = OutputSurface::new(&ctx, surface, (w, h))?;
 
 `levels` = every mip of one image (level `i` = `max(1, size0 >> i)`, tightly packed rows), `content_size` = declared ("real") size, `flags` = TEX flags. BC level 0 must be a multiple of 4. An animated texture is one upload per atlas image, bound with `ImagePass::slot0_variants`; `RenderScene::set_variant` selects the frame (§16.3). The CPU copy can be dropped right after `SceneBuilder::add_texture`.
 
+Volume textures (`.tex` flag 0x40, spec 01 A.1, e.g. the 32×32×32 colour LUTs of `materials/lut`): `SceneBuilder::add_volume_texture(&VolumeUpload)`, levels of `width × height × depth` (slices one after the other, uncompressed; `lumen-formats` decodes BC volumes). They are referenced by `TextureId` like any texture: a slot the shader declares as `texture_3d` samples the volume, a 2D slot given a volume reads the 2D default instead (and a 3D slot given a 2D texture or a target reads a 1×1×1 `(0, 0, 0, 1)` volume, created only when a shader has a 3D slot). Volume samplers use the texture's flags without anisotropy (`GpuContext::volume_sampler`).
+
 ### Shaders (`lumen-shader` → `ShaderDesc`)
 
 `ShaderDesc { label, module: naga::Module, vertex_entry, fragment_entry, upstream_clip_space: true }`. The module must follow this binding contract:
 
 - `@group(0) @binding(0)`: optional `var<uniform>` struct holding the pass uniforms. Member names are the WE names (`g_ModelViewProjectionMatrix`, `g_Time`, material constants…); offsets and types are read from the naga struct. Bound with a dynamic offset.
 - `@group(0) @binding(1)`: optional frame block, layout `dynbuf::FRAME_GLOBALS_WGSL` (`g_Time`, `g_Daytime`, pointers, texel sizes, audio spectra packed in `vec4` arrays). Using it instead of pass-block copies saves CPU work; both are supported.
-- `@group(1) @binding(2N)`: `texture_2d<f32>` of slot N (`g_TextureN`, N < 8); `@binding(2N+1)`: its filtering sampler.
+- `@group(1) @binding(2N)`: `texture_2d<f32>` of slot N (`g_TextureN`, N < 8), or `texture_3d<f32>` for a volume slot (`sampler3D`, colour LUTs); `@binding(2N+1)`: its filtering sampler.
 - Vertex inputs by argument/member name: `a_Position` (3 floats) and `a_TexCoord` (2 floats) are fed; any other `@location` receives (0, 0, 0, 1).
 - The vertex output is in the **GLSL/upstream clip convention**; lumen-render appends the wgpu correction. Do not apply it in the translator.
 - One fragment output at `@location(0)`.
@@ -74,8 +77,12 @@ Reuse the same `ShaderId` for identical translated shaders (same source + combos
 
 - `RenderTargetPool::create_scene_targets` before the objects, `create_composites(id, tronc(S), sampler)` per image, `new_scope` + `create(name, scaled_size(S, scale))` for effect `fbos`, `create_bloom_targets` / `create_bloom_composites` after the objects. Names are resolved with `resolve(scope, name)` at load time.
 - `ImageSpec`: `S`, parsed `Alignment`, main texture and its `(storage, content)` sizes, `animated`, `passthrough`, `fullscreen`, composites, scene target, `final_to_scene`.
-- `ImagePass` per pass, in order (material passes, effect passes, tint and `colorBlendMode` passes): shader, material blend, cull, resolved `target`, slot sources (`SlotSource::Texture` = highest-priority ready candidate, `SlotSource::Previous` = `bind previous`).
+- `ImagePass` per pass, in order (material passes, effect passes, tint and `colorBlendMode` passes): shader, the material's **own** blend (see below), cull, resolved `target`, slot sources (`SlotSource::Texture` = highest-priority ready candidate, `SlotSource::Previous` = `bind previous`).
 - `add_image` writes static uniforms (`g_ModelMatrix`, copy/identity MVPs, identity engine matrices, texel sizes, ones for alpha/colour/brightness, `g_TextureNResolution` from the bound textures) and appends the draws in render order. Other uniforms: `SceneBuilder::uniform(pass, name)` once → `UniformSlot`, then `shadow_mut().write_floats / write_ints / write_mat4` (at load or any frame).
+
+### Blending contract (spec 04 §9.8, spec 02 §12.6)
+
+The transfer "when the chain has more than one pass, the last pass takes the first pass's blending and the first pass becomes `normal`" (then the puppet rule: first pass `translucent`) is applied **once, by lumen-render**: `chain::plan_image_chain`, used by `add_image` / `add_image_with_puppet` and the bloom. It runs on the chain actually drawn (after debug filters, after effect visibility changes). Callers pass each material pass's own `blending` in `ImagePass::blend` and never apply the transfer themselves; `lumen-scene` hands over the own modes (`PassDesc::blending`). `crates/lumen-engine/tests/blend_contract.rs` fails if the transfer is applied zero or two times.
 
 ### Frame loop
 
@@ -151,7 +158,8 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 - `_rt_shadowAtlas` is allocated 1×1 (never filled, samples as transparent black; only its resolution vector differs). The bloom image's B composite is 1×1 (never written, unreachable by name).
 - Targets of `tronc(S/scale) = 0` are clamped to 1 pixel (zero-sized textures are invalid; crash fix).
 - `ClampToBorder` render targets need `ADDRESS_MODE_CLAMP_TO_BORDER`; without it they clamp to edge (warning). The output `border` clamp mode is emulated in the composition shader, identical result.
-- Bloom: the internal WGSL shaders are approximations of the WE asset materials (same passes, inputs, sizes and constants); parity requires the translated WE shaders through `BloomShaders`.
+- Bloom: the internal WGSL shaders are approximations of the WE asset materials (same passes, inputs, sizes and constants); parity requires the translated WE shaders through `BloomShaders`, which `lumen-engine` provides (its output matches a CPU evaluation of the WE shaders to ±2/255 on the reference wallpaper).
+- Volume textures in `texture_3d` slots (spec 03 §8.1 binds 2D textures only; the reference fails on volume `.tex` files, spec 01 A.1): colour LUTs grade the image instead of the object failing (policies 2 and 4).
 - Accumulating graphs: when the caller skips static frames, rendering continues 120 frames after the last change instead of indefinitely (convergence of 8-bit accumulation).
 
 ## Not done yet (wired later)
@@ -164,7 +172,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 
 ## Tests
 
-- Unit (44): matrices, camera, pointer, parallax laws, hierarchy, alignment, rect, rotation sense, uv padding, quad order/winding, scaling modes with the spec examples and truncation effects, span, blend table, culling/masks, chain plans (spec examples), RT sizes and scopes, uniform layouts and patches, sampler flags, upload validation, surface formats, adapter ranking, naga reflection and clip fix.
-- GPU (`tests/gpu.rs`, 14, headless): orientation end to end, padding window, culling with `FrontFace::Cw`, translucent blend + RGB mask, A/B ping-pong, read/write hazard copy, unfed attributes, animated variants, bloom chain, composition modes, BC1 upload, visibility toggle, pipeline cache on disk, steady state (no new GPU objects, `needs_redraw`, `g_Time`, GPU timer). They pass on the RTX 4080, RADV and llvmpipe (`LUMEN_TEST_SOFTWARE=1`); without any adapter they print "skipped".
+- Unit (46): matrices, camera, pointer, parallax laws, hierarchy, alignment, rect, rotation sense, uv padding, quad order/winding, scaling modes with the spec examples and truncation effects, span, blend table, culling/masks, chain plans (spec examples), RT sizes and scopes, uniform layouts and patches, sampler flags, upload validation, surface formats, adapter ranking, naga reflection (2D/3D slots) and clip fix, volume upload validation.
+- GPU (`tests/gpu.rs`, 15, headless): orientation end to end, padding window, culling with `FrontFace::Cw`, translucent blend + RGB mask, A/B ping-pong, read/write hazard copy, unfed attributes, animated variants, bloom chain, volume LUT slot (3D texture grading, volume in a 2D slot), composition modes, BC1 upload, visibility toggle, pipeline cache on disk, steady state (no new GPU objects, `needs_redraw`, `g_Time`, GPU timer). They pass on the RTX 4080, RADV and llvmpipe (`LUMEN_TEST_SOFTWARE=1`); without any adapter they print "skipped".
 - `tests/alloc.rs`: zero allocation in the per-frame update path.
 - Examples: `headless` (writes a PNG), `chain_bench` (reference-shaped chain timing).

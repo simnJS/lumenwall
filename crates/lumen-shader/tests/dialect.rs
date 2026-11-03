@@ -330,6 +330,35 @@ fn samplers_passed_to_functions() {
 }
 
 #[test]
+fn volume_samplers_bind_3d_textures() {
+    // Colour LUT lookup: `sampler3D` slot read with `texSample3D` and a colour as coordinate.
+    let o = ok(
+        "uniform sampler3D g_Texture1;\nuniform float g_LutParams;",
+        "    vec3 graded = texSample3D(g_Texture1, color.rgb);\n    color.rgb = mix(color.rgb, graded, g_LutParams);",
+    );
+    assert!(o.fs.contains("uniform texture3D lumen_tex1;"), "{}", o.fs);
+    assert!(o.fs.contains("texture(sampler3D(lumen_tex1, lumen_smp1), "), "{}", o.fs);
+    let t = o.shader.reflection().texture("g_Texture1").unwrap();
+    assert_eq!((t.unit, t.texture_binding, t.sampler_binding), (1, 2, 3));
+    let m = &o.shader.program.module;
+    let dims: Vec<(u32, naga::ImageDimension)> = m
+        .global_variables
+        .iter()
+        .filter_map(|(_, g)| match (g.binding.as_ref(), &m.types[g.ty].inner) {
+            (Some(b), naga::TypeInner::Image { dim, .. }) => Some((b.binding, *dim)),
+            _ => None,
+        })
+        .collect();
+    assert!(dims.contains(&(0, naga::ImageDimension::D2)) && dims.contains(&(2, naga::ImageDimension::D3)), "{dims:?}");
+    // One binding per unit: a 2D and a 3D sampler cannot share unit 0.
+    let e = fails("uniform sampler3D lutTex;", "    color.rgb += texSample3D(lutTex, color.rgb).rgb;");
+    assert!(e.contains("different texture types"), "{e}");
+    // Other dimensions stay unsupported.
+    let e = fails("uniform samplerCube g_Texture2;", "    color += texture(g_Texture2, vec3(v_TexCoord, 1.0));");
+    assert!(e.contains("only 2D and 3D textures"), "{e}");
+}
+
+#[test]
 fn reserved_glsl450_names_are_renamed() {
     let o = ok("float filter(float sample) { return sample * 2.0; }", "    float sample = 1.0;\n    float texture2D = 2.0;\n    color.r = filter(sample) + texture2D;");
     assert!(o.fs.contains("sample_l"), "{}", o.fs);

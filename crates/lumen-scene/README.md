@@ -20,7 +20,11 @@ Data model for `project.json`, user properties, `scene.json`, objects, models, m
 
 ## Coverage
 
-§0 conversions and vector/colour strings, §1.1 sequence, §2 project, §3 properties (10 kinds, updates from text, `--set-property`, listing §15.1), §4 values, §5 settings/conditions/scripts, §6 scene/camera/general, §7.1–7.8 and 7.10 objects, §8–§11, §12 pass matching, 6-level textures, combos, constants, compatibility passes, blend swap, §13 creation/render order, transforms, visibility, §14 bloom, §15.2 dump.
+§0 conversions and vector/colour strings, §1.1 sequence, §2 project, §3 properties (10 kinds, updates from text, `--set-property`, listing §15.1), §4 values, §5 settings/conditions/scripts, §6 scene/camera/general, §7.1–7.8 and 7.10 objects, §8–§11, §12 pass matching, 6-level textures, combos, constants, compatibility passes (the blend swap is the renderer's, see below), §13 creation/render order, transforms, visibility, §14 bloom, §15.2 dump.
+
+## Blending contract
+
+`ImagePasses` / `PassDesc::blending` carry each pass's **own** blending: the material pass's `blending` (copy passes `normal`). The last bullet of §12.6 (spec 04 §9.8: with more than one pass, the last pass takes the first pass's blending and the first pass becomes `normal`) is **not** applied here. `lumen-render`'s chain planner applies it exactly once, to the chain it actually draws (after the integration's debug filters, together with the puppet rule). Applying it in both crates made every multi-pass image opaque. `crates/lumen-engine/tests/blend_contract.rs` fails if the transfer happens zero or two times.
 
 Not here: §7.9 particle files (`lumen-particles`), Annexes A/B (`lumen-formats` / `lumen-assets`; the tests contain a minimal test-only PKG reader).
 

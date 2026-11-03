@@ -9,8 +9,9 @@
 //!   bound with a dynamic offset.
 //! * `@group(0) @binding(1)`: optional frame globals block, layout
 //!   [`crate::dynbuf::FRAME_GLOBALS_WGSL`].
-//! * `@group(1) @binding(2N)`: `texture_2d<f32>` of slot N (`g_TextureN`, N < 8);
-//!   `@group(1) @binding(2N + 1)`: its filtering `sampler`.
+//! * `@group(1) @binding(2N)`: `texture_2d<f32>` of slot N (`g_TextureN`, N < 8), or
+//!   `texture_3d<f32>` for a volume slot (colour LUTs); `@group(1) @binding(2N + 1)`: its
+//!   filtering `sampler`.
 //! * Vertex inputs by name: `a_Position` (3 floats) and `a_TexCoord` (2 floats)
 //!   are fed; any other `@location` input receives (0, 0, 0, 1).
 //! * The vertex position is in the **upstream** clip convention (GLSL); the
@@ -67,6 +68,8 @@ pub struct ShaderInterface {
     pub uses_frame_globals: bool,
     /// Bit N set = slot N sampled.
     pub slots: u8,
+    /// Bit N set = slot N is a `texture_3d` (volume texture); subset of `slots`.
+    pub volume_slots: u8,
     pub vertex_inputs: Vec<VertexInput>,
     /// `(location, name)` of every vertex input, for vertex streams that feed
     /// attributes by name (particles, see `graph::StreamLayout`).
@@ -91,6 +94,12 @@ impl ShaderInterface {
     #[must_use]
     pub fn uses_slot(&self, slot: usize) -> bool {
         slot < MAX_SLOTS && self.slots & (1 << slot) != 0
+    }
+
+    /// Slot N is sampled as a volume (`texture_3d`).
+    #[must_use]
+    pub fn is_volume_slot(&self, slot: usize) -> bool {
+        slot < MAX_SLOTS && self.volume_slots & (1 << slot) != 0
     }
 }
 
@@ -182,18 +191,40 @@ pub fn reflect(module: &Module, vertex_entry: &str, label: &str) -> Result<Shade
                 out.uses_frame_globals = true;
             }
             (1, b, AddressSpace::Handle) if (b as usize) < 2 * MAX_SLOTS => {
-                let is_texture = matches!(module.types[gv.ty].inner, TypeInner::Image { .. });
+                let dim = match module.types[gv.ty].inner {
+                    TypeInner::Image {
+                        dim,
+                        arrayed: false,
+                        class:
+                            naga::ImageClass::Sampled {
+                                kind: naga::ScalarKind::Float,
+                                multi: false,
+                            },
+                    } => Some(dim),
+                    _ => None,
+                };
                 let is_sampler = matches!(
                     module.types[gv.ty].inner,
                     TypeInner::Sampler { comparison: false }
                 );
-                if (b % 2 == 0 && !is_texture) || (b % 2 == 1 && !is_sampler) {
+                let ok = if b % 2 == 0 {
+                    matches!(
+                        dim,
+                        Some(naga::ImageDimension::D2 | naga::ImageDimension::D3)
+                    )
+                } else {
+                    is_sampler
+                };
+                if !ok {
                     return Err(shader_err(
                         label,
                         format!("@group(1) @binding({b}) has the wrong resource type"),
                     ));
                 }
                 out.slots |= 1 << (b / 2);
+                if dim == Some(naga::ImageDimension::D3) {
+                    out.volume_slots |= 1 << (b / 2);
+                }
             }
             (g, b, _) => {
                 return Err(shader_err(
@@ -656,5 +687,26 @@ struct VOut { @location(0) uv: vec2<f32>, @builtin(position) pos: vec4<f32> }
 @vertex fn v() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }";
         let m = naga::front::wgsl::parse_str(src).unwrap();
         assert!(reflect(&m, "v", "t").is_err(), "odd bindings are samplers");
+        let src = r"@group(1) @binding(2) var t: texture_cube<f32>;
+@vertex fn v() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }";
+        let m = naga::front::wgsl::parse_str(src).unwrap();
+        assert!(reflect(&m, "v", "t").is_err(), "2D and 3D textures only");
+    }
+
+    #[test]
+    fn volume_slots_are_reflected() {
+        let src = r"@group(1) @binding(0) var t0: texture_2d<f32>;
+@group(1) @binding(1) var s0: sampler;
+@group(1) @binding(2) var t1: texture_3d<f32>;
+@group(1) @binding(3) var s1: sampler;
+@vertex fn v() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+@fragment fn f() -> @location(0) vec4<f32> {
+    let c = textureSample(t0, s0, vec2<f32>(0.5));
+    return textureSample(t1, s1, c.rgb);
+}";
+        let m = naga::front::wgsl::parse_str(src).unwrap();
+        let i = reflect(&m, "v", "t").unwrap();
+        assert_eq!((i.slots, i.volume_slots), (0b11, 0b10));
+        assert!(i.is_volume_slot(1) && !i.is_volume_slot(0));
     }
 }

@@ -94,8 +94,8 @@ pub struct UniformBlock {
     pub members: Vec<UniformMember>,
 }
 
-/// A sampled slot: `texture_2d<f32>` at `texture_binding`, filtering sampler
-/// at `sampler_binding`, both in [`TEXTURE_GROUP`].
+/// A sampled slot: `texture_2d<f32>` (`texture_3d<f32>` for a `sampler3D`) at
+/// `texture_binding`, filtering sampler at `sampler_binding`, both in [`TEXTURE_GROUP`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextureBinding {
     /// Texture unit / slot (spec 03 §8.1): N for `g_Texture0`…`g_Texture7`;

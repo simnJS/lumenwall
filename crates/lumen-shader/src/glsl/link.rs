@@ -321,9 +321,10 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
                     }
                     None => {
                         samp_index.insert(name.clone(), layout.samplers.len());
-                        if gi.ty != Type::Sampler(SamplerKind::S2D) {
+                        // 3D slots: colour LUTs (volume textures, flag 0x40 of spec 01 A.1).
+                        if !matches!(gi.ty, Type::Sampler(SamplerKind::S2D | SamplerKind::S3D)) {
                             return Err(LinkError(format!(
-                                "sampler '{name}': only 2D textures are bound (spec 03 §8.1)"
+                                "sampler '{name}': only 2D and 3D textures are bound (spec 03 §8.1)"
                             )));
                         }
                         let mut s = SamplerSlot {
@@ -387,6 +388,15 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
     }
     order_uniforms(&mut layout.uniforms);
     layout.samplers.sort_by_key(|s| s.unit);
+    // One texture binding per unit: samplers sharing a unit must have the same dimension.
+    for w in layout.samplers.windows(2) {
+        if w[0].unit == w[1].unit && w[0].ty != w[1].ty {
+            return Err(LinkError(format!(
+                "samplers '{}' and '{}' read unit {} with different texture types",
+                w[0].name, w[1].name, w[0].unit
+            )));
+        }
+    }
     Ok(layout)
 }
 
