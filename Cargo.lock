@@ -2823,6 +2823,7 @@ dependencies = [
  "calloop 0.14.5",
  "calloop-wayland-source 0.4.1",
  "raw-window-handle",
+ "rustix 1.1.6",
  "smithay-client-toolkit 0.21.1",
  "thiserror 2.0.21",
  "tracing",

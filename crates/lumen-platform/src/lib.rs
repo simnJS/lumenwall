@@ -8,7 +8,8 @@
 //!
 //! The loop is fully blocking: [`WallpaperSurface::wait`] sleeps in the OS (calloop on Linux,
 //! `MsgWaitForMultipleObjectsEx` on Windows) until an event arrives or a requested frame becomes due. Paused or
-//! idle outputs arm no timer, so a covered desktop costs no wake-up at all.
+//! idle outputs arm no timer, so a covered desktop costs no wake-up at all (on XWayland, a desktop hidden by a
+//! native Wayland window costs one probe per second, see `starvation`).
 //!
 //! ```no_run
 //! use lumen_platform::{Config, Event, Wait};
@@ -52,6 +53,8 @@ pub mod win_logic;
 
 mod error;
 mod sched;
+#[cfg(any(test, all(target_os = "linux", feature = "x11")))]
+mod starvation;
 mod types;
 
 #[cfg(all(target_os = "linux", any(feature = "wayland", feature = "x11")))]

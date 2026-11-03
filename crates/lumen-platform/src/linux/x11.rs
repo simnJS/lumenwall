@@ -7,6 +7,9 @@
 //! * fullscreen: the root's children are cached from `SubstructureNotify` events and matched against the CRTC
 //!   rectangles (reference rule), plus `_NET_ACTIVE_WINDOW` / `_NET_WM_STATE_FULLSCREEN` from `PropertyNotify`;
 //! * covered: `VisibilityNotify` (only meaningful without a compositor);
+//! * hidden on XWayland (native Wayland window on top, lock screen, output powered off): the compositor stops
+//!   sending frame callbacks to our surfaces, which XWayland's Present completions reveal (see
+//!   [`crate::starvation`]); one probe per second while hidden, nothing while running;
 //! * locked / screen off: MIT-SCREEN-SAVER notify and DPMS 1.2 `InfoNotify`;
 //! * pointer: one `QueryPointer` per rendered frame, pipelined (the reply is read one frame later, by which
 //!   time it has long arrived), never while paused. Clicks come from `ButtonPress` on our windows, i.e. only
@@ -24,9 +27,11 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle, XcbDisplayHandle, Xcb
 use x11rb::connection::{Connection as _, RequestConnection as _, SequenceNumber};
 use x11rb::cookie::Cookie;
 use x11rb::properties::{WmHints, WmSizeHints, WmSizeHintsSpecification};
+use x11rb::protocol::present::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-    EventMask, MapState, PropMode, QueryPointerReply, Visibility, Window, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
+    CreateWindowAux, EventMask, MapState, PropMode, QueryPointerReply, Visibility, Window,
+    WindowClass,
 };
 use x11rb::protocol::{Event as XEvent, dpms, randr, screensaver};
 use x11rb::wrapper::ConnectionExt as _;
@@ -36,6 +41,7 @@ use super::loop_error;
 use crate::fullscreen::{RootChild, RootChildren, Verdict, apply_scope};
 use crate::geometry::{Rect, best_overlap};
 use crate::sched::{FrameSlot, min_deadline, pause_transition, timeout_until};
+use crate::starvation::{self, Change, Starvation};
 use crate::types::EventQueue;
 use crate::{
     BackendKind, Config, Event, OutputId, OutputInfo, PauseReasons, PlatformError, PointerButton,
@@ -108,7 +114,12 @@ struct X11Output {
     rect: Rect,
     slot: FrameSlot,
     paused: PauseReasons,
+    /// Pause reasons other than XWayland starvation (starvation is only tracked while these are empty).
+    others: PauseReasons,
     obscured: bool,
+    /// 1×1 pixmap of the XWayland probe (`NONE` when the probe is off).
+    probe_pixmap: u32,
+    starve: Starvation,
     last_pointer: Option<(i32, i32)>,
     info: OutputInfo,
 }
@@ -118,6 +129,7 @@ pub(crate) struct X11State {
     screen: usize,
     root: Window,
     root_visual: u32,
+    root_depth: u8,
     root_size: (u16, u16),
     atoms: Atoms,
     has_randr: bool,
@@ -141,6 +153,9 @@ pub(crate) struct X11State {
     active_dirty: bool,
     pause_dirty: bool,
     lost: Option<String>,
+    /// GC used by the XWayland probes; `Some` when hidden windows are detected through Present.
+    probe_gc: Option<u32>,
+    probe_serial: u32,
     rects: Vec<Rect>,
     scratch: Vec<PauseReasons>,
     candidates: Vec<u32>,
@@ -162,9 +177,10 @@ impl X11Backend {
         let (conn, screen) = XCBConnection::connect(None).map_err(conn_err)?;
         let conn = Arc::new(conn);
         let s = &conn.setup().roots[screen];
-        let (root, root_visual, root_size) = (
+        let (root, root_visual, root_depth, root_size) = (
             s.root,
             s.root_visual,
+            s.root_depth,
             (s.width_in_pixels, s.height_in_pixels),
         );
         let atoms = Atoms::new(&*conn)
@@ -221,12 +237,18 @@ impl X11Backend {
 
         let mut children = RootChildren::default();
         children.reset(snapshot_root_children(&conn, root));
+        let probe_gc = if config.pause_when_covered {
+            setup_xwayland_probe(&conn, root)
+        } else {
+            None
+        };
 
         let mut state = X11State {
             conn: conn.clone(),
             screen,
             root,
             root_visual,
+            root_depth,
             root_size,
             atoms,
             has_randr,
@@ -249,6 +271,8 @@ impl X11Backend {
             active_dirty: true,
             pause_dirty: true,
             lost: None,
+            probe_gc,
+            probe_serial: PROBE_SERIAL_BASE,
             rects: Vec::new(),
             scratch: Vec::new(),
             candidates: Vec::new(),
@@ -283,6 +307,46 @@ impl X11Backend {
 
 fn has_extension(conn: &XCBConnection, name: &'static str) -> bool {
     conn.extension_information(name).ok().flatten().is_some()
+}
+
+/// Probe serials live in the upper half of the range, far from the renderer's own Present serials.
+const PROBE_SERIAL_BASE: u32 = 0x8000_0000;
+
+/// On XWayland, prepares the detection of windows the compositor stopped painting (see
+/// [`crate::starvation`]): returns the GC used by the probes, or `None` elsewhere or without Present.
+fn setup_xwayland_probe(conn: &XCBConnection, root: Window) -> Option<u32> {
+    let xwayland = has_extension(conn, "XWAYLAND")
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    if !xwayland {
+        return None;
+    }
+    let present_ok = has_extension(conn, present::X11_EXTENSION_NAME)
+        && present::query_version(conn, 1, 0)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some();
+    if !present_ok {
+        tracing::warn!(
+            "XWayland without the Present extension: native Wayland windows covering the desktop will not \
+             pause the wallpaper"
+        );
+        return None;
+    }
+    let gc = conn.generate_id().ok()?;
+    // No GraphicsExpose/NoExpose event for the probe copies.
+    conn.create_gc(gc, root, &CreateGCAux::new().graphics_exposures(0))
+        .ok()?;
+    tracing::info!(
+        "XWayland: outputs hidden by Wayland windows, the lock screen or a powered-off monitor pause through \
+         Present frame timing"
+    );
+    Some(gc)
+}
+
+/// `CLOCK_MONOTONIC` in microseconds, the clock of Present USTs.
+fn monotonic_us() -> u64 {
+    let ts = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    (ts.tv_sec.max(0) as u64) * 1_000_000 + (ts.tv_nsec.max(0) as u64) / 1_000
 }
 
 /// Startup snapshot of the root's children (pipelined requests).
@@ -525,6 +589,94 @@ impl X11State {
         Ok(window)
     }
 
+    /// Selects Present completions on a new window and creates its probe pixmap (XWayland only).
+    fn attach_probe(&self, window: Window) -> u32 {
+        if self.probe_gc.is_none() {
+            return x11rb::NONE;
+        }
+        let conn = &*self.conn;
+        let (Ok(eid), Ok(pixmap)) = (conn.generate_id(), conn.generate_id()) else {
+            return x11rb::NONE;
+        };
+        // The selection is destroyed with the window.
+        let ok = conn
+            .present_select_input(eid, window, present::EventMask::COMPLETE_NOTIFY)
+            .is_ok()
+            && conn
+                .create_pixmap(self.root_depth, pixmap, window, 1, 1)
+                .is_ok();
+        if ok { pixmap } else { x11rb::NONE }
+    }
+
+    /// Sends a probe: the window's own top-left pixel presented back onto it (no visible change), in copy
+    /// mode, at the next frame. XWayland answers at the compositor's next frame callback for the window, or
+    /// after its one-second fallback timer when the compositor does not paint it.
+    fn send_probe(&mut self, i: usize, gc: u32, now: Instant) {
+        let serial = self.probe_serial;
+        self.probe_serial = self.probe_serial.wrapping_add(1) | PROBE_SERIAL_BASE;
+        let o = &mut self.outputs[i];
+        let conn = &*self.conn;
+        let _ = conn.copy_area(o.window, o.probe_pixmap, gc, 0, 0, 0, 0, 1, 1);
+        let _ = conn.present_pixmap(
+            o.window,
+            o.probe_pixmap,
+            serial,
+            x11rb::NONE,
+            x11rb::NONE,
+            0,
+            0,
+            x11rb::NONE,
+            x11rb::NONE,
+            x11rb::NONE,
+            u32::from(present::Option::COPY),
+            0,
+            0,
+            0,
+            &[],
+        );
+        o.starve.probe_sent(serial, now);
+    }
+
+    /// Starvation deadlines and probes, after the pending events were read (XWayland only).
+    fn service_starvation(&mut self, now: Instant) {
+        let Some(gc) = self.probe_gc else { return };
+        for i in 0..self.outputs.len() {
+            let o = &mut self.outputs[i];
+            if o.probe_pixmap == x11rb::NONE {
+                continue;
+            }
+            if !o.others.is_empty() {
+                // Paused anyway: no probe, and the last present may legitimately stay unanswered.
+                o.starve.suspend();
+                continue;
+            }
+            let change = o.starve.check(now);
+            if o.starve.wants_probe() {
+                self.send_probe(i, gc, now);
+            }
+            self.starvation_changed(i, change);
+        }
+    }
+
+    fn starvation_changed(&mut self, i: usize, change: Change) {
+        let name = &self.outputs[i].info.name;
+        match change {
+            Change::None => return,
+            Change::Hidden => {
+                tracing::debug!(output = %name, "XWayland: the compositor stopped painting this output")
+            }
+            Change::Visible => {
+                tracing::debug!(output = %name, "XWayland: the compositor paints this output again")
+            }
+            Change::GaveUp => tracing::warn!(
+                output = %name,
+                "XWayland never answers the Present probes of this output: Wayland windows covering it will not \
+                 pause it"
+            ),
+        }
+        self.pause_dirty = true;
+    }
+
     /// Diffs RandR outputs with our windows (startup and hot-plug).
     fn refresh_outputs(&mut self, initial: bool) -> Result<(), PlatformError> {
         self.outputs_dirty = false;
@@ -542,6 +694,9 @@ impl X11State {
             }
             let o = self.outputs.remove(i);
             tracing::info!(output = %o.info.name, "output removed");
+            if o.probe_pixmap != x11rb::NONE {
+                let _ = self.conn.free_pixmap(o.probe_pixmap);
+            }
             self.exclude.retain(|w| *w != o.window);
             self.graveyard.push(o.window);
             self.queue.push(Event::OutputRemoved(o.id));
@@ -589,6 +744,7 @@ impl X11State {
                 m.rect.height
             );
             let window = self.create_window(m.rect)?;
+            let probe_pixmap = self.attach_probe(window);
             let id = OutputId(self.next_id);
             self.next_id += 1;
             let size = (m.rect.width.max(1) as u32, m.rect.height.max(1) as u32);
@@ -601,7 +757,10 @@ impl X11State {
                 rect: m.rect,
                 slot,
                 paused: PauseReasons::NONE,
+                others: PauseReasons::NONE,
                 obscured: false,
+                probe_pixmap,
+                starve: Starvation::default(),
                 last_pointer: None,
                 info: OutputInfo {
                     id,
@@ -801,11 +960,17 @@ impl X11State {
             }
         }
         apply_scope(&mut self.scratch, self.config.fullscreen.scope);
-        for (o, new) in self.outputs.iter_mut().zip(self.scratch.iter()) {
-            if let Some(ev) = pause_transition(o.id, o.paused, *new) {
+        for (o, others) in self.outputs.iter_mut().zip(self.scratch.iter()) {
+            o.others = *others;
+            let mut new = *others;
+            // Only tracked when `pause_when_covered` (no probe otherwise).
+            if o.starve.hidden() {
+                new |= PauseReasons::OCCLUDED;
+            }
+            if let Some(ev) = pause_transition(o.id, o.paused, new) {
                 self.queue.push(ev);
             }
-            o.paused = *new;
+            o.paused = new;
         }
     }
 
@@ -941,6 +1106,14 @@ impl X11State {
             XEvent::RandrScreenChangeNotify(_) | XEvent::RandrNotify(_) => {
                 self.outputs_dirty = true
             }
+            XEvent::PresentCompleteNotify(e) if e.kind == present::CompleteKind::PIXMAP => {
+                if let Some(i) = self.outputs.iter().position(|o| o.window == e.window) {
+                    let at = starvation::event_time(Instant::now(), monotonic_us(), e.ust);
+                    let skipped = e.mode == present::CompleteMode::SKIP;
+                    let change = self.outputs[i].starve.completed(e.serial, skipped, at);
+                    self.starvation_changed(i, change);
+                }
+            }
             XEvent::DpmsInfoNotify(e) => {
                 self.display_off = e.state && e.power_level != dpms::DPMSMode::ON;
                 self.pause_dirty = true;
@@ -1007,7 +1180,14 @@ impl X11State {
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
         self.outputs
             .iter()
-            .filter_map(|o| o.slot.due(now, !o.paused.is_empty(), true))
+            .filter_map(|o| {
+                let starve = if o.others.is_empty() {
+                    o.starve.deadline()
+                } else {
+                    None
+                };
+                min_deadline(o.slot.due(now, !o.paused.is_empty(), true), starve)
+            })
             .min()
     }
 
@@ -1024,6 +1204,14 @@ impl X11State {
 
 impl Drop for X11State {
     fn drop(&mut self) {
+        for o in &self.outputs {
+            if o.probe_pixmap != x11rb::NONE {
+                let _ = self.conn.free_pixmap(o.probe_pixmap);
+            }
+        }
+        if let Some(gc) = self.probe_gc {
+            let _ = self.conn.free_gc(gc);
+        }
         self.graveyard.extend(self.outputs.iter().map(|o| o.window));
         self.bury();
     }
@@ -1056,7 +1244,13 @@ impl WallpaperSurface for X11Backend {
         }
     }
 
-    fn pre_present(&mut self, _id: OutputId) {}
+    fn pre_present(&mut self, id: OutputId) {
+        if self.state.probe_gc.is_some()
+            && let Some(o) = self.state.outputs.iter_mut().find(|o| o.id == id)
+        {
+            o.starve.presented(Instant::now());
+        }
+    }
 
     fn set_max_fps(&mut self, fps: u32) {
         self.state.max_fps = fps;
@@ -1084,6 +1278,7 @@ impl WallpaperSurface for X11Backend {
         let mut dispatched = false;
         loop {
             self.state.drain();
+            self.state.service_starvation(Instant::now());
             self.state.process_dirty();
             let now = Instant::now();
             self.state.tick(now);

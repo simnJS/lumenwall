@@ -7,8 +7,36 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "lumen-ui"
+path = "src/main.rs"
+
 [dependencies]
 lumen-ipc.workspace = true
+# Native Rust UI (no webview). wgpu with tiny-skia (CPU) as automatic fallback;
+# smol executor: one runtime thread instead of a thread pool per core.
+iced = { version = "0.14.0", default-features = false, features = ["wgpu-bare", "tiny-skia", "image-without-codecs", "svg", "smol", "x11", "wayland", "linux-theme-detection", "advanced", "crisp"] }
+# iced 0.14 is built on wgpu 27 (the engine uses wgpu 30: two copies until iced
+# moves on). Only Vulkan (and DX12 on Windows): no OpenGL driver gets loaded.
+wgpu = { version = "27.0", default-features = false, features = ["std", "wgsl", "vulkan"] }
+image.workspace = true
+lz4_flex = { workspace = true, features = ["alloc", "safe-encode"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs = "7.0.0"
+sys-locale = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Tray icon (StatusNotifierItem) and the file chooser portal, both over D-Bus.
+zbus = "5.19"
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "27.0", default-features = false, features = ["dx12"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging"] }
+tray-icon = { version = "0.26", default-features = false }
+rfd = { version = "0.16", default-features = false }
 
 [lints]
 workspace = true

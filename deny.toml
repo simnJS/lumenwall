@@ -22,10 +22,17 @@ unsound = "all"
 yanked = "deny"
 ignore = [
     # { id = "RUSTSEC-0000-0000", reason = "why it does not affect Lumen, and until when" },
+    # lumen-ui only, through iced 0.14 (latest release); revisit when iced moves on.
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.16 via iced_wgpu: keys are glyph cache keys that cannot trigger the panic; until iced updates" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained, iced text stack; until iced migrates" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained, iced text stack; until iced migrates" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant 5 via iced's Linux theme detection; until lumen-ui moves to zbus 6 and drops that feature" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names 5, same chain as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant 5, same chain as RUSTSEC-2026-0370" },
 ]
 
 # --- Licences --------------------------------------------------------------------------
-# Lumen is distributed as a closed binary: only permissive licences, plus MPL-2.0
+# Lumen ships as MIT OR Apache-2.0 binaries: only permissive licences, plus MPL-2.0
 # (file-level copyleft, fine as long as the MPL files are not modified).
 # No GPL-*, no AGPL-*. LGPL-* only through an exception below, never globally.
 #
