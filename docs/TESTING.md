@@ -32,4 +32,4 @@ An unpacked copy lives in `testdata/we/3018340632/` (gitignored) for tests that 
 
 ## Second target
 
-**3655057993 — "Boykisser, Winter theme [4K]"** (video, 76 MB MP4). Blocked until `lumen-video` can build (FFmpeg/VA-API dev libraries).
+**3655057993 — "Boykisser, Winter theme [4K]"** (video, 76 MB MP4: H.264 Main 3840×2160 60 fps, AAC). Used by the `lumen-video` GPU tests (`LUMEN_WE_WORKSHOP`), see `crates/lumen-video/README.md`.

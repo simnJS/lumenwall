@@ -40,6 +40,8 @@ pub struct HeadlessOptions {
     pub debug: DebugPlan,
     /// Use a CPU adapter (lavapipe).
     pub software: bool,
+    /// Video decoder choice (`--hwdec`).
+    pub hwdec: lumen_video::HwDecode,
 }
 
 impl Default for HeadlessOptions {
@@ -60,6 +62,7 @@ impl Default for HeadlessOptions {
             pointer: None,
             debug: DebugPlan::default(),
             software: false,
+            hwdec: lumen_video::HwDecode::Auto,
         }
     }
 }
@@ -88,14 +91,19 @@ pub fn render_headless(
     opts: &HeadlessOptions,
 ) -> Result<HeadlessReport, String> {
     let t0 = Instant::now();
+    let mut wp = Wallpaper::load(wallpaper, assets, &opts.properties)?;
+    wp.check_supported()?;
+    let video = wp.kind() == lumen_scene::ProjectKind::Video;
     let ctx = GpuContext::new_headless(&ContextOptions {
         prefer_software: opts.software,
         profiling: true,
+        video_decode: video && opts.hwdec == lumen_video::HwDecode::Auto,
         ..ContextOptions::default()
     })
     .map_err(|e| e.to_string())?;
-    let mut wp = Wallpaper::load(wallpaper, assets, &opts.properties)?;
-    wp.check_supported()?;
+    if video {
+        return crate::video::render_headless_video(&ctx, &wp, opts, t0);
+    }
     let mut shaders = default_provider();
     let mut rt = build_scene(
         &ctx,

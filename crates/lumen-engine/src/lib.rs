@@ -22,6 +22,7 @@ mod script;
 pub mod shaders;
 pub mod text;
 mod texture;
+mod video;
 mod wallpaper;
 
 use std::path::PathBuf;

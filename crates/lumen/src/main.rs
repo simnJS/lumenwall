@@ -11,7 +11,7 @@ use lumen::app::{self, Console, Services};
 use lumen::plan::{ExecutionPlan, OutputMode, PlanChange};
 use lumen::playlist::{PathStyle, RealFs, WeConfigCatalog};
 use lumen::services::{Control, Engine, ServiceError, StopReason, Waker, WallpaperResolver};
-use lumen::settings::{Clamp, Layer, Scaling, WallpaperSource};
+use lumen::settings::{Clamp, HwDecode, Layer, Scaling, WallpaperSource};
 use lumen_engine::{EngineControl, EnginePlan, Stopped};
 
 fn main() -> ExitCode {
@@ -119,6 +119,11 @@ fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
             volume: plan.audio.volume,
             automute: plan.audio.automute,
             processing: plan.audio.processing,
+        },
+        hwdec: match plan.hwdec {
+            HwDecode::Auto => lumen_engine::plan::HwDecode::Auto,
+            HwDecode::NvdecCopy => lumen_engine::plan::HwDecode::NvdecCopy,
+            HwDecode::No => lumen_engine::plan::HwDecode::No,
         },
         pause: lumen_engine::PausePlan {
             enabled: plan.fullscreen_pause.enabled,

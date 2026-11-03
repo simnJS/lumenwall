@@ -49,6 +49,7 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause, pointer, screenshots, statistics. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
 | `puppet` | Spec 08 §9 as pure CPU math (public, unit tested with the §10 vectors): `Rig` (bones, inverse bind matrices, rest poses, attachments, animations), `Layer` (clock, loop/mirror/single, ramps), `Puppet::advance` / `evaluate` (sampling, additive/replace blending, `W`, `K`), `write_palette` (`g_Bones`), `skin_vertices` (CPU path), `decompose_attachment`. A module rather than a crate: its state is per-scene runtime state advanced by this crate's frame loop, which will also host the SceneScript bone API; it depends only on `lumen-formats` data and `glam`. |
+| `video` | Video wallpapers: one `lumen-video` player per target (zero-copy Vulkan Video on the render device when possible), its sound track through the `lumen-audio` player (mapped file, loop, cubic volume, automute), pause with its outputs, frame deadlines for the loop (`Wait::Until`, decoder wake-up through the engine waker). |
 
 ### Frame loop
 
@@ -111,6 +112,10 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
   (identical output, measured ≤ 1 LSB on 24 pixels of 2 M). Children with `attachment` get an
   attachment node between them and their parent, recomposed every frame (§9.10); chains go
   through several puppets (control puppet → body bottom → body → hair).
+- Video wallpapers (`type: video`, `--hwdec`): decoding, cadence, loop, pause, sound and
+  measurements in `crates/lumen-video/README.md`. Engine side: the device gets video decode
+  queues when a video is loaded (`ContextOptions::video_decode`), a video target is rendered
+  by `render_video` (convert on a new frame, compose per output like a scene).
 - Particles (sprites, trails, ropes), sounds, audio spectrum, automute.
 - SceneScript (see below): property scripts, dynamic text layers, timers, events.
 - Window (`-w XxYxWxH`, or `LUMEN_WINDOWED=1` for the 640×480 window), desktop on every output
@@ -129,7 +134,7 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | Integer colour strings | `lumen-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumen matches the preview). To settle in spec 02 Q1. |
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
 | Puppet extras (spec 08 §11) | Bone physics, inverse kinematics, blend rules, blend shapes (`MORPHING`) and `SKINNING_ALPHA` have no known format: not implemented. Particles attached to bones are not wired (images only). The SceneScript bone and layer API waits for `lumen-script` integration. |
-| Video wallpapers and video textures | Load error / texture skipped (`lumen-video` not integrated). |
+| Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumen-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
 | Web wallpapers | Load error (`lumen-web` not integrated). |
 | `thisScene.createLayer` / `destroyLayer` / `sortLayer` | Neutral results (`undefined` / `false`): layers cannot be added to the render graph after load. Scripts that build layers in `init` (audio visualizers) fail there. |
 | Media events | No media source (MPRIS / Windows media session) yet: `SceneRuntime::media_changed` / `media_status` are the entry points. |
@@ -300,6 +305,7 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Window 1720×720, 30 fps cap | 30.0 fps, CPU 0.4–0.6 ms/frame, 1.8 % of one core, GPU 0.8–4.7 ms/frame (clock-dependent: the GPU stays at low clocks under this load; 0.5 ms headless at full clocks) |
 | Desktop on DP-4 + DP-5 (2560×1440 each, X11 via XWayland) | 30.0 fps, 1.6 % of one core, RSS 240 MiB (anonymous 49 MiB, the rest is file-backed driver libraries and the mapped `.pkg`), VRAM 268 MiB (nvidia-smi), 127 MiB tracked by lumen-render |
 | Fullscreen window on top | paused, 0.2 % of one core (sound thread) |
+| Video wallpaper 3655057993 (4K60 H.264, 30 fps cap), zero copy | 30.0 fps, 2.3–2.6 % of one core, RSS 325 MiB, VRAM 318 MiB; paused: 0.00 % |
 | Covered output | paused (`OCCLUDED`), no frame |
 | Puppets, 3463520581 at 1920×1080 (16 skeletons, 78 bones, 58 attached objects), 600 frames, particles off | puppet work (clocks, blending, matrices, palettes, attachment chains) **8.5–9 µs CPU per frame**; whole frame CPU 0.37 vs 0.34–0.41 ms and GPU 0.77 vs 0.77–0.79 ms before/after (noise); no allocation per frame (`tests/puppet_alloc.rs`); 5 `BONECOUNT` variants of `genericimage4` compiled once (shader cache) |
 

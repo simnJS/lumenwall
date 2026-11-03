@@ -76,12 +76,11 @@ include-build = true
 #   { crate = "libmpv2", allow = ["LGPL-2.1"] },
 #   { crate = "libmpv2-sys", allow = ["LGPL-2.1"] },
 exceptions = [
-    # FFmpeg bindings (planned in lumen-video). The Rust crates are WTFPL (permissive,
-    # public-domain-like, but not OSI-approved: confirm with legal before shipping).
-    # The FFmpeg C libraries themselves are LGPL-2.1+: they follow the LGPL rule above
-    # (dynamic loading of an LGPL build, enforced by the ffmpeg-sys-next ban below).
-    # cargo-deny warns "exception not encountered" until lumen-video depends on them.
-    { crate = "ffmpeg-next", allow = ["WTFPL"] },
+    # FFmpeg bindings of lumen-video (raw ffmpeg-sys-next only, no ffmpeg-next wrapper).
+    # The Rust crate is WTFPL (permissive, public-domain-like, but not OSI-approved:
+    # confirm with legal before shipping). The FFmpeg C libraries themselves are LGPL-2.1+:
+    # they follow the LGPL rule above (dynamic loading of an LGPL build, enforced by the
+    # ffmpeg-sys-next ban below and by lumen-video's build script).
     { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
 
     # PENDING DECISION (2026-11-03). The optional `cef` feature of lumen-web pulls
