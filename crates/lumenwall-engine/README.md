@@ -11,7 +11,9 @@ The `lumenwall` binary drives it; `examples/render_png.rs` renders wallpapers of
   through `lumenwall-scene`), `specs/05-particules.md` §12 (vertex formats, uniforms),
   `specs/06-scripting.md` (§1.2, §8, §9, §12, §14 through `lumenwall-script`),
   `specs/07-plateforme-audio-video-web.md` §1, §4, §9, §11–§13, §18,
-  `specs/08-puppet-squelette.md` §9–§11 (puppet animation, skinning, attachments).
+  `specs/08-puppet-squelette.md` §9–§11 (puppet animation, skinning, attachments),
+  `specs/09-scenes-3d.md` (3D models, sprites, perspective camera and paths, lights, depth,
+  planar reflection, particles and images of a perspective scene).
 - The README contracts of the other crates (`lumenwall-render` "Integration contract" first,
   `lumenwall-script` "Use" and its `SceneHost` trait).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/TESTING.md`.
@@ -49,6 +51,7 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device). |
 | `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
+| `model3d` | Spec 09: `Builder3d` (before the creation loop: `.mdl` → static meshes, model materials through `Project::load_model_material`, 3D shaders, textures, `_rt_Reflection`, the scene depth buffer; draws in render order, reflection pass first) and `Scene3d` (per frame: camera pose from the paths, `V`, `P`, lights, visibility and the uniforms of every 3D pass, compare-on-write). |
 | `puppet` | Spec 08 §9 as pure CPU math (public, unit tested with the §10 vectors): `Rig` (bones, inverse bind matrices, rest poses, attachments, animations), `Layer` (clock, loop/mirror/single, ramps), `Puppet::advance` / `evaluate` (sampling, additive/replace blending, `W`, `K`), `write_palette` (`g_Bones`), `skin_vertices` (CPU path), `decompose_attachment`. A module rather than a crate: its state is per-scene runtime state advanced by this crate's frame loop, which will also host the SceneScript bone API; it depends only on `lumenwall-formats` data and `glam`. |
 | `video` | Video wallpapers: one `lumenwall-video` player per target (zero-copy Vulkan Video on the render device when possible), its sound track through the `lumenwall-audio` player (mapped file, loop, cubic volume, automute), pause with its outputs, frame deadlines for the loop (`Wait::Until`, decoder wake-up through the engine waker). |
 
@@ -127,10 +130,73 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   `--disable-particles/-mouse/-parallax`, `--fps`, `--volume`, `--silent`, `--noautomute`,
   `--no-audio-processing`, `--assets-dir`, fullscreen pause options.
 
+## 3D scenes (spec 09)
+
+A scene is 3D when it is perspective (`orthogonalprojection` absent or `null`) or has model or
+sprite objects; otherwise `Builder3d::prepare` returns `None` and nothing below exists (no depth
+buffer, no extra pass, no per-frame work).
+
+- **Models** (`model` objects): `lumenwall_formats::mdl::parse_static_model`, one static mesh per
+  sub-mesh (vertices uploaded as stored, inputs fed by name: `a_Position`, `a_Normal`,
+  `a_Tangent4`, `a_TexCoord`, `a_TexCoordVec4` with both UV sets or `(u, v, 0, 1)`), material of
+  the object's `skin` (skin 0 with a warning when missing), every pass compiled as
+  `PassKind::Model`: WE clip convention without the clip fix, `HLSL` = 1, never a stand-in (a mesh
+  whose shader fails is not drawn, the others are). States: material values with the model
+  defaults (depth test/write, back faces culled, `FrontFace::Ccw`). Textures: the material's, then
+  the shader's sampler defaults; `_rt_*` names resolve in the scene scope (`_rt_Reflection` is
+  created on first use). Constants: `usershadervalues` (live) win over `constantshadervalues`.
+  A failed `.mdl` or material is a warning, never a scene failure.
+- **Transforms**: `T(origin)·Rz(a.z)·Ry(a.y)·Rx(a.x)·S(scale)` composed through created parents,
+  recomputed every frame (no allocation). Uniforms of spec 09 §2.9: model, inverse, normal
+  matrix (only when declared with the engine's type), `P·V`, MVP and inverses, eye, view axes,
+  `g_Screen`, lights, ambient and skylight (live), object alpha/colour/brightness (live).
+- **Camera**: `general.fov`/`nearz`/`farz` (defaults 50 / 0.01 / 10000, invalid planes fall back
+  with a warning), `math::perspective_we`. Paths (`camera.paths`): played in order and looped,
+  linear interpolation, instants stretched to the duration when the last one differs (`demon_core`).
+  `LUMENWALL_STATIC_CAMERA=1` keeps the `scene.json` pose (debugging aid).
+- **Lights**: the first four visible `point`/`lpoint` lights: `g_LightsPosition[4]`,
+  `g_LightsColorRadius[4]` = (colour × intensity, radius), unused slots zero. Other types are
+  warned about and skipped.
+- **Depth**: one `Depth32Float` buffer on `_rt_FullFrameBuffer` (and on `_rt_Reflection`), cleared
+  once per frame. Every pass drawn into the scene target gets a depth state (images, particles,
+  bloom: "always", no write).
+- **Reflection** (`_rt_Reflection`, `reflected` objects): cleared to the clear colour, then the
+  visible reflected objects with `V·Sc(1, −1, 1)` and the mirrored eye, before the main pass.
+- **Sprites**: four vertices at the origin with corner UVs, drawn by the material's shader with
+  the model defaults.
+- **Images of a perspective scene**: laid out with the canonical 2D camera of the target size,
+  clip-space geometry (`ImageOptions::clip_space`), so `cloudsbg.vert` covers the target.
+- **Particles of a perspective scene**: world space, the scene camera (`perspective_upstream`, the
+  shaders keep the clip fix), eye and view axes of the camera, sprite orientation from the camera
+  axes in the system's local space, depth test/write from the particle material.
+- **Models of a 2D scene** (`retro`): orthographic WE projection in pixels, depth spread over
+  ±`farz` (spec 09 §3.12).
+- `clearenabled` is honoured in perspective scenes (2D scenes always clear, as before).
+
+Decisions on the open questions (rules of `docs/PARITY-POLICY.md`, evidence from the installed
+previews where there is some):
+
+| QO | Decision | Rule / evidence |
+|---|---|---|
+| 3D-2 | `fov` vertical. The square previews do not separate the two; `neon_sunset`'s sun measures 0.448 of the width with fov 50 (spec value), the preview's camera differs (sun lower and bigger). | 5 (spec) |
+| 3D-5 | Key instants stretched to the duration. | spec |
+| 3D-6 | Paths in order, looped, linear. | spec |
+| 3D-13 | `depthtesting`/`depthwriting` read as the real keys. | spec |
+| 3D-16 | Colour × intensity. `arsenal` renders darker than its preview (no specular sheen on the floor); intensity² would brighten it: to calibrate with a capture. | spec |
+| 3D-27 | `Rz·Ry·Rx` (M-1, M-2 pass). Not separable on the corpus (`neongrid`, `dna_fragment` curves). | spec |
+| 3D-30 | Settled by `neon_sunset`: without sorting, the sun quad (first in the file, depth write, transparent outside the disc) cuts a hole in the terrain drawn after it; the preview shows the terrain. Blended models are sorted back to front when `transparentsorting` is absent or true (WE's 3D templates set it to true), from the rank of the first of them, once at load with the initial camera. | 5 |
+| 3D-31 | The reflection is stored upside down (clip y flipped as well, so the winding is unchanged): the shaders read `v = y_ndc·0.5 + 0.5`, and `fantasticcar` then shows the car mirrored under itself as on its preview. Plane `y = 0`, clear colour, scene size. | 5 |
+| 3D-33 | World-space particles: see Deviations. | — |
+
+Within a model, meshes whose passes all blend are drawn after its opaque meshes (`fantasticcar`:
+the windshield comes before the interior in `body.mdl`; the preview shows the interior through it).
+
 ## Not done yet
 
 | Feature | Current behaviour |
 |---|---|
+| 3D: integer colour properties | `"1 0 0"` is read as 0–255 (spec 02 Q1): `fantasticcar`'s body, `demon_core`'s core and `retro`'s stripes (through `usershadervalues`) come out black while their previews show red. Renders with `--set "carbodycolor=1.0 0.0 0.0"` match. To settle in spec 02 Q1 (the 3D previews are evidence for floats). `usershadervalues` are applied to 3D passes only for now (images would turn `retro` black). |
+| 3D: P2/P3 of spec 09 | `LightingV1` (generic4 family) still returns 0, no fog, no `_rt_MipMappedFrameBuffer` mips, no shadows, volumetrics or HDR, spot/tube/directional lights skipped, no camera fade or shake, no parallax in perspective, models without skeleton animation. |
 | Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
 | Integer colour strings | `lumenwall-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumenwall matches the preview). To settle in spec 02 Q1. |
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
@@ -248,6 +314,14 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
 - Puppet layer clocks advance by at most 0.25 s per frame: the engine clock keeps running while
   an output is paused, and spec 08 §9.3 excludes the pause (QO-P18). Animations only slow down
   below 4 fps.
+- Particles of a perspective scene (spec 09 §3.9): `lumenwall-particles` is unchanged and keeps
+  the Y inversions of spec 05 §2.2 (QO-3D-33). The engine gives the system a zero-sized scene
+  (no recentring of its origin) and a world matrix `T(origin)·Rz·Ry·Rx·S(scale)·Sc(1, −1, 1)`: the
+  mirror cancels the inversions of every Y-inverted field (emitter origins, box directions,
+  velocities, gravity, turbulence frames); fields spec 05 does not invert (sphere directions,
+  control point offsets, vortex axes) come out mirrored. Parents of particle systems are ignored.
+- 3D transparent sorting is done once at load (spec 09 §3.6 implies per frame): reordering draws
+  would rebuild the render bundles; with a moving camera the order of the first frame is kept.
 - A vertex whose four weights are all zero collapses onto local pixel (0, 0) (the image's
   top-left corner), not onto the mesh-space origin, because positions are uploaded in local
   pixels with the conjugated palette (spec 08 §9.8). Absent from the corpus (QO-P17).
@@ -331,6 +405,23 @@ Text (release, same machine, `cargo test -p lumenwall-engine --release --test te
 | One regeneration (`set_text`): layout + rasterisation + upload | 0.2 ms (32 pt, 3372348904), 1.0 ms (96 pt = 400 px per em, 1954×640 texture, 3044659344) |
 | Layout + rasterisation alone, 32 pt clock string (unit test) | 0.4 ms |
 
+3D scenes (headless 1920×1080, 240 frames, release, `render_png`; CPU = update + encode + submit):
+
+| Scene | 3D objects (meshes) | CPU / frame | GPU / frame | Load |
+|---|---|---|---|---|
+| arsenal | 1 (6) | 0.05 ms | 0.13 ms | 188 ms |
+| fantasticcar (reflection) | 4 (9) | 0.05 ms | 0.07 ms | 178 ms |
+| demon_core | 2 (2) + particles | 0.05 ms | 0.07 ms | 188 ms |
+| dna_fragment | 5 (5) + particles | 0.05 ms | 0.07 ms | 164 ms |
+| ricepod (sprite) | 7 (10) + particles | 0.06 ms | 0.06 ms | 189 ms |
+| neon_sunset | 2 (2) + 2 images + particles | 0.09 ms | 0.11 ms | 181 ms |
+| audiophile (reflection) | 4 (4) | 0.03 ms | 0.04 ms | 164 ms |
+| techno | 4 (7) | 0.03 ms | 0.05 ms | 171 ms |
+| retro (2D, 2520×1080) | 1 (1) + 2 images | 0.02 ms | 0.04 ms | 165 ms |
+
+2D scenes are unchanged: 3018340632, 3463520581 and 3044659344 render bit-identical to the
+previous build without particles (the clock text of 3044659344 aside).
+
 ## Tests
 
 - `cargo test -p lumenwall-engine`: stand-in shaders against the binding contract (every variant
@@ -348,4 +439,6 @@ Text (release, same machine, `cargo test -p lumenwall-engine --release --test te
   one regeneration per `set_text` change, none for the same string.
 - Spec 08 §10 vectors (V1–V10, GPU palette, two-bone mix, attached child) in `puppet::tests`;
   `tests/puppet_alloc.rs`: the per-frame puppet path allocates nothing.
-- `cargo run -p lumenwall-engine --example render_png -- <ids>`: visual checks.
+- `cargo run -p lumenwall-engine --example render_png -- <ids>`: visual checks (`--start T` sets
+  the scene time, `--audio L` feeds a constant spectrum to audio-reactive scenes).
+- `model3d::tests`: vectors M-1, M-2, N-1, C-1 to C-3 and R-1 of spec 09 §4.5.

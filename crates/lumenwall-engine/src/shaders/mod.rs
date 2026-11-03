@@ -31,6 +31,9 @@ pub enum PassKind {
     Sprite { trail: bool },
     /// Rope particles (26-float vertices).
     Rope,
+    /// Pass of a 3D model or sprite (spec 09): Wallpaper Engine clip convention, compiled
+    /// without the clip fix. Never replaced by a stand-in: a failure leaves the mesh undrawn.
+    Model,
 }
 
 /// A shader request.
@@ -109,6 +112,9 @@ impl FallbackShaders {
         req: &ShaderRequest<'_>,
         why: &str,
     ) -> Result<PassShader, String> {
+        if req.kind == PassKind::Model {
+            return Err(format!("shader '{}': {why}", req.name));
+        }
         if req.kind != PassKind::Copy && self.logged.insert(req.name.to_owned()) {
             tracing::warn!(
                 "shader '{}' replaced by a Lumenwall stand-in ({why}): {}",
@@ -118,6 +124,7 @@ impl FallbackShaders {
                     PassKind::ImageEffect => "effect pass copies its input",
                     PassKind::Copy => "copy",
                     PassKind::Sprite { .. } | PassKind::Rope => "plain particle sprites",
+                    PassKind::Model => "not drawn",
                 }
             );
         }
@@ -141,6 +148,7 @@ impl FallbackShaders {
             PassKind::Copy => ("vs_copy", "fs_passthrough", false),
             PassKind::Sprite { trail } => ("vs_sprite", "fs_particle", trail),
             PassKind::Rope => ("vs_rope", "fs_particle", false),
+            PassKind::Model => return Err("no stand-in for 3D passes".into()),
         };
         let source = FALLBACK_WGSL
             .replace("__TEXFMT__", &fmt.to_string())

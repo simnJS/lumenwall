@@ -42,6 +42,8 @@ pub struct HeadlessOptions {
     pub software: bool,
     /// Video decoder choice (`--hwdec`).
     pub hwdec: lumenwall_video::HwDecode,
+    /// Constant level fed to every audio spectrum band (audio-reactive checks; 0 = silence).
+    pub audio_level: f32,
 }
 
 impl Default for HeadlessOptions {
@@ -63,6 +65,7 @@ impl Default for HeadlessOptions {
             debug: DebugPlan::default(),
             software: false,
             hwdec: lumenwall_video::HwDecode::Auto,
+            audio_level: 0.0,
         }
     }
 }
@@ -140,7 +143,8 @@ pub fn render_headless(
     };
     std::fs::create_dir_all(&opts.out_dir)
         .map_err(|e| format!("{}: {e}", opts.out_dir.display()))?;
-    let (a16, a32, a64) = ([0.0f32; 16], [0.0f32; 32], [0.0f32; 64]);
+    let level = opts.audio_level;
+    let (a16, a32, a64) = ([level; 16], [level; 32], [level; 64]);
     let mut uv = UvRange::FULL;
     let mut cpu = Duration::ZERO;
     let mut gpu_total = Duration::ZERO;

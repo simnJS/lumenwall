@@ -16,6 +16,7 @@ mod audio;
 mod bloom;
 mod engine;
 mod headless;
+mod model3d;
 pub mod monitor;
 mod particles;
 pub mod plan;
