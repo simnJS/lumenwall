@@ -90,6 +90,14 @@ impl TextureCache {
         loaded
     }
 
+    /// Registers a texture produced by the engine (the glyph texture of a text layer) under the
+    /// name its material samples.
+    pub fn insert(&mut self, name: &str, texture: LoadedTexture) -> Rc<LoadedTexture> {
+        let t = Rc::new(texture);
+        self.map.insert(name.to_owned(), Some(t.clone()));
+        t
+    }
+
     /// Whether a texture exists in the VFS (no upload).
     pub fn exists(&self, vfs: &Vfs, name: &str) -> bool {
         self.map.get(name).is_some_and(Option::is_some)

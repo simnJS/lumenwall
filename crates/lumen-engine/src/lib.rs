@@ -19,6 +19,7 @@ pub mod plan;
 mod scene;
 mod script;
 pub mod shaders;
+pub mod text;
 mod texture;
 mod wallpaper;
 

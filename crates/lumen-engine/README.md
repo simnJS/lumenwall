@@ -7,12 +7,17 @@ The `lumen` binary drives it; `examples/render_png.rs` renders wallpapers off sc
 ## Sources (clean room)
 
 - `specs/04-rendu-scene-effets.md` (frame loop, creation and render order, chains, uniforms,
-  bloom, composition), `specs/02-modele-scene.md` (§12–§14 through `lumen-scene`),
-  `specs/05-particules.md` §12 (vertex formats, uniforms), `specs/06-scripting.md` (§1.2, §8, §9,
-  §12, §14 through `lumen-script`), `specs/07-plateforme-audio-video-web.md` §1, §4, §9, §11–§13, §18.
+  bloom, composition, §18 text objects), `specs/02-modele-scene.md` (§7.7 text objects, §12–§14
+  through `lumen-scene`), `specs/05-particules.md` §12 (vertex formats, uniforms),
+  `specs/06-scripting.md` (§1.2, §8, §9, §12, §14 through `lumen-script`),
+  `specs/07-plateforme-audio-video-web.md` §1, §4, §9, §11–§13, §18.
 - The README contracts of the other crates (`lumen-render` "Integration contract" first,
   `lumen-script` "Use" and its `SceneHost` trait).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/TESTING.md`.
+- Text: Wallpaper Engine's own font material (`assets/materials/fonts/basefont.json`, shader
+  `font`), the `size`/`padding` values the WE editor writes for text objects and the preview
+  images of the installed wallpapers (layout and placement, see Deviations); public `cosmic-text`
+  0.15 documentation.
 
 No upstream code, fork or third-party reimplementation was read.
 
@@ -36,6 +41,7 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | `shaders` | `ShaderProvider` trait. `WeShaders` (feature `we-shaders`, default): `lumen-shader` → one naga module per pass, deduplicated by `PassShader::key`, on-disk cache in `~/.cache/lumen/shaders`, material constants and sampler defaults from the annotations. `FallbackShaders`: WGSL stand-ins following the binding contract, used per shader when a translation fails (logged once per shader) and for `commands/copy`. |
 | `bloom` | Spec 04 §17 with the WE materials: the five shaders of `lumen-scene`'s synthetic bloom image (`genericimage2`, `downsample_quarter_bloom`, `downsample_eighth_blur_v`, `blur_h_bloom`, `combine`) translated through the `ShaderProvider`, every material constant written once (`bloomstrength` → `g_BloomStrength`, `bloomthreshold` → `g_BloomThreshold`, `g_BloomTint` annotation default), drawn by `lumen_render::bloom::add_bloom`. If one shader is a stand-in, the whole chain uses lumen-render's WGSL approximation. |
 | `scene` | `build_scene`: `Project::build` → render graph in two phases (creation order: textures, composites, effect `fbos` scopes, slot candidates, targets, shaders, constants; render order: `add_image`, particle passes, bloom). `SceneRuntime::update`: frame globals, parallax, image geometry, visibility, animated textures, particles. |
+| `text` | Text objects as image layers: `Fonts` (empty `cosmic-text` database, the wallpaper's font file through the VFS, fallback fonts loaded only on need), layout (300 dpi, line breaks, `limitwidth`/`maxwidth` wrapping, `limitrows`/`maxrows`, ellipsis), R8 glyph texture registered in the texture cache under the layer's slot-0 name, anchor offset, `TextRuntime` (per-frame `g_Color4` of the glyph pass, regeneration only when the string or point size changes). |
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
 | `script` | SceneScript (`lumen-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. |
 | `audio` | Scene sounds (`lumen-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
@@ -83,6 +89,12 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 - Real Wallpaper Engine shaders for images, effects and particles (0 stand-in on the 7 installed
   scene wallpapers).
 - Puppet meshes in their rest pose (`.mdl` through `lumen-formats::mdl`, `add_image_with_puppet`).
+- Text objects: the wallpaper's `.ttf`/`.otf` (`.pkg`, folder or WE `assets/fonts`), shaped and
+  rasterised once into an R8 texture, drawn by the WE `font` shader as the first pass of an
+  image layer, then the object's effects and `colorBlendMode` pass like an image; colour, alpha,
+  brightness, visibility, parent, parallax depth. `SceneRuntime::set_text(object_id, &str)`
+  changes the content (for SceneScript); the texture is regenerated only when the string or the
+  point size changes (`text_regenerations()` counts it).
 - Particles (sprites, trails, ropes), sounds, audio spectrum, automute.
 - SceneScript (see below): property scripts, dynamic text layers, timers, events.
 - Window (`-w XxYxWxH`, or `LUMEN_WINDOWED=1` for the 640×480 window), desktop on every output
@@ -97,7 +109,10 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 
 | Feature | Current behaviour |
 |---|---|
-| Text objects | Skipped with a warning (glyph rasteriser not integrated; `lumen-render` has `text_matrix`). |
+| Text scripts | The initial `value` is shown until something calls `SceneRuntime::set_text` (SceneScript is not integrated here). |
+| Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
+| Integer colour strings | `lumen-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumen matches the preview). To settle in spec 02 Q1. |
+| Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
 | Puppet skeletons | Puppet meshes are drawn in their rest pose (spec 04 §20, like the reference); bones, animation layers and layers attached to bones are not applied, so a child layer that follows a bone in Wallpaper Engine stays at its rest position (e.g. part of the hair of 3463520581). |
 | Video wallpapers and video textures | Load error / texture skipped (`lumen-video` not integrated). |
 | Web wallpapers | Load error (`lumen-web` not integrated). |
@@ -191,6 +206,24 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
   - scripts on effect visibility and effect pass constants run (spec 06 §1.3: never executed);
   - groups are scriptable layers (spec 06 §1.2: not scriptable), so their scripts move or hide
     their children.
+- Text objects follow Wallpaper Engine rather than the reference renderer of spec 04 §18 (rule 5;
+  evidence: the `size` the WE editor stores for every text of 3044659344, 3089056751 and
+  3372348904, and their WE preview images registered against Lumen renders of the same scene):
+  - drawn as an image layer (glyph pass, then the object's effects and `colorBlendMode`), not
+    outside the pass chain; parents, parallax depth and brightness apply;
+  - 1 pt = 300/72 layer pixels (the reference: 1 pt = 1 pixel compensated by the scale, which
+    draws these texts about 4× too small); line height = hhea ascender − descender;
+  - UTF-8 text shaped with kerning and ligatures, line breaks honoured (the reference reads
+    bytes as Latin-1 on one line); `limitwidth`/`maxwidth`, `limitrows`/`maxrows` and
+    `limituseellipsis` are applied (public WE text layer options);
+  - placement: the text block, not its padded quad, is anchored on the origin (a left-aligned
+    text starts exactly at `origin.x`; 3089056751 matches its preview within 2 px at 4K), and
+    vertical centring uses the block from the first ascender to the last baseline (a single
+    centred line has its baseline ascender/2 below the origin; verified on 3089056751 and
+    3372348904). The reference ignores alignment and padding;
+  - fallback fonts: DejaVu Sans then Liberation Sans (Segoe UI then Arial on Windows, and
+    `systemfont_<name>` as `<name>.ttf` there), then Wallpaper Engine's `fonts/NotoSans-Regular.ttf`;
+    they are also used for glyphs the wallpaper's font lacks.
 
 ## Running
 
@@ -244,6 +277,14 @@ SceneScript (headless 1280×720, release, `render_png`; script time = `SceneScri
 JS heap 190–245 KiB per wallpaper; no heap allocation on the Rust side in a steady-state frame of
 numeric scripts (unit test `steady_state_frames_do_not_allocate`).
 
+Text (release, same machine, `cargo test -p lumen-engine --release --test text_content -- --ignored --nocapture`):
+
+| Situation | Result |
+|---|---|
+| Steady state, 7 texts (3372348904) / 1 text (3044659344) | 0 glyph texture regenerated over 120 frames; whole `SceneRuntime::update` 1.0 µs / 0.3 µs per frame; a static scene with text stops redrawing |
+| One regeneration (`set_text`): layout + rasterisation + upload | 0.2 ms (32 pt, 3372348904), 1.0 ms (96 pt = 400 px per em, 1954×640 texture, 3044659344) |
+| Layout + rasterisation alone, 32 pt clock string (unit test) | 0.4 ms |
+
 ## Tests
 
 - `cargo test -p lumen-engine`: stand-in shaders against the binding contract (every variant
@@ -255,4 +296,7 @@ numeric scripts (unit test `steady_state_frames_do_not_allocate`).
 - `cargo test -p lumen-engine -- --ignored` (GPU + content of `docs/TESTING.md`): the reference
   wallpaper renders with real shaders (0 stand-in, bloom included), 1 image, 4 particle systems,
   live rain; the colour LUTs of `materials/lut` load as 32³ volume textures (`tests/volume_lut.rs`).
+- `cargo test -p lumen-engine -- --ignored` also runs `tests/text_content.rs` (3044659344,
+  3372348904): every text drawn with the WE font shader, no regeneration in the steady state,
+  one regeneration per `set_text` change, none for the same string.
 - `cargo run -p lumen-engine --example render_png -- <ids>`: visual checks.

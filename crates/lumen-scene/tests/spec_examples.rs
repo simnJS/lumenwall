@@ -917,6 +917,58 @@ fn text_object_7_7_and_q19() {
     assert_eq!(path, "$.objects[0].size");
 }
 
+/// Lumen: a text is drawn as an image layer (font material, glyph texture in slot 0) with the
+/// object's effects and colour blend pass, and its content stays text even when it looks like
+/// a number or a vector.
+#[test]
+fn text_layer_and_content() {
+    let objects = r#"{ "id": 1, "name": "t", "text": { "value": "26 NOV 2024", "script": "x" },
+        "horizontalalign": "left", "verticalalign": "bottom", "brightness": 2, "colorBlendMode": 11,
+        "parallaxDepth": "0.5 0.5",
+        "effects": [ { "file": "effects/blur/effect.json", "passes": [ { "combos": { "A": 1 } } ] } ] },
+        { "id": 2, "name": "u", "text": "2024" }"#;
+    let f = base_files(&scene_with(ortho(), objects));
+    let mut p = load(&f);
+    let ObjectKind::Text(t) = &obj(&p, 0).kind else {
+        panic!()
+    };
+    assert_eq!(p.value(t.text).text(), "26 NOV 2024");
+    assert_eq!(p.value(t.brightness).float(), 2.0);
+    let layer = obj(&p, 0).as_layer().expect("text layer");
+    assert!(obj(&p, 0).as_image().is_none());
+    assert!(layer.alignment.left && layer.alignment.bottom);
+    assert_eq!(layer.effects.len(), 1);
+    assert_eq!(p.value(layer.color_blend_mode).int(), 11);
+    assert_eq!(p.value(layer.parallax_depth).vec2(), Vec2::splat(0.5));
+    // Neutral layer values: the glyph pass applies the text's own.
+    assert_eq!(p.value(layer.alpha).float(), 1.0);
+    assert_eq!(p.value(layer.brightness).float(), 1.0);
+    let ObjectKind::Text(u) = &obj(&p, 1).kind else {
+        panic!()
+    };
+    assert_eq!(p.value(u.text).text(), "2024");
+    let Some(TextureRef::File(main)) = p.main_texture(ObjectIndex::new(0)) else {
+        panic!("glyph texture slot")
+    };
+    assert!(p.strings.resolve(main).starts_with(TEXT_TEXTURE_PREFIX));
+    let b = p.build(&f, &BuildOptions::new(1920, 1080)).unwrap();
+    let passes = b.image_passes[0].as_ref().expect("text passes");
+    // Font pass, blur_h, blur_v (2 passes), colour blend pass.
+    assert_eq!(passes.passes.len(), 5);
+    let s = p.scene.as_ref().unwrap();
+    let PassKind::Material { material, .. } = passes.passes[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        p.strings.resolve(s.material(material).passes[0].shader),
+        "font"
+    );
+    // lumen-scene reports each pass's own material mode; lumen-render applies the first/last
+    // transfer of spec 04 §9.8 (blend contract, see the README).
+    assert_eq!(passes.passes[0].blending, Blending::Translucent);
+    assert_eq!(passes.passes[4].blending, Blending::Normal);
+}
+
 #[test]
 fn sound_errors_7_6() {
     let (_, path, _) = data_err(&load_err(&base_files(&scene_with(

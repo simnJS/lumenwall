@@ -2757,6 +2757,7 @@ dependencies = [
 name = "lumen-engine"
 version = "0.1.0"
 dependencies = [
+ "cosmic-text",
  "glam 0.30.10",
  "lumen-assets",
  "lumen-audio",
