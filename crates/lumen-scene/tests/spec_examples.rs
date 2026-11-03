@@ -761,6 +761,35 @@ fn common_fields_and_degraded_mode_7_2() {
 }
 
 #[test]
+fn dependencies_accept_id_objects_spec05_a7_8() {
+    let objects = [
+        generic(1, ""),
+        generic(2, ""),
+        r#"{ "id": 3, "name": "p", "particle": "x.json",
+             "dependencies": [ { "id": 2, "index": 0, "type": "emitterimage" }, 1, { "id": 1.9, "type": "collisionmodel" } ] }"#
+            .to_owned(),
+    ]
+    .join(",");
+    let f = base_files(&scene_with(ortho(), &objects));
+    let mut p = load(&f);
+    assert_eq!(&*obj(&p, 2).dependencies, &[2, 1, 1]);
+    let b = p.build(&f, &BuildOptions::new(1, 1)).unwrap();
+    assert_eq!(ids(&p, &b.creation_order), [1, 2, 3]);
+    // An object without a usable `id` stays a typed error.
+    let bad = r#"{ "id": 3, "name": "p", "dependencies": [ 1, { "index": 0 } ] }"#;
+    let (_, path, err) = data_err(&load_err(&base_files(&scene_with(ortho(), bad))));
+    assert_eq!(
+        (path.as_str(), err),
+        ("$.objects[0].dependencies[1].id", DataError::Missing)
+    );
+    let bad = r#"{ "id": 3, "name": "p", "dependencies": [ { "id": "2" } ] }"#;
+    assert_eq!(
+        data_err(&load_err(&base_files(&scene_with(ortho(), bad)))).1,
+        "$.objects[0].dependencies[0].id"
+    );
+}
+
+#[test]
 fn image_example_7_4_and_instance_textures_q14() {
     let objects = r#"{
       "id": 12, "name": "Fond", "image": "models/fond.json",

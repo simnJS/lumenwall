@@ -868,10 +868,76 @@ raw_struct! {
 }
 
 raw_struct! {
+    struct RawDependencyObject<'a> {
+        id: Json<'a> = "id",
+    }
+}
+
+/// Element of an object's `dependencies`: an id, or an object `{ "id", "index", "type" }` as
+/// written by Wallpaper Engine for particle links (spec 05 A7.8); only `id` is used.
+#[derive(Debug, Default)]
+pub(crate) enum RawDependency<'a> {
+    /// Scalar (or anything that is not an object).
+    Value(Json<'a>),
+    /// Object form: its `id`.
+    Object(Json<'a>),
+    #[default]
+    Absent,
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for RawDependency<'a> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<'a>(PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> Visitor<'de> for V<'a> {
+            type Value = RawDependency<'a>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(RawDependency::Value(Json::Bool(v)))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(RawDependency::Value(if v < 0 {
+                    Json::Int(v)
+                } else {
+                    Json::UInt(v as u64)
+                }))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(RawDependency::Value(Json::UInt(v)))
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(RawDependency::Value(Json::Float(v)))
+            }
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                // Strings are rejected later; the text itself is not needed.
+                Ok(RawDependency::Value(Json::Str(Cow::Borrowed(""))))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RawDependency::Value(Json::Null))
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RawDependency::Value(Json::Null))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RawDependency::Value(Json::Array))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                Ok(RawDependency::Object(
+                    RawDependencyObject::from_map(map)?.id,
+                ))
+            }
+        }
+        d.deserialize_any(V(PhantomData))
+    }
+}
+
+raw_struct! {
     pub(crate) struct RawObject<'a> {
         id: Json<'a> = "id",
         name: Json<'a> = "name",
-        dependencies: RawSeq<Json<'a>> = "dependencies",
+        dependencies: RawSeq<RawDependency<'a>> = "dependencies",
         parent: Json<'a> = "parent",
         origin: RawSetting<'a> = "origin",
         scale: RawSetting<'a> = "scale",

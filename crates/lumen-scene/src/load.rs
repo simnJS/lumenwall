@@ -14,9 +14,9 @@ use crate::convert::{
 use crate::error::{At, DataErr, DataError, Expected, Fail, LoadError, Warnings};
 use crate::intern::Sym;
 use crate::raw::{
-    Json, JsonKind, RawEffect, RawEffectPass, RawImageEffect, RawMap, RawMaterial, RawMaterialPass,
-    RawModel, RawObject, RawParticle, RawPassOverride, RawScene, RawSeq, RawSetting, RawTexEntry,
-    parse_doc,
+    Json, JsonKind, RawDependency, RawEffect, RawEffectPass, RawImageEffect, RawMap, RawMaterial,
+    RawMaterialPass, RawModel, RawObject, RawParticle, RawPassOverride, RawScene, RawSeq,
+    RawSetting, RawTexEntry, parse_doc,
 };
 use crate::scene::*;
 use crate::setting::{Binder, SettingId};
@@ -293,8 +293,15 @@ impl<'s> Loader<'s, '_> {
         };
         let dependencies: Box<[i32]> = if raw.dependencies.kind == JsonKind::Array {
             let mut d = Vec::with_capacity(raw.dependencies.items.len());
-            for (i, j) in raw.dependencies.items.iter().enumerate() {
-                d.push(req_i32(j).at_idx(i).at("dependencies")?);
+            for (i, dep) in raw.dependencies.items.iter().enumerate() {
+                // Lumen also accepts `{ "id", "index", "type" }` objects, using their `id`
+                // (spec 05 A7.8).
+                let id = match dep {
+                    RawDependency::Object(id) => req_i32(id).at("id"),
+                    RawDependency::Value(j) => req_i32(j),
+                    RawDependency::Absent => req_i32(&Json::Absent),
+                };
+                d.push(id.at_idx(i).at("dependencies")?);
             }
             d.into()
         } else {

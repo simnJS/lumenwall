@@ -68,6 +68,7 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 - Q2 (8-digit hex), Q5, Q6, Q7, Q9, Q10, Q12, Q13, Q16 (effects), Q17, Q18, Q19, Q27, Q29, Q30, Q31: see the table.
 - A UTF-8 byte order mark at the start of a JSON file is skipped.
+- Object `dependencies` also accept objects `{ "id", "index", "type" }` (written by Wallpaper Engine for particle links, spec 05 A7.8): their `id` is used as the dependency (strict integer); `index` and `type` are not kept. Spec 02 §7.2 only describes integers.
 - Spec ambiguity: §13.3 says "group" scale/angles for types other than image and text, while §7.2 says particles use their re-read settings. Particles use their own settings (§7.2).
 - A passthrough image with at least one effect is created even when all its effects are hidden at setup. `ImagePasses::draws` is then false (nothing drawn), so it can appear when an effect becomes visible.
 - Failed object setups are memoised instead of being retried on each reference. The predicate is deterministic, so the result is the same.
