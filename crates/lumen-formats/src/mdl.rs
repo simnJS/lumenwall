@@ -1,10 +1,20 @@
-//! `MDLV` puppet mesh reader (spec 01 §3.1).
+//! `MDLV` puppet readers.
 //!
-//! The reference does not parse the structure of the file: it scans for the first
-//! byte pattern that looks like a vertex block (80-byte vertices) followed by an
-//! index block (multiple of 6 bytes). This module applies the same heuristic so the
-//! same files yield the same mesh (QO-15). Skeleton (`MDLS`) and animation (`MDLA`)
-//! blocks are not used.
+//! - [`parse_puppet`]: the mesh only, through the heuristic of spec 01 §3.1. The reference
+//!   does not parse the structure of the file: it scans for the first byte pattern that looks
+//!   like a vertex block (80-byte vertices) followed by an index block (multiple of 6 bytes).
+//!   This function applies the same heuristic so the same files yield the same mesh (QO-15).
+//! - [`parse_model`]: the whole file (spec 08): structured mesh with bone weights, skeleton
+//!   (`MDLS`), attachment points (`MDAT`), animations (`MDLA`) and editor pose (`MDLE`),
+//!   falling back to the heuristic for layouts other than the observed puppet one.
+
+mod model;
+
+pub use model::{
+    Animation, AnimationMode, Attachment, Bone, BoneBox, BoneSample, MdlWarning,
+    PUPPET_VERTEX_FORMAT, PartRange, PuppetModel, SectionInfo, Skeleton, SkeletonEditorData,
+    VertexSkin, parse_model,
+};
 
 use thiserror::Error;
 

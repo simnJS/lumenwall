@@ -45,3 +45,38 @@ fn reference_wallpaper_renders_with_real_shaders_and_particles() {
     let png = std::fs::read(&r.pngs[0]).unwrap();
     assert!(png.len() > 10_000, "a non-trivial image was written");
 }
+
+/// Spec 08 on Workshop item 3463520581 (Kirito × Asuna): every puppet skinned on the GPU and
+/// every `attachment` key resolved.
+#[test]
+#[ignore = "needs Wallpaper Engine content and a GPU"]
+fn puppet_wallpaper_animates_skeletons_and_attachments() {
+    let resolver = WallpaperResolver::new();
+    let (Ok(wallpaper), Some((_, assets))) = (resolver.workshop_dir("3463520581"), inputs()) else {
+        eprintln!("skipped: 3463520581 or assets not found");
+        return;
+    };
+    let opts = HeadlessOptions {
+        width: 480,
+        height: 270,
+        frames: 30,
+        save: vec![29],
+        out_dir: PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lumen-engine-puppet"),
+        particles: false,
+        ..HeadlessOptions::default()
+    };
+    let r = render_headless(&wallpaper, &assets, &opts).expect("render");
+    assert_eq!(
+        r.stats.puppets, 16,
+        "8 puppet files, each used by two layouts"
+    );
+    assert_eq!(r.stats.attached_objects, 58);
+    #[cfg(feature = "we-shaders")]
+    {
+        assert_eq!(r.stats.stand_in_shaders, 0);
+        assert_eq!(
+            r.stats.gpu_skinned_puppets, 16,
+            "SKINNING path of genericimage4"
+        );
+    }
+}

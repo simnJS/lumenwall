@@ -19,8 +19,8 @@ use crate::graph::{
     Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SlotBinding, TextureRef,
 };
 use crate::math::{
-    Alignment, NodeTransform, Vertex, copy_matrix, copy_quad, copy_uv_max, image_rect, rect_quad,
-    screen_matrix, unit_quad,
+    Alignment, NodeTransform, SkinVertex, Vertex, copy_matrix, copy_quad, copy_uv_max, image_rect,
+    rect_quad, screen_matrix, unit_quad,
 };
 use crate::shader::MAX_SLOTS;
 use crate::targets::{PingPong, RtId};
@@ -108,12 +108,16 @@ pub struct ImageFrame {
     pub scene_size: Vec2,
 }
 
-/// Static puppet mesh of an image (spec 04 §20, rest pose): positions in local image pixels
+/// Puppet mesh of an image (spec 04 §20): rest positions in local image pixels
 /// (`(S.x/2 + x, S.y/2 − y, z)`, y from the top edge), texture coordinates as stored.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PuppetGeometry {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u16>,
+    /// Bone indices and weights per vertex (spec 08 §9.8); empty for a static mesh. When
+    /// present the mesh is drawn as [`Geometry::Skinned`], so a shader compiled with the
+    /// `SKINNING` combo reads them and the `g_Bones` palette.
+    pub skin: Vec<SkinVertex>,
 }
 
 /// Handle returned by [`add_image`] to update the image every frame.
@@ -123,6 +127,9 @@ pub struct ImageHandle {
     pub plan: Vec<PlannedPass<RtId>>,
     /// Single-pass puppet drawn into the scene: its screen matrix maps local pixels to RC.
     puppet_scene: bool,
+    /// Puppet mesh vertices (rewritable for CPU skinning) and the passes drawing it.
+    puppet_vertices: Option<VertexRange>,
+    puppet_passes: Vec<PassId>,
     size: Vec2,
     alignment: Alignment,
     uv_max: Vec2,
@@ -196,6 +203,8 @@ pub fn add_image_with_puppet(
         passes: Vec::with_capacity(plan.len()),
         plan: plan.clone(),
         puppet_scene: false,
+        puppet_vertices: None,
+        puppet_passes: Vec::new(),
         size: spec.size,
         alignment: spec.alignment,
         uv_max,
@@ -223,9 +232,19 @@ pub fn add_image_with_puppet(
         let geometry = match (q.geometry, puppet) {
             (GeometryCase::PuppetLocal | GeometryCase::PuppetScene, Some(mesh)) => {
                 handle.puppet_scene |= q.geometry == GeometryCase::PuppetScene;
-                *mesh_geom.get_or_insert_with(|| Geometry::Indexed {
-                    vertices: b.add_vertices(&mesh.vertices),
-                    indices: b.add_indices(&mesh.indices),
+                *mesh_geom.get_or_insert_with(|| {
+                    let vertices = b.add_vertices(&mesh.vertices);
+                    let indices = b.add_indices(&mesh.indices);
+                    handle.puppet_vertices = Some(vertices);
+                    if mesh.skin.len() == mesh.vertices.len() {
+                        Geometry::Skinned {
+                            vertices,
+                            indices,
+                            skin: b.add_skin(&mesh.skin),
+                        }
+                    } else {
+                        Geometry::Indexed { vertices, indices }
+                    }
                 })
             }
             (geometry, _) => Geometry::Vertices(match geometry {
@@ -275,7 +294,14 @@ pub fn add_image_with_puppet(
         if q.input == ChainBuffer::Main && p.slots[0].is_none() {
             desc.slot0_variants.clone_from(&p.slot0_variants);
         }
+        let draws_mesh = matches!(
+            desc.geometry,
+            Geometry::Indexed { .. } | Geometry::Skinned { .. }
+        );
         let id = b.add_pass(desc)?;
+        if draws_mesh {
+            handle.puppet_passes.push(id);
+        }
 
         for name in ["g_ModelMatrix", "g_EffectModelMatrix"] {
             if let Some(slot) = b.uniform(id, name) {
@@ -308,6 +334,19 @@ pub fn add_image_with_puppet(
 }
 
 impl ImageHandle {
+    /// Vertices of the puppet mesh in the dynamic region, for CPU skinning through
+    /// [`RenderScene::set_vertices`]. `None` when the image draws no mesh.
+    #[must_use]
+    pub fn puppet_vertices(&self) -> Option<VertexRange> {
+        self.puppet_vertices
+    }
+
+    /// Passes drawing the puppet mesh (the first pass of the chain).
+    #[must_use]
+    pub fn puppet_passes(&self) -> &[PassId] {
+        &self.puppet_passes
+    }
+
     /// Per-frame update (spec 04 §8.8): rectangle, rotation pivot, `M_ecran`
     /// with parallax, scene geometry. No allocation; unchanged values do not
     /// dirty the scene.

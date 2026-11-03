@@ -489,6 +489,35 @@ pub struct Vertex {
 /// Size of [`Vertex`] in bytes.
 pub const VERTEX_SIZE: u32 = std::mem::size_of::<Vertex>() as u32;
 
+/// Skinning attributes of one puppet vertex (spec 08 §9.8), in a static buffer next to the
+/// [`Vertex`] stream: `a_BlendIndices` (integer, offset 0), `a_BlendWeights` (16),
+/// `a_Normal` (32) and `a_Tangent4` (48).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkinVertex {
+    pub joints: [u32; 4],
+    pub weights: [f32; 4],
+    pub normal: [f32; 3],
+    pad: f32,
+    pub tangent: [f32; 4],
+}
+
+impl SkinVertex {
+    #[must_use]
+    pub fn new(joints: [u32; 4], weights: [f32; 4], normal: [f32; 3], tangent: [f32; 4]) -> Self {
+        Self {
+            joints,
+            weights,
+            normal,
+            pad: 0.0,
+            tangent,
+        }
+    }
+}
+
+/// Size of [`SkinVertex`] in bytes.
+pub const SKIN_VERTEX_SIZE: u32 = std::mem::size_of::<SkinVertex>() as u32;
+
 /// Two non-indexed triangles in the spec order (spec 04 §10.2):
 /// bottom-left, top-left, bottom-right; bottom-right, top-left, top-right.
 ///

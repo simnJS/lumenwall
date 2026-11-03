@@ -16,7 +16,7 @@ use crate::dynbuf::{
     UniformSlot, UniformType, VertexRange, frame_globals, patches_for,
 };
 use crate::error::{RenderError, Result};
-use crate::math::{VERTEX_SIZE, Vertex};
+use crate::math::{SKIN_VERTEX_SIZE, SkinVertex, VERTEX_SIZE, Vertex};
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
 use crate::targets::{RT_FORMAT, RenderTargetPool, RtId};
 use crate::texture::{GpuTexture, SamplerKey, TextureUpload, default_texture, upload_texture};
@@ -88,6 +88,43 @@ pub enum Geometry {
     /// Indexed triangles of a vertex stream (particles): its own vertex layout,
     /// 32-bit indices, draw count set every frame by [`RenderScene::write_stream`].
     Stream(StreamId),
+    /// [`Geometry::Indexed`] plus per-vertex skinning attributes (puppets, spec 08 §9.8):
+    /// shader inputs `a_BlendIndices`, `a_BlendWeights`, `a_Normal` and `a_Tangent4` read the
+    /// static skin buffer, record `k` belonging to vertex `vertices.first + k`.
+    Skinned {
+        vertices: VertexRange,
+        indices: IndexRange,
+        skin: SkinRange,
+    },
+}
+
+/// Records of the static skin buffer ([`SceneBuilder::add_skin`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SkinRange {
+    pub first: u32,
+    pub count: u32,
+}
+
+/// Skin buffer layout of a shader input: `(name, byte offset in SkinVertex)`.
+const SKIN_ATTRIBUTES: [(&str, u64); 4] = [
+    ("a_BlendIndices", 0),
+    ("a_BlendWeights", 16),
+    ("a_Normal", 32),
+    ("a_Tangent4", 48),
+];
+
+/// Format of a skinned input fed from the skin buffer, `None` = not a skin attribute (or
+/// a float-typed index input, which the buffer cannot feed).
+fn skin_attribute(name: &str, attr: VertexAttr) -> Option<(wgpu::VertexFormat, u64)> {
+    let (_, offset) = SKIN_ATTRIBUTES.iter().find(|(n, _)| *n == name)?;
+    let VertexAttr::Unfed { components, kind } = attr else {
+        return None;
+    };
+    let integer = kind != ScalarKind::Float;
+    if integer != (*offset == 0) {
+        return None;
+    }
+    Some((unfed_format(kind, components), *offset))
 }
 
 /// Handle of a vertex stream of a scene.
@@ -235,6 +272,7 @@ pub struct SceneBuilder<'c> {
     shaders: Vec<PassShader>,
     dynbuf: DynamicBufferBuilder,
     indices: Vec<u16>,
+    skins: Vec<SkinVertex>,
     streams: Vec<VertexStream>,
     passes: Vec<PassRecord>,
     ops: Vec<Op>,
@@ -309,6 +347,7 @@ impl<'c> SceneBuilder<'c> {
             shaders: Vec::new(),
             dynbuf,
             indices: Vec::new(),
+            skins: Vec::new(),
             streams: Vec::new(),
             passes: Vec::new(),
             ops: Vec::new(),
@@ -367,6 +406,16 @@ impl<'c> SceneBuilder<'c> {
         IndexRange {
             first,
             count: i.len() as u32,
+        }
+    }
+
+    /// Static skinning records of a puppet mesh, one per vertex (see [`Geometry::Skinned`]).
+    pub fn add_skin(&mut self, s: &[SkinVertex]) -> SkinRange {
+        let first = self.skins.len() as u32;
+        self.skins.extend_from_slice(s);
+        SkinRange {
+            first,
+            count: s.len() as u32,
         }
     }
 
@@ -491,6 +540,18 @@ impl<'c> SceneBuilder<'c> {
             ctx.note_resources(1);
             b
         });
+        let skin_buffer = (!self.skins.is_empty()).then(|| {
+            let bytes: &[u8] = bytemuck::cast_slice(&self.skins);
+            let b = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("lumen.skin"),
+                size: bytes.len() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            ctx.queue().write_buffer(&b, 0, bytes);
+            ctx.note_resources(1);
+            b
+        });
         // (0, 0, 0, 1) as floats, then as integers, for unfed attributes.
         let mut defaults = [0u8; 32];
         defaults[12..16].copy_from_slice(&1.0f32.to_le_bytes());
@@ -539,6 +600,7 @@ impl<'c> SceneBuilder<'c> {
             interfaces: self.shaders.iter().map(|s| s.interface().clone()).collect(),
             dynbuf,
             index_buffer,
+            skin_buffer,
             streams: std::mem::take(&mut self.streams),
             default_attrs,
             uniform_layout,
@@ -620,6 +682,8 @@ struct PipelineKey {
     cull: CullMode,
     /// First stream with the same vertex layout, for stream passes.
     stream_layout: Option<usize>,
+    /// Skin buffer bound in slot 1 (attribute layout differs).
+    skinned: bool,
 }
 
 struct CompiledPass {
@@ -716,6 +780,7 @@ pub struct RenderScene {
     interfaces: Vec<ShaderInterface>,
     dynbuf: DynamicBuffer,
     index_buffer: Option<wgpu::Buffer>,
+    skin_buffer: Option<wgpu::Buffer>,
     streams: Vec<VertexStream>,
     default_attrs: wgpu::Buffer,
     uniform_layout: wgpu::BindGroupLayout,
@@ -800,13 +865,18 @@ impl RenderScene {
             label: desc.label.clone(),
             reason,
         };
-        if let Geometry::Indexed { .. } = desc.geometry
+        if let Geometry::Indexed { .. } | Geometry::Skinned { .. } = desc.geometry
             && self.index_buffer.is_none()
         {
             return Err(err("indexed geometry without indices".into()));
         }
+        let skinned = matches!(desc.geometry, Geometry::Skinned { .. });
+        if skinned && self.skin_buffer.is_none() {
+            return Err(err("skinned geometry without skin records".into()));
+        }
 
-        // Vertex layouts: slot 0 = dynamic vertices (or the stream), slots 1.. = defaults.
+        // Vertex layouts: slot 0 = dynamic vertices (or the stream), then the skin buffer for
+        // skinned geometry, then one slot per default-fed input.
         let stream = match desc.geometry {
             Geometry::Stream(s) => Some(
                 self.streams
@@ -816,8 +886,21 @@ impl RenderScene {
             _ => None,
         };
         let mut main_attrs = Vec::new();
+        let mut skin_attrs = Vec::new();
         let mut unfed_attrs = Vec::new();
         for input in &iface.vertex_inputs {
+            if skinned
+                && let Some((format, offset)) = iface
+                    .vertex_input_name(input.location)
+                    .and_then(|name| skin_attribute(name, input.attr))
+            {
+                skin_attrs.push(wgpu::VertexAttribute {
+                    format,
+                    offset,
+                    shader_location: input.location,
+                });
+                continue;
+            }
             if let Some(stream) = stream {
                 let name = iface.vertex_input_name(input.location).unwrap_or("");
                 if let Some(a) = stream.layout.attributes.iter().find(|a| a.name == name) {
@@ -873,7 +956,8 @@ impl RenderScene {
             }
         }
         let max_buffers = ctx.device().limits().max_vertex_buffers as usize;
-        if 1 + unfed_attrs.len() > max_buffers {
+        let first_unfed = 1 + u32::from(skinned);
+        if first_unfed as usize + unfed_attrs.len() > max_buffers {
             return Err(err(format!(
                 "{} unfed vertex inputs exceed the device limit",
                 unfed_attrs.len()
@@ -890,6 +974,13 @@ impl RenderScene {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &main_attrs,
         })];
+        if skinned {
+            layouts.push(Some(wgpu::VertexBufferLayout {
+                array_stride: u64::from(SKIN_VERTEX_SIZE),
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &skin_attrs,
+            }));
+        }
         for (a, _) in &unfed_attrs {
             // Instance step with a single instance: every vertex reads element 0.
             layouts.push(Some(wgpu::VertexBufferLayout {
@@ -901,7 +992,7 @@ impl RenderScene {
         let unfed = unfed_attrs
             .iter()
             .enumerate()
-            .map(|(i, (_, int))| (i as u32 + 1, *int))
+            .map(|(i, (_, int))| (i as u32 + first_unfed, *int))
             .collect();
 
         let key = PipelineKey {
@@ -910,6 +1001,7 @@ impl RenderScene {
             write_mask: desc.write_mask,
             cull: desc.cull,
             stream_layout: layout_key,
+            skinned,
         };
         let pipeline = if let Some(p) = cache.get(&key) {
             p.clone()
@@ -1234,6 +1326,13 @@ impl RenderScene {
         r.bind_group(1, &pass.bind_groups[pass.variant], &[]);
         if let Some(s) = stream {
             r.vertex_buffer(0, s.vertices.slice(..));
+        } else if let Geometry::Skinned { vertices, skin, .. } = pass.desc.geometry {
+            // Both buffers start at the mesh: its indices are relative to its first vertex.
+            let start = self.dynbuf.vertex_offset() + vertices.first * VERTEX_SIZE;
+            r.vertex_buffer(0, self.dynbuf.buffer().slice(u64::from(start)..));
+            if let Some(b) = &self.skin_buffer {
+                r.vertex_buffer(1, b.slice(u64::from(skin.first * SKIN_VERTEX_SIZE)..));
+            }
         } else {
             r.vertex_buffer(
                 0,
@@ -1255,6 +1354,12 @@ impl RenderScene {
                         indices.first..indices.first + indices.count,
                         vertices.first as i32,
                     );
+                }
+            }
+            Geometry::Skinned { indices, .. } => {
+                if let Some(ib) = &self.index_buffer {
+                    r.index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+                    r.draw_indexed(indices.first..indices.first + indices.count, 0);
                 }
             }
             Geometry::Stream(_) => {

@@ -14,6 +14,7 @@ mod engine;
 mod headless;
 mod particles;
 pub mod plan;
+pub mod puppet;
 mod scene;
 pub mod shaders;
 mod texture;

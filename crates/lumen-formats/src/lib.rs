@@ -7,7 +7,8 @@
 //!
 //! - [`pkg`]: memory-mapped, zero-copy archive reader with an index built once.
 //! - [`tex`]: `.tex` parser and conversion into a GPU-agnostic upload description.
-//! - [`mdl`]: the heuristic `MDLV` puppet mesh reader.
+//! - [`mdl`]: `MDLV` puppet readers: the heuristic mesh reader and the structured reader of
+//!   skeletons, attachments and animations.
 
 pub mod mdl;
 pub mod pkg;

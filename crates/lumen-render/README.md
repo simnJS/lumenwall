@@ -7,6 +7,7 @@ GPU foundation of the Lumen scene renderer (wgpu 30): device and outputs, textur
 - `specs/04-rendu-scene-effets.md` (main source: §0–§17, §21, §24, open questions Q1–Q25).
 - `specs/03-shaders.md` §11–§13 (render states, engine uniforms, matrices), §3.4 (vertex attributes), §2.4 (`commands/copy`).
 - `specs/05-particules.md` §12 (vertex formats, used for sizing only; particles are not wired yet).
+- `specs/08-puppet-squelette.md` §9.7–§9.8 (skinning attributes, `mat4x3` bone palette).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`, `docs/TESTING.md` (reference wallpaper used only to size the benchmark: pass count and target scales).
 - Public documentation and API of `wgpu` 30.0.1 and `naga` 30.0.1.
 
@@ -22,7 +23,7 @@ No upstream code, fork or snippet was consulted.
 | `targets` | `RenderTargetPool`: RGBA8 UNORM targets, scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. |
 | `blend` | WE `blending` → `wgpu::BlendState` (§14), RGB-only write mask, culling, `FrontFace::Cw` (verified by test). |
 | `shader` | Pass binding contract, reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation, GPU module creation under an error scope. |
-| `dynbuf` | One buffer for frame globals + every pass uniform block (dynamic offsets) + image vertices; CPU shadow with change detection and one `write_buffer` per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. |
+| `dynbuf` | One buffer for frame globals + every pass uniform block (dynamic offsets) + image vertices; CPU shadow with change detection and one `write_buffer` per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. Writes follow nested layouts (arrays of matrices such as `mat4x3 g_Bones[N]`: 16-byte columns, 64-byte elements). |
 | `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind groups per slot-0 variant (animated textures), automatic hazard copies, consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. |
 | `chain` | §9.8/§10/§11.6: destinations, inputs, `previous`, A/B ping-pong, geometry case, matrix kind, blend transfer, RGB-only last pass (pure, unit tested with the spec examples). |
 | `image` | `add_image` (chain plan → passes, geometry, static matrices) and `ImageHandle::update` (rect, alignment, rotation pivot, `M_ecran` with parallax, scene geometry) every frame. |
@@ -64,7 +65,7 @@ let mut output = OutputSurface::new(&ctx, surface, (w, h))?;
 - `@group(0) @binding(0)`: optional `var<uniform>` struct holding the pass uniforms. Member names are the WE names (`g_ModelViewProjectionMatrix`, `g_Time`, material constants…); offsets and types are read from the naga struct. Bound with a dynamic offset.
 - `@group(0) @binding(1)`: optional frame block, layout `dynbuf::FRAME_GLOBALS_WGSL` (`g_Time`, `g_Daytime`, pointers, texel sizes, audio spectra packed in `vec4` arrays). Using it instead of pass-block copies saves CPU work; both are supported.
 - `@group(1) @binding(2N)`: `texture_2d<f32>` of slot N (`g_TextureN`, N < 8); `@binding(2N+1)`: its filtering sampler.
-- Vertex inputs by argument/member name: `a_Position` (3 floats) and `a_TexCoord` (2 floats) are fed; any other `@location` receives (0, 0, 0, 1).
+- Vertex inputs by argument/member name: `a_Position` (3 floats) and `a_TexCoord` (2 floats) are fed; with `Geometry::Skinned`, `a_BlendIndices` (integer vector), `a_BlendWeights`, `a_Normal` and `a_Tangent4` read the static skin buffer (`SkinVertex`, 64 bytes, `SceneBuilder::add_skin`); any other `@location` receives (0, 0, 0, 1).
 - The vertex output is in the **GLSL/upstream clip convention**; lumen-render appends the wgpu correction. Do not apply it in the translator.
 - One fragment output at `@location(0)`.
 
@@ -157,7 +158,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 ## Not done yet (wired later)
 
 - Text objects (R8 glyph texture, `text_matrix` is ready), video and web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks).
-- Added for the integration (`lumen-engine`): vertex streams for particles (`SceneBuilder::add_stream`, `Geometry::Stream`, `RenderScene::write_stream`, inputs matched by name through `ShaderInterface::vertex_input_names`, never bundled) and rest-pose puppet meshes (`add_image_with_puppet`, `PuppetGeometry`).
+- Added for the integration (`lumen-engine`): vertex streams for particles (`SceneBuilder::add_stream`, `Geometry::Stream`, `RenderScene::write_stream`, inputs matched by name through `ShaderInterface::vertex_input_names`, never bundled) and puppet meshes (`add_image_with_puppet`, `PuppetGeometry`). A `PuppetGeometry` with one `SkinVertex` per vertex becomes `Geometry::Skinned`: slot 0 and the skin buffer (slot 1) are both bound at the mesh's first vertex, indices drawn with base 0, still bundled. `ImageHandle::puppet_vertices` / `puppet_passes` give the caller the vertex range (CPU skinning through `set_vertices`) and the passes whose `g_Bones` it writes (GPU skinning). The engine supplies the palette; nothing here knows about bones.
 - Real WE shaders: depends on `lumen-shader` emitting the binding contract above.
 - Lazy allocation of image B composites when the chain never writes B (memory).
 - Load-op `Clear` instead of `Load` for passes that fully overwrite their target (saves bandwidth on tiled/integrated GPUs; needs a coverage guarantee to stay parity-safe).
