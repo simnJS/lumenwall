@@ -32,6 +32,8 @@ impl Audio {
             volume: plan.volume.min(128),
             silent: plan.silent,
         });
+        // Silent until `resume` (an output shows the wallpaper).
+        player.set_hidden(true);
         let handle = player.handle();
         let automute = AutomuteDetector::new(
             AutomuteSettings {
@@ -152,18 +154,21 @@ impl Audio {
         self.player.set_paused(paused);
     }
 
-    /// Starts the capture (first frame, resume).
+    /// Starts the capture and the scene sounds (first frame, resume).
     pub fn resume(&mut self) {
         if let Some(c) = &mut self.capture {
             c.start();
         }
+        self.player.set_hidden(false);
     }
 
-    /// Stops the capture while every output is paused (no wake-ups, spec 07 §13.1).
+    /// Stops the capture and suspends the scene sounds while every output is paused (no
+    /// wake-ups, spec 07 §13.1; sounds: see the lumenwall-audio README, Deviations).
     pub fn pause(&mut self) {
         if let Some(c) = &mut self.capture {
             c.stop();
         }
+        self.player.set_hidden(true);
         self.analyzer.reset();
     }
 

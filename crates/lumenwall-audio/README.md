@@ -45,9 +45,23 @@ Both sit on cpal like this crate, but keep their output stream (and its wake-ups
 
 ### Engine integration
 
-- §13.1: `SpectrumAnalyzer::new(fps)` if a wallpaper declares `supportsaudioprocessing` and `--no-audio-processing` is absent, else `disabled()`. `default_capture(analyzer.feed())`, `start()` on resume, `stop()` on pause. Call `update(dt)` once per rendered frame; upload `left*/right*`.
+- §13.1: `SpectrumAnalyzer::new(fps)` if a wallpaper declares `supportsaudioprocessing` and `--no-audio-processing` is absent, else `disabled()`. `default_capture(analyzer.feed())`, `start()` on resume, `stop()` when every output is paused or on user pause. Call `update(dt)` once per rendered frame; upload `left*/right*`.
 - `AutomuteDetector::new(settings, Some(cb))` with `cb` forwarding to `PlayerHandle::set_other_app_playing` (reacts even when no frame is rendered); per frame `update(fullscreen)` and forward changes.
-- `Player::new(PlayerConfig { volume: clamp_volume(v), silent })`. For §9.4 parity, pause scene sounds in fullscreen only through automute (with `--noautomute` they keep playing).
+- `Player::new(PlayerConfig { volume: clamp_volume(v), silent })`. `set_hidden(true)` while every output is paused (fullscreen, covered, locked, display off), `false` when one shows the wallpaper again; independent of the user pause (`set_paused`). The engine creates the player hidden and un-hides it on its first resume (see Deviations).
+
+### Wake-ups
+
+Capture measured with `voluntary_ctxt_switches` of `/proc/<pid>/task/*/status` over 10 s (release, `--silent`, 3372348904, user pause over IPC); the other rows follow from the code (no audible test is run), the sound row is covered by `hidden_player_keeps_the_device_closed_and_sounds_unconsumed`.
+
+| Thread | Running | Every output paused / user pause |
+|---|---|---|
+| `lumenwall-capture` (Pulse on pipewire-pulse 1.6.2) | 10.2/s: one per 100 ms fragment pushed by the server, blocking `poll` without timeout | thread joined: 0 (a new one starts on resume, 10.2/s again) |
+| `lumenwall-sound` + device thread | only while something is audible | stream closed, control thread blocked on its channel: 0 |
+| automute watcher (when enabled) | one per server event | one per server event |
+
+- PipeWire backend: `node.latency = 4410/44100` asks for the same ~10 quanta per second (not measured, not compiled here).
+- WASAPI loopback (cpal): event-driven; shared mode signals once per device period (`GetDevicePeriod`, usually 10 ms), so ~100 wake-ups/s while another program plays sound and none while the endpoint is silent or the capture is stopped. Shared mode cannot lengthen that period; a 100 ms timer-driven reader would be polling. Not measured (never run on Windows).
+- Not ours: with every output paused, the only remaining wake-ups of the process on the development machine (NVIDIA 595.99.02, Vulkan) come from driver threads created inside `vkCreateDevice` (`libnvidia-glcore`): an unnamed thread at ~100/s (`pthread_cond_timedwait`, 10 ms), `[vkrt]` ~10/s, `[vkps]` ~4/s, 0.00 % CPU. They live as long as the wgpu device does, with or without audio.
 - `DEFAULT_VOLUME` is 64 (50 % in the UI, gain 0.5); `REFERENCE_DEFAULT_VOLUME` is the reference's 15 (12 %, gain 0.12, −18.6 dB). The `lumenwall` application sets the volume; per-wallpaper levels are applied by it on top of this global volume.
 
 ## Build and test matrix
@@ -67,7 +81,8 @@ Linux release builds should enable `pipewire,pulse` (runtime fallback: PipeWire 
 
 - Automute subscribes to server events instead of a synchronous per-frame stream-list query (rule 1); same result, no frame stalls.
 - Capture never blocks without a sound server (QO-14, rule 2): bands stay at 0, retry every 5 s.
-- The output stream is closed while paused, muted, automuted, at volume 0 or when every sound ended; the reference outputs silence. Sounds are not advanced either way.
+- The output stream is closed while paused, hidden, muted, automuted, at volume 0 or when every sound ended; the reference outputs silence. Sounds are not advanced either way.
+- Scene sounds are suspended (not advanced, output stream closed) while every output is paused, with or without automute: a hidden wallpaper costs no wake-up (`docs/PERFORMANCE.md`), as with Wallpaper Engine's "Pause" playback setting. The reference keeps them playing during the fullscreen pause unless automute is on (§9.4).
 - Smoothing uses real elapsed time scaled to the reference frame rate (rule 6).
 - No capture data for 0.5 s → targets 0. WASAPI loopback and suspended PipeWire sinks deliver nothing, where the reference's Pulse monitor delivers silence (which gives 0).
 - Conversion to the reference format is ours (mean downmix, rounding quantiser); the server's exact algorithms are unknown. Tones differ by ≤ 1 LSB and < 0.01 on their band.

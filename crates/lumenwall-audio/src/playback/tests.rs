@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use super::decode::{DeviceFormat, VoiceFeeder, probe_format};
 use super::mix::VoiceOut;
-use super::{Player, PlayerConfig, SoundFile};
+use super::{Control, Engine, ObjectId, Player, PlayerConfig, SoundFile};
 use crate::sound::{PlaybackMode, SoundObject};
 
 /// 16-bit PCM WAV with a sine (or silence when `freq` is 0).
@@ -191,6 +191,66 @@ fn silent_player_loads_nothing() {
     assert!(p.add_object(&obj, vec![wav(48_000, 1, 10, 0.0)]).is_none());
 }
 
+/// "Hidden" (every output paused) suspends playback on its own, independently of the user
+/// pause, and is visible through handles.
+#[test]
+fn hidden_suspends_independently_of_user_pause() {
+    let ctl = Control::new(64);
+    assert!(!ctl.suspended());
+    ctl.hidden.store(true, Ordering::Release);
+    assert!(ctl.suspended(), "hidden alone suspends");
+    ctl.paused.store(true, Ordering::Release);
+    ctl.hidden.store(false, Ordering::Release);
+    assert!(ctl.suspended(), "user pause alone suspends");
+    ctl.paused.store(false, Ordering::Release);
+    assert!(!ctl.suspended());
+
+    let p = Player::new(PlayerConfig {
+        volume: 64,
+        silent: true,
+    });
+    p.set_hidden(true);
+    assert!(p.handle().ctl.suspended());
+    p.handle().set_hidden(false);
+    assert!(!p.handle().ctl.suspended());
+}
+
+/// While hidden, audible sounds never open the output device (no stream, no device thread, no
+/// wake-up) and are not consumed: their rings stay full for the resume. Runs without a device:
+/// the control thread's refresh is driven directly.
+#[test]
+fn hidden_player_keeps_the_device_closed_and_sounds_unconsumed() {
+    let ctl = Arc::new(Control::new(64));
+    ctl.hidden.store(true, Ordering::Release);
+    let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+    let mut engine = Engine::new(ctl.clone(), tx);
+    let obj =
+        SoundObject::from_json(&serde_json::json!({"sound": ["s.wav"], "playbackmode": "loop"}))
+            .unwrap();
+    engine.add(ObjectId(0), &obj, vec![wav(48_000, 2, 48_000, 440.0)]);
+    assert!(engine.audible());
+    let queued = |e: &Engine| {
+        e.mix
+            .lock()
+            .unwrap()
+            .voices
+            .iter()
+            .map(|v| v.consumer.slots())
+            .sum::<usize>()
+    };
+    let before = queued(&engine);
+    assert!(before > 0, "the voice is pre-decoded");
+    for _ in 0..3 {
+        engine.refresh();
+        assert!(engine.stream.is_none(), "no output stream while hidden");
+        assert!(
+            engine.host.is_none(),
+            "the audio host is never touched while hidden"
+        );
+    }
+    assert_eq!(queued(&engine), before, "suspended, not advanced");
+}
+
 /// Decodes the reference wallpaper's sound with the playback stack (no audio output).
 /// Needs the unpacked copy described in docs/TESTING.md.
 #[test]
@@ -278,6 +338,9 @@ fn live_device_lifecycle_with_silence() {
     p.set_paused(true);
     std::thread::sleep(Duration::from_millis(100));
     p.set_paused(false);
+    p.set_hidden(true);
+    std::thread::sleep(Duration::from_millis(100));
+    p.set_hidden(false);
     p.set_other_app_playing(true);
     p.set_other_app_playing(false);
     p.set_object_volume(id, 0.5);

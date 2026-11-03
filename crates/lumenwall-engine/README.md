@@ -63,7 +63,7 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   frame block), particles, animated textures, spectrum, accumulation settling. A static scene
   renders once and then sleeps; pointer events wake it only if it reads the pointer.
 - Paused outputs (fullscreen, covered, locked, display off) get no frame; when every output is
-  paused the spectrum capture stops.
+  paused the spectrum capture stops and the scene sounds are suspended (`Player::set_hidden`).
 - One scene per target, updated and encoded once per loop iteration even when several outputs
   show it; each output then composes it with its own scaling and clamp.
 - Scripts with per-frame work (`update`, timers, audio buffers, text layers, queued events) keep
@@ -332,7 +332,7 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Load (scene, 13 textures, 23 WE passes from the shader cache, 4 particle systems) | 80–230 ms |
 | Window 1720×720, 30 fps cap | 30.0 fps, CPU 0.4–0.6 ms/frame, 1.8 % of one core, GPU 0.8–4.7 ms/frame (clock-dependent: the GPU stays at low clocks under this load; 0.5 ms headless at full clocks) |
 | Desktop on DP-4 + DP-5 (2560×1440 each, X11 via XWayland) | 30.0 fps, 1.6 % of one core, RSS 240 MiB (anonymous 49 MiB, the rest is file-backed driver libraries and the mapped `.pkg`), VRAM 268 MiB (nvidia-smi), 127 MiB tracked by lumenwall-render |
-| Fullscreen window on top | paused, 0.2 % of one core (sound thread) |
+| Fullscreen window on top / user pause | paused; scene sounds suspended, capture closed: 0 wake-ups/s on Lumenwall's threads, 0.00 % CPU (`--silent`, 3018340632 and 3372348904). Left: NVIDIA driver threads created by `vkCreateDevice`, ~115/s (an unnamed one at ~100/s, `[vkrt]` ~10/s, `[vkps]` ~4/s), alive as long as the wgpu device |
 | Video wallpaper 3655057993 (4K60 H.264, 30 fps cap), zero copy | 30.0 fps, 2.3–2.6 % of one core, RSS 325 MiB, VRAM 318 MiB; paused: 0.00 % |
 | Web wallpapers in a visible 1920×1080 window (all processes of the instance, details in `crates/lumenwall-web/README.md`) | clock 3044696375: 11.7 % of one core (lumenwall 1.7 %), PSS 493 MiB, VRAM 145 MiB; CORSAIR collection 8.1 %; Corsair-O-Tron 15.9 %; paused 0.5 %. Frame copy 0.33 ms (DMA-BUF), 3.9 ms (shared-memory fallback, ≈ 2× the total CPU). Scene 3018340632 in the same window: 2.2 %, PSS 113 MiB, VRAM 302 MiB |
 | Hot switch over IPC (`apply`) | scene → web 2–3 ms (host started, page painted ≈ 0.4–1 s later), web → scene 96–122 ms (scene load) |

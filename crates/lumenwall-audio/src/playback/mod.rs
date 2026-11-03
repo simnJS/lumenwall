@@ -3,9 +3,10 @@
 //! Architecture (no kira/rodio, see README): one control thread decodes with symphonia into a
 //! lock-free ring per voice and owns the cpal output stream; the device callback only sums the
 //! rings with the reference's saturating formula. The output stream exists only while
-//! something is audible: it is dropped when paused, muted, automuted, at volume 0, or when
-//! every sound has ended, so an idle player costs no wake-ups. Voices are not consumed while
-//! the stream is down, which matches "suspended, not advanced" (§11.1).
+//! something is audible: it is dropped when paused, hidden (no output shows the wallpaper),
+//! muted, automuted, at volume 0, or when every sound has ended, so an idle player costs no
+//! wake-ups. Voices are not consumed while the stream is down, which matches "suspended, not
+//! advanced" (§11.1).
 
 mod decode;
 mod mix;
@@ -68,6 +69,7 @@ const SCRATCH_SAMPLES: usize = 16_384;
 /// Flags shared with handles and the device callback.
 struct Control {
     paused: AtomicBool,
+    hidden: AtomicBool,
     muted: AtomicBool,
     other_playing: AtomicBool,
     volume: AtomicU8,
@@ -75,8 +77,20 @@ struct Control {
 }
 
 impl Control {
+    fn new(volume: u8) -> Self {
+        Self {
+            paused: AtomicBool::new(false),
+            hidden: AtomicBool::new(false),
+            muted: AtomicBool::new(false),
+            other_playing: AtomicBool::new(false),
+            volume: AtomicU8::new(volume.min(crate::MAX_VOLUME as u8)),
+            wake_pending: AtomicBool::new(false),
+        }
+    }
+
     fn suspended(&self) -> bool {
         self.paused.load(Ordering::Acquire)
+            || self.hidden.load(Ordering::Acquire)
             || self.muted.load(Ordering::Acquire)
             || self.other_playing.load(Ordering::Acquire)
             || self.volume.load(Ordering::Acquire) == 0
@@ -125,9 +139,18 @@ impl PlayerHandle {
         self.wake();
     }
 
-    /// Wallpaper paused: the output stream is closed.
+    /// Wallpaper paused by the user: the output stream is closed.
     pub fn set_paused(&self, paused: bool) {
         self.ctl.paused.store(paused, Ordering::Release);
+        self.wake();
+    }
+
+    /// No output shows the wallpaper (every output paused: fullscreen window, covered, locked,
+    /// display off). Like [`set_paused`](Self::set_paused), but independent of it: sounds are
+    /// suspended without being consumed and the output stream is closed, so a hidden wallpaper
+    /// costs no wake-up; they resume where they stopped when it is shown again.
+    pub fn set_hidden(&self, hidden: bool) {
+        self.ctl.hidden.store(hidden, Ordering::Release);
         self.wake();
     }
 
@@ -157,13 +180,7 @@ impl Player {
     /// Creates the player. With `silent`, nothing is opened or loaded (§11.1). Never fails:
     /// device problems are logged and the player stays silent.
     pub fn new(config: PlayerConfig) -> Self {
-        let ctl = Arc::new(Control {
-            paused: AtomicBool::new(false),
-            muted: AtomicBool::new(false),
-            other_playing: AtomicBool::new(false),
-            volume: AtomicU8::new(config.volume.min(crate::MAX_VOLUME as u8)),
-            wake_pending: AtomicBool::new(false),
-        });
+        let ctl = Arc::new(Control::new(config.volume));
         if config.silent {
             tracing::info!("sound disabled (--silent): no output device, scene sounds not loaded");
             return Self {
@@ -248,6 +265,11 @@ impl Player {
     /// See [`PlayerHandle::set_paused`].
     pub fn set_paused(&self, paused: bool) {
         self.handle.set_paused(paused);
+    }
+
+    /// See [`PlayerHandle::set_hidden`].
+    pub fn set_hidden(&self, hidden: bool) {
+        self.handle.set_hidden(hidden);
     }
 
     /// See [`PlayerHandle::set_muted`].
