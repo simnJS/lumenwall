@@ -2695,14 +2695,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-engine"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "lumen-assets",
+ "lumen-audio",
+ "lumen-formats",
+ "lumen-particles",
+ "lumen-platform",
+ "lumen-render",
+ "lumen-scene",
+ "lumen-shader",
+ "naga",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu",
+]
+
+[[package]]
 name = "lumen-formats"
 version = "0.1.0"
 dependencies = [
  "bcdec_rs",
+ "crc32fast",
  "criterion",
  "image",
  "lz4_flex",
  "memmap2",
+ "miniz_oxide 0.8.9",
  "proptest",
  "serde_json",
  "tempfile",
