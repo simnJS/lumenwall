@@ -1,0 +1,67 @@
+[package]
+name = "lumenwall-platform"
+description = "Desktop integration: wallpaper surfaces, monitors, fullscreen detection, input."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["wayland", "x11", "windowed"]
+# Linux: wlr-layer-shell wallpaper surfaces (sway, Hyprland, niri, KDE, COSMIC...).
+wayland = [
+    "dep:smithay-client-toolkit",
+    "dep:wayland-client",
+    "dep:calloop",
+    "dep:calloop-wayland-source",
+]
+# Linux: desktop-type windows on X11 (one per RandR output).
+x11 = ["dep:x11rb", "dep:calloop", "dep:rustix"]
+# Debug window (`-w`) through winit, on every OS.
+windowed = ["dep:winit"]
+
+[dependencies]
+raw-window-handle = "0.6.2"
+thiserror.workspace = true
+tracing.workspace = true
+winit = { version = "0.30.13", optional = true, default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+calloop = { version = "0.14.5", optional = true }
+calloop-wayland-source = { version = "0.4.1", optional = true }
+smithay-client-toolkit = { version = "0.21.1", optional = true, default-features = false, features = ["calloop"] }
+# `system` gives the libwayland `wl_display*` that wgpu needs; `dlopen` avoids a link-time dependency.
+wayland-client = { version = "0.31.14", optional = true, features = ["system", "dlopen"] }
+# `allow-unsafe-code` exposes the `xcb_connection_t*` that Vulkan/EGL need; `dl-libxcb` loads libxcb at runtime.
+# `present` (which needs `dri3` in x11rb 0.14) detects windows hidden by native Wayland windows on XWayland.
+x11rb = { version = "0.14.0", optional = true, features = ["allow-unsafe-code", "dl-libxcb", "randr", "dpms", "screensaver", "present", "dri3"] }
+# CLOCK_MONOTONIC in microseconds, to date Present completions by their UST (already in the tree via calloop).
+rustix = { version = "1.1.6", optional = true, default-features = false, features = ["std", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "surface_info"
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 # Clean-room process
 
-Lumen reproduces the observable behaviour of an existing GPL-3.0 project without deriving from its source code. This is what allows Lumen to be released under the permissive MIT OR Apache-2.0 licenses: code derived from GPL or AGPL sources would have to be GPL itself.
+Lumenwall reproduces the observable behaviour of an existing GPL-3.0 project without deriving from its source code. This is what allows Lumenwall to be released under the permissive MIT OR Apache-2.0 licenses: code derived from GPL or AGPL sources would have to be GPL itself.
 
 ## Roles
 

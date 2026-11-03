@@ -2736,7 +2736,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 
 [[package]]
-name = "lumen"
+name = "lumenwall"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2745,10 +2745,10 @@ dependencies = [
  "embed-manifest",
  "embed-resource",
  "libc",
- "lumen-engine",
- "lumen-formats",
- "lumen-ipc",
- "lumen-scene",
+ "lumenwall-engine",
+ "lumenwall-formats",
+ "lumenwall-ipc",
+ "lumenwall-scene",
  "notify",
  "serde",
  "serde_json",
@@ -2764,10 +2764,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-assets"
+name = "lumenwall-assets"
 version = "0.1.0"
 dependencies = [
- "lumen-formats",
+ "lumenwall-formats",
  "serde_json",
  "steamlocate",
  "tempfile",
@@ -2777,7 +2777,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-audio"
+name = "lumenwall-audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
@@ -2796,21 +2796,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-engine"
+name = "lumenwall-engine"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "glam 0.30.10",
- "lumen-assets",
- "lumen-audio",
- "lumen-formats",
- "lumen-particles",
- "lumen-platform",
- "lumen-render",
- "lumen-scene",
- "lumen-script",
- "lumen-shader",
- "lumen-video",
+ "lumenwall-assets",
+ "lumenwall-audio",
+ "lumenwall-formats",
+ "lumenwall-particles",
+ "lumenwall-platform",
+ "lumenwall-render",
+ "lumenwall-scene",
+ "lumenwall-script",
+ "lumenwall-shader",
+ "lumenwall-video",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
@@ -2819,7 +2819,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-formats"
+name = "lumenwall-formats"
 version = "0.1.0"
 dependencies = [
  "bcdec_rs",
@@ -2838,7 +2838,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-ipc"
+name = "lumenwall-ipc"
 version = "0.1.0"
 dependencies = [
  "interprocess",
@@ -2849,7 +2849,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-particles"
+name = "lumenwall-particles"
 version = "0.1.0"
 dependencies = [
  "criterion",
@@ -2860,7 +2860,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-platform"
+name = "lumenwall-platform"
 version = "0.1.0"
 dependencies = [
  "calloop 0.14.5",
@@ -2878,7 +2878,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-render"
+name = "lumenwall-render"
 version = "0.1.0"
 dependencies = [
  "ash",
@@ -2894,7 +2894,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-scene"
+name = "lumenwall-scene"
 version = "0.1.0"
 dependencies = [
  "glam 0.30.10",
@@ -2905,7 +2905,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-script"
+name = "lumenwall-script"
 version = "0.1.0"
 dependencies = [
  "criterion",
@@ -2914,11 +2914,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-shader"
+name = "lumenwall-shader"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "lumen-render",
+ "lumenwall-render",
  "naga 30.0.1",
  "postcard",
  "rayon",
@@ -2929,14 +2929,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-ui"
+name = "lumenwall-ui"
 version = "0.1.0"
 dependencies = [
  "dirs",
  "embed-resource",
  "iced",
  "image",
- "lumen-ipc",
+ "lumenwall-ipc",
  "lz4_flex",
  "notify",
  "rfd",
@@ -2954,13 +2954,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-video"
+name = "lumenwall-video"
 version = "0.1.0"
 dependencies = [
  "ash",
  "ffmpeg-sys-next",
  "libc",
- "lumen-render",
+ "lumenwall-render",
  "memmap2",
  "thiserror 2.0.21",
  "tracing",
@@ -2969,7 +2969,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-web"
+name = "lumenwall-web"
 version = "0.1.0"
 dependencies = [
  "cef",

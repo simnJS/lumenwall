@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Lumenwall engine
+Name[fr]=Moteur Lumenwall
+GenericName=Animated wallpaper
+Comment=Plays Wallpaper Engine scene wallpapers on the desktop
+# The wallpaper comes from ~/.config/lumenwall/config.toml (`wallpaper = "<workshop id or path>"`).
+# To pin one here instead: Exec=lumenwall 3018340632
+Exec=lumenwall
+Icon=lumenwall
+Terminal=false
+NoDisplay=true
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-KDE-autostart-after=panel

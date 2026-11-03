@@ -22,7 +22,7 @@ The cache is written only from `main`; pull requests restore it.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-LUMEN_GPU_TESTS=1 cargo test --workspace --locked -- --ignored gpu
+LUMENWALL_GPU_TESTS=1 cargo test --workspace --locked -- --ignored gpu
 cargo deny --locked check            # cargo install cargo-deny --locked
 cargo build --workspace --release --locked
 ```
@@ -34,19 +34,19 @@ Linux packages: the list in `.github/actions/setup-rust/action.yml` (Ubuntu name
 
 Convention for every crate:
 
-- A GPU test is `#[ignore = "GPU: LUMEN_GPU_TESTS=1 cargo test -- --ignored gpu"]` and has `gpu` in its path (a `gpu` module or a `gpu_` prefix). Plain `cargo test` never touches the GPU.
-- `LUMEN_GPU_TESTS=1` means "an adapter is guaranteed": a test that cannot get one must **fail**. Without it, the test prints why and returns, so `--ignored` on a machine without GPU does not fail spuriously. CI sets it, so a broken lavapipe/WARP setup cannot pass silently.
+- A GPU test is `#[ignore = "GPU: LUMENWALL_GPU_TESTS=1 cargo test -- --ignored gpu"]` and has `gpu` in its path (a `gpu` module or a `gpu_` prefix). Plain `cargo test` never touches the GPU.
+- `LUMENWALL_GPU_TESTS=1` means "an adapter is guaranteed": a test that cannot get one must **fail**. Without it, the test prints why and returns, so `--ignored` on a machine without GPU does not fail spuriously. CI sets it, so a broken lavapipe/WARP setup cannot pass silently.
 - Pick the adapter from the environment, so CI can force the software one (`WGPU_BACKEND`, `WGPU_ADAPTER_NAME`):
 
 ```rust
-/// Adapter for a GPU test; `None` means "skip" (only allowed without LUMEN_GPU_TESTS=1).
+/// Adapter for a GPU test; `None` means "skip" (only allowed without LUMENWALL_GPU_TESTS=1).
 pub fn test_adapter() -> Option<wgpu::Adapter> {
-    let required = std::env::var_os("LUMEN_GPU_TESTS").is_some_and(|v| v == "1");
+    let required = std::env::var_os("LUMENWALL_GPU_TESTS").is_some_and(|v| v == "1");
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     match pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(&instance, None)) {
         Ok(adapter) => Some(adapter),
-        Err(err) if required => panic!("LUMEN_GPU_TESTS=1 but no GPU adapter: {err}"),
+        Err(err) if required => panic!("LUMENWALL_GPU_TESTS=1 but no GPU adapter: {err}"),
         Err(err) => {
             eprintln!("GPU test skipped: {err}");
             None
@@ -68,10 +68,10 @@ Development happens on Linux; the Windows jobs are the only Windows build. On ev
 
 - compile all `cfg(windows)` code with the real MSVC toolchain and lint it with clippy;
 - run the unit tests on Windows (paths, Win32 API wrappers, WASAPI/COM error handling);
-- render through DX12 on WARP, the same backend Lumen uses on Windows;
-- publish the release `lumen.exe` as an artifact for manual testing.
+- render through DX12 on WARP, the same backend Lumenwall uses on Windows;
+- publish the release `lumenwall.exe` as an artifact for manual testing.
 
-From Linux, `cargo clippy -p <crate> --target x86_64-pc-windows-msvc` type-checks the Windows code of pure-Rust crates before pushing. Crates whose dependencies compile C or assembly need an MSVC compiler and fail this way (today `lumen-script` through rquickjs-sys, `lumen-assets` through stacker); for those, rely on CI or an MSVC sysroot such as `cargo xwin`.
+From Linux, `cargo clippy -p <crate> --target x86_64-pc-windows-msvc` type-checks the Windows code of pure-Rust crates before pushing. Crates whose dependencies compile C or assembly need an MSVC compiler and fail this way (today `lumenwall-script` through rquickjs-sys, `lumenwall-assets` through stacker); for those, rely on CI or an MSVC sysroot such as `cargo xwin`.
 
 Not covered by CI (runner = Windows Server with no GPU, no audio device, one virtual screen): the Windows 11 24H2/25H2 desktop layering (Progman/WorkerW), real GPU drivers and D3D11VA decoding, WASAPI loopback on a real device, multi-monitor and DPI scaling. Before each release, run the release artifact on a Windows 11 machine or VM through that list; a self-hosted Windows 11 runner with a GPU can automate it later. Tests that need an audio device must treat "no device" as a normal outcome (`docs/PARITY-POLICY.md`, rule 2).
 

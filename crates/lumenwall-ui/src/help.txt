@@ -1,0 +1,27 @@
+lumenwall-ui: browse, apply and configure Lumenwall wallpapers
+
+USAGE:
+    lumenwall-ui                  Open the window
+    lumenwall-ui --tray           Tray icon only (pause, mute, open, quit)
+    lumenwall-ui --background     Start the engine if needed, then the tray icon
+                              (what "Start with my session" runs)
+
+DEVELOPER OPTIONS:
+    --fake-daemon             Talk to an in-process fake engine (real IPC transport)
+    --demo-library            Use a generated library instead of Steam (no Workshop content)
+    --fake-steam              Local fake Steam Web API (made-up items, generated images)
+    --no-key                  Act as if no Steam Web API key was saved
+    --ws-select <text>        Open the first Workshop result whose title contains <text>
+    --page <library|workshop|screens|settings>
+    --select <text>           Select the first wallpaper whose title contains <text>
+    --lang <en|fr>            Language for this run
+    --size <W>x<H>            Window size in points
+    --screenshot <file.png>   Save the window once loaded, then exit
+    --screenshot-delay <s>    Wait at least this long before the screenshot
+
+ENVIRONMENT:
+    LUMENWALL_IPC_ENDPOINT        Daemon socket path (Linux) or pipe name (Windows)
+    LUMENWALL_UI_RENDERER         software (CPU) or wgpu (default, falls back to software)
+    LUMENWALL_LOG                 Log filter, e.g. "debug"
+    LUMENWALL_UI_REDUCE_MOTION    1: no UI animations, 0: animations (default: system setting)
+    LUMENWALL_WE_WORKSHOP         Extra Workshop folder (testing)

@@ -18,7 +18,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. lumen --fps 30 <workshop id>
+        1. lumenwall --fps 30 <workshop id>
         2. Open a fullscreen window
         3. ...
     validations:
@@ -43,8 +43,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Lumen version or commit
-      description: Output of `lumen --version`, or the commit you built (`git rev-parse --short HEAD`).
+      label: Lumenwall version or commit
+      description: Output of `lumenwall --version`, or the commit you built (`git rev-parse --short HEAD`).
     validations:
       required: true
   - type: input
@@ -90,13 +90,13 @@ body:
     id: command
     attributes:
       label: Command line and configuration
-      description: The `lumen` command you ran and the content of `~/.config/lumen/config.toml` (or `%APPDATA%\Lumen\config.toml`), if any.
+      description: The `lumenwall` command you ran and the content of `~/.config/lumenwall/config.toml` (or `%APPDATA%\Lumenwall\config.toml`), if any.
       render: shell
   - type: textarea
     id: logs
     attributes:
       label: Logs
-      description: Run with `LUMEN_LOG=debug` and paste the output. For performance problems, add a few lines of `LUMEN_STATS=1`. Remove your user name from paths if you prefer.
+      description: Run with `LUMENWALL_LOG=debug` and paste the output. For performance problems, add a few lines of `LUMENWALL_STATS=1`. Remove your user name from paths if you prefer.
       render: text
   - type: textarea
     id: reference

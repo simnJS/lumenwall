@@ -1,0 +1,50 @@
+[package]
+name = "lumenwall-web"
+description = "Web wallpapers rendered offscreen."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Chromium Embedded Framework host (separate process). The `cef` crate downloads the CEF binary
+# distribution at build time (linux64 minimal: ~333 MB, windows64 minimal: ~175 MB) unless
+# `CEF_PATH` points to an extracted distribution. See README.md.
+cef = ["dep:cef", "dep:cpal", "dep:rtrb"]
+# Type-check the CEF host against the bundled CEF bindings without downloading or linking CEF
+# (uses the `cef` crate's docs.rs mode). Produces no usable binary.
+cef-typecheck = ["cef", "cef/dox"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+cef = { version = "=156.3.0", default-features = false, optional = true }
+cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.3", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "net", "fs", "stdio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+
+[dev-dependencies]
+rquickjs = { version = "0.14", default-features = false, features = ["std"] }
+tempfile = "3.27.0"
+
+[[test]]
+name = "host_process"
+harness = false
+
+[[bin]]
+name = "lumenwall-web-host"
+path = "src/bin/lumenwall-web-host.rs"
+required-features = ["cef"]
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 # Performance principles
 
-Performance is Lumen's first priority. Every design and dependency choice is judged in this order:
+Performance is Lumenwall's first priority. Every design and dependency choice is judged in this order:
 
 1. CPU, GPU, RAM and power cost, idle and under load
 2. Visual and behavioural parity

@@ -1,4 +1,4 @@
-# Lumen CI. What each job does and how to run the same checks locally: docs/CI.md.
+# Lumenwall CI. What each job does and how to run the same checks locally: docs/CI.md.
 # Third-party actions are pinned to a commit SHA (tag in the trailing comment).
 name: CI
 
@@ -129,7 +129,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: GPU tests (software adapter)
         env:
-          LUMEN_GPU_TESTS: "1"
+          LUMENWALL_GPU_TESTS: "1"
         run: cargo test --workspace --locked -- --ignored gpu
 
   release:
@@ -152,9 +152,9 @@ jobs:
       # Private artifact (repository members only) for manual testing on a real desktop.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lumen-${{ runner.os }}-${{ github.sha }}
+          name: lumenwall-${{ runner.os }}-${{ github.sha }}
           path: |
-            target/release/lumen
-            target/release/lumen.exe
+            target/release/lumenwall
+            target/release/lumenwall.exe
           if-no-files-found: error
           retention-days: 7

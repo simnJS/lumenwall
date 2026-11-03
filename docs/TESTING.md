@@ -8,9 +8,9 @@ Tests that need real content are `#[ignore]` by default and read these variables
 
 | Variable | Example (Steam snap install, `~` = home directory) |
 |---|---|
-| `LUMEN_WE_ASSETS` | `~/snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets` |
-| `LUMEN_WE_WORKSHOP` | `~/snap/steam/common/.local/share/Steam/steamapps/workshop/content/431960` |
-| `LUMEN_TEST_WALLPAPER` | `$LUMEN_WE_WORKSHOP/3018340632` |
+| `LUMENWALL_WE_ASSETS` | `~/snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets` |
+| `LUMENWALL_WE_WORKSHOP` | `~/snap/steam/common/.local/share/Steam/steamapps/workshop/content/431960` |
+| `LUMENWALL_TEST_WALLPAPER` | `$LUMENWALL_WE_WORKSHOP/3018340632` |
 
 Run them with:
 
@@ -32,4 +32,4 @@ An unpacked copy lives in `testdata/we/3018340632/` (gitignored) for tests that 
 
 ## Second target
 
-**3655057993 — "Boykisser, Winter theme [4K]"** (video, 76 MB MP4: H.264 Main 3840×2160 60 fps, AAC). Used by the `lumen-video` GPU tests (`LUMEN_WE_WORKSHOP`), see `crates/lumen-video/README.md`.
+**3655057993 — "Boykisser, Winter theme [4K]"** (video, 76 MB MP4: H.264 Main 3840×2160 60 fps, AAC). Used by the `lumenwall-video` GPU tests (`LUMENWALL_WE_WORKSHOP`), see `crates/lumenwall-video/README.md`.

@@ -1,6 +1,6 @@
 # Lumenwall brand guidelines
 
-How Lumenwall looks and speaks: in the app, the README, packages and anything published about it. The design system in code is `crates/lumen-ui/src/theme.rs` (see [UI.md](UI.md)); this document is its reference and proposes the adjustments listed under [Tokens to change](#tokens-to-change-in-lumen-ui).
+How Lumenwall looks and speaks: in the app, the README, packages and anything published about it. The design system in code is `crates/lumenwall-ui/src/theme.rs` (see [UI.md](UI.md)); this document is its reference and proposes the adjustments listed under [Tokens to change](#tokens-to-change-in-lumenwall-ui).
 
 ![Lumenwall logo, palette, app icon and tray icons](../assets/brand/brand-sheet.png)
 
@@ -49,7 +49,7 @@ Every published claim must be checkable: a measurement in a crate README, a test
 
 ### Vocabulary (EN / FR)
 
-The UI ships in English and French (`crates/lumen-ui/src/i18n.rs`). Use the same words everywhere.
+The UI ships in English and French (`crates/lumenwall-ui/src/i18n.rs`). Use the same words everywhere.
 
 | English | Français | Notes |
 |---|---|---|
@@ -71,7 +71,7 @@ Write **Lumenwall**: one word, capital L only. Never "LumenWall", "Lumen Wall", 
 
 The technical identifier is **`lumenwall`**, lowercase: binaries, packages, icon names (`Icon=lumenwall`), file names (`lumenwall-*`), configuration directories. Do not combine the name with third-party names ("Lumenwall WE", "SteamLumenwall").
 
-Why not "Lumen": on 2026-11-03 the name was taken where Lumenwall has to live (the `lumen` crate and binary on crates.io and the AUR, the `lumen` snap, several live-wallpaper projects on GitHub), and searches are dominated by Laravel Lumen and Unreal Engine's Lumen lighting. "Lumenwall" keeps the idea, light on the wall, and was free on crates.io, the AUR, the Snap Store, Flathub and as a GitHub organisation (`lumenwall.dev` unregistered, `lumenwall.app` taken). No trademark search was made.
+Why not "Lumen": on 2026-11-03 the name was taken where Lumenwall has to live (the `lumenwall` crate and binary on crates.io and the AUR, the `lumenwall` snap, several live-wallpaper projects on GitHub), and searches are dominated by Laravel Lumen and Unreal Engine's Lumen lighting. "Lumenwall" keeps the idea, light on the wall, and was free on crates.io, the AUR, the Snap Store, Flathub and as a GitHub organisation (`lumenwall.dev` unregistered, `lumenwall.app` taken). No trademark search was made.
 
 ## Logo
 
@@ -81,7 +81,7 @@ The sun at the horizon and its reflection below: light above, calm below. It is 
 
 ### Construction
 
-The symbol is drawn on the 24-unit grid of the UI icons (`crates/lumen-ui/src/icons.rs`), with the same 2-unit weight and round ends.
+The symbol is drawn on the 24-unit grid of the UI icons (`crates/lumenwall-ui/src/icons.rs`), with the same 2-unit weight and round ends.
 
 | Part | Geometry (24-unit grid) |
 |---|---|
@@ -236,7 +236,7 @@ Other rules:
 
 ## Iconography
 
-UI icons live in `crates/lumen-ui/src/icons.rs` and are drawn for Lumenwall.
+UI icons live in `crates/lumenwall-ui/src/icons.rs` and are drawn for Lumenwall.
 
 - 24 × 24 grid, live area 20 × 20 (2 units of padding), outline style, 2-unit stroke, round caps and joins, corner radius 2. Solid shapes only for media controls (play, pause, volume) and filled status marks.
 - One metaphor per icon, no text inside, no perspective. Tinted at draw time with the text tokens (`muted` by default, `accent` when active).
@@ -254,7 +254,7 @@ The current scales work and stay; the proposals add what the views currently har
 | Radius (`radius`) | 6 (monitors, swatches) · 10 (buttons, inputs, notices) · 14 (cards, previews) · pill (chips, badges, search) |
 | Elevation | 1: y 1, blur 4, 28 % black · 2: y 6, blur 18, 34 % · 3: y 14, blur 36, 42 % (×0.45 in light theme) |
 
-### Tokens to change in `lumen-ui`
+### Tokens to change in `lumenwall-ui`
 
 | Token today | Proposed | Why |
 |---|---|---|
@@ -306,7 +306,7 @@ Each state has an illustration, a one-line title, one sentence of explanation an
 
 ## Screenshots
 
-- Only the generated demo library: `lumen-ui --demo-library --fake-daemon` (blurred colour fields, invented titles). Never Workshop previews or Wallpaper Engine content (copyrighted by their authors, see [TESTING.md](TESTING.md)).
+- Only the generated demo library: `lumenwall-ui --demo-library --fake-daemon` (blurred colour fields, invented titles). Never Workshop previews or Wallpaper Engine content (copyrighted by their authors, see [TESTING.md](TESTING.md)).
 - Window 1360 × 860, scale 1, `--screenshot <file.png>`; PNG; one file per page, theme and language: `<page>-<theme>-<lang>.png` in `docs/ui-screenshots/`.
 - English screenshots in the English README, French in the French one. Dark theme first (default), at least one light.
 - No personal data: user name, home path, Steam account, real monitor serials. Paths are `~`-shortened in the UI; check the "No Steam found" state before publishing it.

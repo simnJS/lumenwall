@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/brand/banner/lumenwall-banner-fr.png" alt="Lumen : des fonds d’écran animés qui dorment quand on ne les voit pas" width="100%">
+  <img src="assets/brand/banner/lumenwall-banner-fr.png" alt="Lumenwall : des fonds d’écran animés qui dorment quand on ne les voit pas" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/simnJS/lumen/actions/workflows/ci.yml"><img src="https://github.com/simnJS/lumen/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/simnJS/lumenwall/actions/workflows/ci.yml"><img src="https://github.com/simnJS/lumenwall/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="#licence"><img src="https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-ffb347?labelColor=20232c" alt="Licence : MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/plateformes-Linux%20%7C%20Windows%20%28aper%C3%A7u%29-ffb347?labelColor=20232c" alt="Plateformes : Linux, Windows (aperçu)">
   <img src="https://img.shields.io/badge/rust-1.90%2B-ffb347?labelColor=20232c" alt="Rust 1.90 ou plus récent">
@@ -11,10 +11,10 @@
 
 <p align="center"><a href="README.md">English</a> · <b>Français</b></p>
 
-**Lumen affiche les scènes du Workshop de Wallpaper Engine en fond d’écran sous Linux et Windows, avec un moteur natif en Rust qui ne dessine une image que lorsque quelque chose change à l’écran, et rien du tout quand le bureau est caché.**
+**Lumenwall affiche les scènes du Workshop de Wallpaper Engine en fond d’écran sous Linux et Windows, avec un moteur natif en Rust qui ne dessine une image que lorsque quelque chose change à l’écran, et rien du tout quand le bureau est caché.**
 
 > [!NOTE]
-> Lumen est en début de développement et n’a pas encore de version publiée. Les fonds d’écran de type scène fonctionnent aujourd’hui sous Linux. La vidéo, le web, la liaison entre l’application de bureau et le moteur, et Windows à l’exécution ne sont pas terminés : voir [Fonctionnalités](#fonctionnalités).
+> Lumenwall est en début de développement et n’a pas encore de version publiée. Les fonds d’écran de type scène et vidéo et l’application de bureau fonctionnent aujourd’hui sous Linux. Le web et Windows à l’exécution ne sont pas terminés : voir [Fonctionnalités](#fonctionnalités).
 
 ## Sommaire
 
@@ -31,7 +31,7 @@
 
 ## Captures d’écran
 
-L’application de bureau, `lumen-ui`, avec sa bibliothèque de démonstration générée (`lumen-ui --demo-library --fake-daemon`). Aucun contenu du Workshop n’apparaît.
+L’application de bureau, `lumenwall-ui`, avec sa bibliothèque de démonstration générée (`lumenwall-ui --demo-library --fake-daemon`). Aucun contenu du Workshop n’apparaît.
 
 <p align="center">
   <img src="docs/ui-screenshots/library-dark-fr.png" alt="Page Bibliothèque en thème sombre : grille d’aperçus, panneau de détails avec la carte des écrans et le bouton Appliquer" width="49%">
@@ -44,23 +44,23 @@ D’autres captures dans [`docs/ui-screenshots/`](docs/ui-screenshots/) ; notes
 
 La performance passe en premier : un fond d’écran identique mais plus coûteux est une régression ([`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)). Les chiffres ci-dessous viennent des README des crates, où chacun est noté avec sa méthode.
 
-**Machine et conditions.** AMD Ryzen 9 7950X3D, NVIDIA GeForce RTX 4080 SUPER (pilote propriétaire, Vulkan), Ubuntu 26.04, session Wayland GNOME 50.1 (Lumen y dessine via XWayland). Compilation release, limite à 30 i/s. Fond d’écran de référence : une scène du Workshop en 3440×1440 avec 11 effets, 4 systèmes de particules et un son ([`docs/TESTING.md`](docs/TESTING.md)).
+**Machine et conditions.** AMD Ryzen 9 7950X3D, NVIDIA GeForce RTX 4080 SUPER (pilote propriétaire, Vulkan), Ubuntu 26.04, session Wayland GNOME 50.1 (Lumenwall y dessine via XWayland). Compilation release, limite à 30 i/s. Fond d’écran de référence : une scène du Workshop en 3440×1440 avec 11 effets, 4 systèmes de particules et un son ([`docs/TESTING.md`](docs/TESTING.md)).
 
 | Situation | Mesure | Source |
 |---|---|---|
-| Fond d’écran sur deux écrans 2560×1440 | 30,0 i/s, **1,6 % d’un cœur**, 240 Mio de RSS (49 Mio privés, le reste est fait des bibliothèques du pilote et de l’archive projetée en mémoire), 268 Mio de VRAM | [lumen-engine](crates/lumen-engine/README.md#measurements-rtx-4080-super-vulkan-release-reference-wallpaper-34401440-scene) |
-| Une image, fenêtre 1720×720 | CPU 0,4–0,6 ms ; GPU **0,5 ms** à pleine fréquence (sans affichage), 0,8–4,7 ms quand le GPU reste à ses fréquences de repos | lumen-engine |
-| Chargement de la scène (13 textures, 23 passes de shader depuis le cache, 4 systèmes de particules) | **80–230 ms** | lumen-engine |
-| Fenêtre plein écran au-dessus | En pause : 0 image, 0,2 % d’un cœur (fil du son) | lumen-engine |
-| Écran couvert par une fenêtre Wayland plein écran (GNOME) | Pause ≈1,3 s après l’apparition de la fenêtre, reprise ≈30 ms après sa fermeture ; pendant ce temps 0 image, ≈2 réveils par seconde | [lumen-platform](crates/lumen-platform/README.md#gnome-wayland-session-x11-windows-through-xwayland) |
-| Au repos, aucune image demandée (X11, mode fenêtre) | **0 réveil** du fil d’événements en 3 s | [lumen-platform](crates/lumen-platform/README.md#performance) |
-| Image en régime établi | **0 allocation** sur le tas dans les chemins par image de Lumen : mise à jour du rendu, particules, marionnettes, scripts (tests avec allocateur compteur ; wgpu alloue en interne en enregistrant les commandes) | [lumen-render](crates/lumen-render/README.md), [lumen-particles](crates/lumen-particles/README.md), lumen-engine |
-| Animation de marionnettes, 16 squelettes et 78 os | 8,5–9 µs de CPU par image | lumen-engine |
-| SceneScript, 20 scripts et 7 calques de texte | 10–18 µs par image | lumen-engine |
-| Traduction des 23 passes de shader de la scène | 1,9 ms sur 32 fils ; ≈30 µs par passe depuis le cache disque | [lumen-shader](crates/lumen-shader/README.md) |
+| Fond d’écran sur deux écrans 2560×1440 | 30,0 i/s, **1,6 % d’un cœur**, 240 Mio de RSS (49 Mio privés, le reste est fait des bibliothèques du pilote et de l’archive projetée en mémoire), 268 Mio de VRAM | [lumenwall-engine](crates/lumenwall-engine/README.md#measurements-rtx-4080-super-vulkan-release-reference-wallpaper-34401440-scene) |
+| Une image, fenêtre 1720×720 | CPU 0,4–0,6 ms ; GPU **0,5 ms** à pleine fréquence (sans affichage), 0,8–4,7 ms quand le GPU reste à ses fréquences de repos | lumenwall-engine |
+| Chargement de la scène (13 textures, 23 passes de shader depuis le cache, 4 systèmes de particules) | **80–230 ms** | lumenwall-engine |
+| Fenêtre plein écran au-dessus | En pause : 0 image, 0,2 % d’un cœur (fil du son) | lumenwall-engine |
+| Écran couvert par une fenêtre Wayland plein écran (GNOME) | Pause ≈1,3 s après l’apparition de la fenêtre, reprise ≈30 ms après sa fermeture ; pendant ce temps 0 image, ≈2 réveils par seconde | [lumenwall-platform](crates/lumenwall-platform/README.md#gnome-wayland-session-x11-windows-through-xwayland) |
+| Au repos, aucune image demandée (X11, mode fenêtre) | **0 réveil** du fil d’événements en 3 s | [lumenwall-platform](crates/lumenwall-platform/README.md#performance) |
+| Image en régime établi | **0 allocation** sur le tas dans les chemins par image de Lumenwall : mise à jour du rendu, particules, marionnettes, scripts (tests avec allocateur compteur ; wgpu alloue en interne en enregistrant les commandes) | [lumenwall-render](crates/lumenwall-render/README.md), [lumenwall-particles](crates/lumenwall-particles/README.md), lumenwall-engine |
+| Animation de marionnettes, 16 squelettes et 78 os | 8,5–9 µs de CPU par image | lumenwall-engine |
+| SceneScript, 20 scripts et 7 calques de texte | 10–18 µs par image | lumenwall-engine |
+| Traduction des 23 passes de shader de la scène | 1,9 ms sur 32 fils ; ≈30 µs par passe depuis le cache disque | [lumenwall-shader](crates/lumenwall-shader/README.md) |
 | Application de bureau au repos, 32 fonds d’écran / processus de la zone de notification | 0,0 % de CPU / 10 Mo de RSS | [docs/UI.md](docs/UI.md) |
 
-Mesurez sur votre machine avec `LUMEN_STATS=1 lumen <id>` : i/s, temps CPU et GPU par image et mémoire, toutes les 5 secondes.
+Mesurez sur votre machine avec `LUMENWALL_STATS=1 lumenwall <id>` : i/s, temps CPU et GPU par image et mémoire, toutes les 5 secondes.
 
 ## Fonctionnalités
 
@@ -76,7 +76,7 @@ Mesurez sur votre machine avec `LUMEN_STATS=1 lumen <id>` : i/s, temps CPU et G
 | ✅ | Animation de marionnettes | Squelettes, couches d’animation, skinning sur GPU, attaches. 🚧 Ni physique, ni cinématique inverse, ni blend shapes |
 | ✅ | Calques de texte | La police du fond d’écran, textes scriptés comme les horloges. 🚧 Ni contour, ni ombre, ni fond |
 | ✅ | Son et effets réactifs à l’audio | Sons de la scène, spectre audio capturé depuis PulseAudio (ou le serveur Pulse de PipeWire), coupure automatique quand une autre application joue |
-| 🚧 | Vidéo | En cours : décodage matériel avec envoi au GPU sans copie conçu ([`docs/research/platform.md`](docs/research/platform.md)) ; la crate `lumen-video` est encore vide |
+| ✅ | Vidéo | Décodage matériel Vulkan Video sur le GPU de rendu, sans copie (≈ 2,5 % d’un cœur pour du H.264 4K60 à 30 i/s) ; replis NVDEC, VA-API, D3D11VA et logiciel ; son en boucle. 🚧 Vidéos dans les scènes, HDR, 10 bits sans copie |
 | 🚧 | Web | Hôte Chromium (CEF) et API web de Wallpaper Engine écrits, pas encore compilés ni branchés |
 | 🚧 | Listes de lecture | Seul le premier élément est joué |
 | 🚧 | Un fond d’écran sur plusieurs écrans | Chaque écran affiche le fond d’écran entier |
@@ -91,15 +91,15 @@ Mesurez sur votre machine avec `LUMEN_STATS=1 lumen <id>` : i/s, temps CPU et G
 | ⏳ | Windows 10 et 11 | Compile et passe les tests en CI (DX12 sur l’adaptateur logiciel WARP) ; jamais lancé sur un vrai bureau Windows |
 | ✅ | Pause quand le bureau est caché | Plein écran et écrans couverts mesurés ; verrouillage et écran éteint implémentés, non vérifiés |
 | ✅ | Fichier de configuration rechargé à chaud | i/s et propriétés appliqués sans redémarrer |
-| 🚧 | Application de bureau (`lumen-ui`) et zone de notification | Bibliothèque, écrans, réglages, édition des propriétés en direct ; ne fonctionne qu’avec le démon de démonstration, car `lumen` ne répond pas encore au protocole de l’application |
-| 🚧 | Navigateur du Workshop dans l’application | En cours |
+| ✅ | Application de bureau (`lumenwall-ui`) et zone de notification | Bibliothèque, écrans, réglages, édition des propriétés en direct, changement de fond d’écran à chaud via l’IPC du moteur, choix enregistrés dans la configuration. 🚧 Pas encore testée sous Windows |
+| ✅ | Navigateur du Workshop dans l’application | Recherche et filtres via l’API Web Steam avec votre propre clé ; l’abonnement passe par le client Steam ; les nouveaux abonnements apparaissent tout seuls |
 | ⏳ | Paquets (Flatpak, AUR, installateur Windows) | Aucun pour l’instant : compilez depuis les sources |
 
 ## Installation
 
 **Il vous faut :**
 
-- **Wallpaper Engine**, acheté et installé via Steam, avec les fonds d’écran voulus abonnés dans le Workshop. Lumen lit les éléments du Workshop et le dossier `assets` de Wallpaper Engine là où ils sont, et n’en distribue aucun fichier. Sous Linux, installez Wallpaper Engine avec Steam Play (Proton) activé pour lui ; Lumen ne le lance jamais.
+- **Wallpaper Engine**, acheté et installé via Steam, avec les fonds d’écran voulus abonnés dans le Workshop. Lumenwall lit les éléments du Workshop et le dossier `assets` de Wallpaper Engine là où ils sont, et n’en distribue aucun fichier. Sous Linux, installez Wallpaper Engine avec Steam Play (Proton) activé pour lui ; Lumenwall ne le lance jamais.
 - **Rust 1.90 ou plus récent** ([rustup](https://rustup.rs)).
 - **Un pilote Vulkan** sous Linux (Mesa ou NVIDIA), DirectX 12 sous Windows.
 - **Les bibliothèques de compilation Linux**, d’après l’arbre des dépendances (compilateur C pour QuickJS, ALSA, PulseAudio) :
@@ -109,30 +109,30 @@ Mesurez sur votre machine avec `LUMEN_STATS=1 lumen <id>` : i/s, temps CPU et G
 
   La CI installe un ensemble plus large, pour toutes les crates et options : [`.github/actions/setup-rust/action.yml`](.github/actions/setup-rust/action.yml).
 
-**Installer depuis le dépôt** (la crate `lumen` de crates.io est un autre projet) :
+**Installer depuis le dépôt** (la crate `lumenwall` de crates.io est un autre projet) :
 
 ```bash
-cargo install --locked --git https://github.com/simnJS/lumen lumen
-cargo install --locked --git https://github.com/simnJS/lumen lumen-ui   # facultatif : aperçu de l’application
+cargo install --locked --git https://github.com/simnJS/lumenwall lumenwall
+cargo install --locked --git https://github.com/simnJS/lumenwall lumenwall-ui   # facultatif : aperçu de l’application
 ```
 
 **Démarrer avec la session (Linux).** Choisissez le fond d’écran dans le fichier de configuration, puis copiez l’entrée de démarrage automatique et les icônes :
 
 ```bash
-git clone https://github.com/simnJS/lumen && cd lumen
-mkdir -p ~/.config/lumen ~/.config/autostart ~/.local/share/icons
-printf 'wallpaper = "<id-workshop>"\n' > ~/.config/lumen/config.toml
-cp packaging/linux/lumen.desktop ~/.config/autostart/
+git clone https://github.com/simnJS/lumenwall && cd lumenwall
+mkdir -p ~/.config/lumenwall ~/.config/autostart ~/.local/share/icons
+printf 'wallpaper = "<id-workshop>"\n' > ~/.config/lumenwall/config.toml
+cp packaging/linux/lumenwall.desktop ~/.config/autostart/
 cp -r packaging/linux/icons/hicolor ~/.local/share/icons/
 ```
 
-GNOME, KDE, XFCE et les autres bureaux lancent `lumen` à l’ouverture de session depuis `~/.config/autostart`. Supprimez le fichier pour arrêter. Modifier `config.toml` pendant que Lumen tourne applique aussitôt les changements d’i/s et de propriétés.
+GNOME, KDE, XFCE et les autres bureaux lancent `lumenwall` à l’ouverture de session depuis `~/.config/autostart`. Supprimez le fichier pour arrêter. Modifier `config.toml` pendant que Lumenwall tourne applique aussitôt les changements d’i/s et de propriétés.
 
 **Compiler depuis les sources :**
 
 ```bash
-git clone https://github.com/simnJS/lumen && cd lumen
-cargo build --release --locked          # target/release/lumen et target/release/lumen-ui
+git clone https://github.com/simnJS/lumenwall && cd lumenwall
+cargo build --release --locked          # target/release/lumenwall et target/release/lumenwall-ui
 ```
 
 L’ensemble des vérifications (format, clippy, tests, tests GPU sur adaptateur logiciel, `cargo deny`) est décrit dans [`docs/CI.md`](docs/CI.md).
@@ -140,14 +140,14 @@ L’ensemble des vérifications (format, clippy, tests, tests GPU sur adaptateur
 ## Utilisation
 
 ```bash
-lumen <id-workshop>                         # sur tous les écrans ; un id du Workshop ou un dossier
-lumen ~/fonds/ma-scene                      # un dossier qui contient project.json
-lumen -r DP-1 -b <id-1> -r HDMI-A-1 -b <id-2>   # un fond d’écran par écran
-lumen --fps 60 --scaling fill <id>
-lumen --list-properties <id>                # les propriétés utilisateur du fond d’écran
-lumen --set-property rain=0 <id>            # en forcer une (répétable)
-lumen -w 0x0x1280x720 <id>                  # dans une fenêtre, pour tester
-LUMEN_STATS=1 lumen <id>                    # i/s, temps CPU/GPU par image, mémoire
+lumenwall <id-workshop>                         # sur tous les écrans ; un id du Workshop ou un dossier
+lumenwall ~/fonds/ma-scene                      # un dossier qui contient project.json
+lumenwall -r DP-1 -b <id-1> -r HDMI-A-1 -b <id-2>   # un fond d’écran par écran
+lumenwall --fps 60 --scaling fill <id>
+lumenwall --list-properties <id>                # les propriétés utilisateur du fond d’écran
+lumenwall --set-property rain=0 <id>            # en forcer une (répétable)
+lumenwall -w 0x0x1280x720 <id>                  # dans une fenêtre, pour tester
+LUMENWALL_STATS=1 lumenwall <id>                    # i/s, temps CPU/GPU par image, mémoire
 ```
 
 | Option | Effet |
@@ -164,24 +164,24 @@ LUMEN_STATS=1 lumen <id>                    # i/s, temps CPU/GPU par image, mém
 | `--screenshot <fichier.png>` | Enregistrer une image après quelques images |
 | `--config <fichier>`, `--no-config` | Utiliser un autre fichier de configuration, ou aucun |
 
-Toutes les options, le format du fichier de configuration (`~/.config/lumen/config.toml`, `%APPDATA%\Lumen\config.toml` sous Windows) et les codes de sortie sont dans [`crates/lumen/README.md`](crates/lumen/README.md) (en anglais). Les options de l’application de bureau sont dans [`crates/lumen-ui/README.md`](crates/lumen-ui/README.md).
+Toutes les options, le format du fichier de configuration (`~/.config/lumenwall/config.toml`, `%APPDATA%\Lumenwall\config.toml` sous Windows) et les codes de sortie sont dans [`crates/lumenwall/README.md`](crates/lumenwall/README.md) (en anglais). Les options de l’application de bureau sont dans [`crates/lumenwall-ui/README.md`](crates/lumenwall-ui/README.md).
 
 ## FAQ
 
 **Faut-il posséder Wallpaper Engine ?**
-Oui. Steam télécharge les fonds d’écran du Workshop dans le dossier Workshop de Wallpaper Engine, et les scènes utilisent les shaders et matériaux du dossier `assets` de Wallpaper Engine. Lumen lit ces fichiers là où Steam les a mis et n’en contient aucun.
+Oui. Steam télécharge les fonds d’écran du Workshop dans le dossier Workshop de Wallpaper Engine, et les scènes utilisent les shaders et matériaux du dossier `assets` de Wallpaper Engine. Lumenwall lit ces fichiers là où Steam les a mis et n’en contient aucun.
 
-**Lumen est-il affilié à Wallpaper Engine ou à Valve ?**
-Non. Lumen est un projet libre indépendant, ni soutenu ni approuvé par les développeurs de Wallpaper Engine ou par Valve.
+**Lumenwall est-il affilié à Wallpaper Engine ou à Valve ?**
+Non. Lumenwall est un projet libre indépendant, ni soutenu ni approuvé par les développeurs de Wallpaper Engine ou par Valve.
 
 **Est-ce que ça marche sous GNOME sans extension ?**
-Oui. GNOME n’a pas de layer-shell : Lumen utilise des fenêtres de bureau X11 via XWayland et détecte les écrans couverts grâce au rythme d’affichage du compositeur. Mesuré sur GNOME 50.1 avec un GPU NVIDIA.
+Oui. GNOME n’a pas de layer-shell : Lumenwall utilise des fenêtres de bureau X11 via XWayland et détecte les écrans couverts grâce au rythme d’affichage du compositeur. Mesuré sur GNOME 50.1 avec un GPU NVIDIA.
 
 **Et KDE Plasma, sway, Hyprland ?**
 Le moteur layer-shell est écrit mais n’a pas encore tourné sur ces compositeurs. Vos retours sont bienvenus (modèle de rapport de bug).
 
 **Et Windows ?**
-Lumen compile et passe ses tests sous Windows en CI, mais n’a jamais tourné sur un bureau Windows. La liste des points à vérifier est dans [`crates/lumen-platform/README.md`](crates/lumen-platform/README.md#to-check-on-windows-11-24h2--25h2-and-once-on-windows-10).
+Lumenwall compile et passe ses tests sous Windows en CI, mais n’a jamais tourné sur un bureau Windows. La liste des points à vérifier est dans [`crates/lumenwall-platform/README.md`](crates/lumenwall-platform/README.md#to-check-on-windows-11-24h2--25h2-and-once-on-windows-10).
 
 **Combien ça coûte pendant que je joue ?**
 Une fenêtre plein écran met le rendu en pause : 0 image, 0,2 % d’un cœur mesuré (le fil du son). `--no-fullscreen-pause` désactive ce comportement.
@@ -189,28 +189,28 @@ Une fenêtre plein écran met le rendu en pause : 0 image, 0,2 % d’un cœur 
 **Pourquoi l’application dit-elle que le moteur est arrêté ?**
 L’application de bureau parle au moteur par une socket locale, et la partie moteur de ce protocole n’est pas encore écrite. D’ici là, l’application est un aperçu qui fonctionne avec son démon de démonstration.
 
-**Lumen est-il dérivé d’une autre réimplémentation de Wallpaper Engine ?**
+**Lumenwall est-il dérivé d’une autre réimplémentation de Wallpaper Engine ?**
 Non. Il est écrit à partir de spécifications de comportement selon un processus de salle blanche, ce qui permet la licence MIT OR Apache-2.0 ([`CLEANROOM.md`](CLEANROOM.md)).
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    ui["lumen-ui<br/>application et zone de notification"] --> ipc["lumen-ipc<br/>protocole sur socket locale"]
-    ipc -. "côté moteur pas encore écrit" .-> cli["lumen<br/>ligne de commande, configuration, cycle de vie"]
-    cli --> engine["lumen-engine<br/>boucle d'images, intégration"]
-    engine --> assets["lumen-assets<br/>fichiers, découverte de Steam"]
-    assets --> formats["lumen-formats<br/>.pkg, .tex, .mdl"]
-    engine --> scene["lumen-scene<br/>projet, scène, matériaux"]
-    engine --> shader["lumen-shader<br/>shaders vers modules GPU"]
-    shader --> render["lumen-render<br/>rendu wgpu"]
+    ui["lumenwall-ui<br/>application et zone de notification"] --> ipc["lumenwall-ipc<br/>protocole sur socket locale"]
+    ipc --> cli["lumenwall<br/>ligne de commande, configuration, cycle de vie"]
+    cli --> engine["lumenwall-engine<br/>boucle d'images, intégration"]
+    engine --> assets["lumenwall-assets<br/>fichiers, découverte de Steam"]
+    assets --> formats["lumenwall-formats<br/>.pkg, .tex, .mdl"]
+    engine --> scene["lumenwall-scene<br/>projet, scène, matériaux"]
+    engine --> shader["lumenwall-shader<br/>shaders vers modules GPU"]
+    shader --> render["lumenwall-render<br/>rendu wgpu"]
     engine --> render
-    engine --> particles["lumen-particles<br/>simulation de particules"]
-    engine --> script["lumen-script<br/>exécution de SceneScript"]
-    engine --> audio["lumen-audio<br/>son, spectre"]
-    engine --> platform["lumen-platform<br/>surfaces Wayland, X11, Windows"]
-    engine -. "pas encore branché" .-> video["lumen-video"]
-    engine -. "pas encore branché" .-> web["lumen-web<br/>hôte CEF"]
+    engine --> particles["lumenwall-particles<br/>simulation de particules"]
+    engine --> script["lumenwall-script<br/>exécution de SceneScript"]
+    engine --> audio["lumenwall-audio<br/>son, spectre"]
+    engine --> platform["lumenwall-platform<br/>surfaces Wayland, X11, Windows"]
+    engine -. "pas encore branché" .-> video["lumenwall-video"]
+    engine -. "pas encore branché" .-> web["lumenwall-web<br/>hôte CEF"]
 ```
 
 Le README de chaque crate liste les spécifications dont elle est issue, ses mesures et ses écarts par rapport au comportement de référence ([`docs/PARITY-POLICY.md`](docs/PARITY-POLICY.md)).
@@ -229,8 +229,8 @@ Les contributions sont bienvenues. Lisez d’abord [`CONTRIBUTING.md`](CONTRIBUT
 
 Distribué au choix sous [licence Apache 2.0](LICENSE-APACHE) ou [licence MIT](LICENSE-MIT).
 
-Sauf mention contraire explicite de votre part, toute contribution que vous soumettez intentionnellement pour inclusion dans Lumen, au sens de la licence Apache-2.0, est placée sous la double licence ci-dessus, sans conditions supplémentaires.
+Sauf mention contraire explicite de votre part, toute contribution que vous soumettez intentionnellement pour inclusion dans Lumenwall, au sens de la licence Apache-2.0, est placée sous la double licence ci-dessus, sans conditions supplémentaires.
 
 ## Mentions légales
 
-Lumen n’est ni affilié aux développeurs de Wallpaper Engine ni à Valve Corporation, ni approuvé ou parrainé par eux. Wallpaper Engine est une marque de son propriétaire. Steam et le logo Steam sont des marques commerciales et/ou des marques déposées de Valve Corporation aux États-Unis et/ou dans d’autres pays. Les fonds d’écran du Workshop sont l’œuvre de leurs auteurs ; Lumen ne les distribue pas et ne les télécharge pas.
+Lumenwall n’est ni affilié aux développeurs de Wallpaper Engine ni à Valve Corporation, ni approuvé ou parrainé par eux. Wallpaper Engine est une marque de son propriétaire. Steam et le logo Steam sont des marques commerciales et/ou des marques déposées de Valve Corporation aux États-Unis et/ou dans d’autres pays. Les fonds d’écran du Workshop sont l’œuvre de leurs auteurs ; Lumenwall ne les distribue pas et ne les télécharge pas.

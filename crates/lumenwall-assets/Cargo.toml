@@ -1,0 +1,25 @@
+[package]
+name = "lumenwall-assets"
+description = "Virtual file system: wallpaper folders, .pkg mounts, assets folder, Steam discovery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lumenwall-formats.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+steamlocate = "2.1.1"
+
+[target.'cfg(windows)'.dependencies]
+# HKCU\Software\Valve\Steam\SteamPath (spec 01 QO-30); steamlocate reads HKLM only.
+winreg = "0.56.0"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

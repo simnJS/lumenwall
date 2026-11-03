@@ -4,7 +4,7 @@ Ranked by performance first (see `docs/PERFORMANCE.md`). Versions from crates.io
 
 ## Upstream behaviours we must NOT reproduce (performance bugs)
 
-| Upstream behaviour | Cost | Lumen |
+| Upstream behaviour | Cost | Lumenwall |
 |---|---|---|
 | X11: GPU→CPU readback of the full frame every frame, then pushed to the root pixmap without shared memory | ~1 GB/s of copies in 4K at 30 fps | Render directly on the GPU (desktop window or DRI3 pixmap) |
 | Pause loop sleeps 250 µs (not ms) and re-queries the window server each time | ~4000 wake-ups/s while paused | Block on events; zero wake-ups when paused |
@@ -35,7 +35,7 @@ Ranked by performance first (see `docs/PERFORMANCE.md`). Versions from crates.io
 
 ## Architecture
 
-1. `lumen-platform`: `WallpaperSurface` trait, backends Wayland (sctk), X11 (x11rb), Win32; provides a raw window handle for wgpu plus events (size, scale, pause, pointer).
+1. `lumenwall-platform`: `WallpaperSurface` trait, backends Wayland (sctk), X11 (x11rb), Win32; provides a raw window handle for wgpu plus events (size, scale, pause, pointer).
 2. One blocking event loop per process; nothing runs between frames.
 3. Central pause state: when paused, no GPU submission, audio capture closed, video and web suspended.
 4. One wgpu device for all monitors; no CPU readback in the hot path.

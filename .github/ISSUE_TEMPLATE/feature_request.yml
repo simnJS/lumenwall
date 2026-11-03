@@ -1,5 +1,5 @@
 name: Feature request
-description: Something Lumen should do, or a Wallpaper Engine feature it does not support yet.
+description: Something Lumenwall should do, or a Wallpaper Engine feature it does not support yet.
 labels: ["enhancement"]
 body:
   - type: textarea
@@ -33,7 +33,7 @@ body:
       label: Wallpaper Engine reference
       description: |
         For compatibility requests: the public Wallpaper Engine documentation page (docs.wallpaperengine.io) or the Workshop ID of a wallpaper that needs the feature.
-        Please do not paste code from other Wallpaper Engine reimplementations: Lumen is a clean-room project (see CLEANROOM.md).
+        Please do not paste code from other Wallpaper Engine reimplementations: Lumenwall is a clean-room project (see CLEANROOM.md).
   - type: textarea
     id: alternatives
     attributes:

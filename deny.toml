@@ -1,4 +1,4 @@
-# cargo-deny policy for Lumen (open source, MIT OR Apache-2.0). Dependencies must stay permissive so the whole binary can ship under those terms.
+# cargo-deny policy for Lumenwall (open source, MIT OR Apache-2.0). Dependencies must stay permissive so the whole binary can ship under those terms.
 # Run: `cargo deny check` (CI runs the same, see docs/CI.md).
 # Reference: https://embarkstudios.github.io/cargo-deny/
 
@@ -21,18 +21,18 @@ unmaintained = "all"
 unsound = "all"
 yanked = "deny"
 ignore = [
-    # { id = "RUSTSEC-0000-0000", reason = "why it does not affect Lumen, and until when" },
-    # lumen-ui only, through iced 0.14 (latest release); revisit when iced moves on.
+    # { id = "RUSTSEC-0000-0000", reason = "why it does not affect Lumenwall, and until when" },
+    # lumenwall-ui only, through iced 0.14 (latest release); revisit when iced moves on.
     { id = "RUSTSEC-2026-0253", reason = "lru 0.16 via iced_wgpu: keys are glyph cache keys that cannot trigger the panic; until iced updates" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained, iced text stack; until iced migrates" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained, iced text stack; until iced migrates" },
-    { id = "RUSTSEC-2026-0370", reason = "zvariant 5 via iced's Linux theme detection; until lumen-ui moves to zbus 6 and drops that feature" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant 5 via iced's Linux theme detection; until lumenwall-ui moves to zbus 6 and drops that feature" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names 5, same chain as RUSTSEC-2026-0370" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant 5, same chain as RUSTSEC-2026-0370" },
 ]
 
 # --- Licences --------------------------------------------------------------------------
-# Lumen ships as MIT OR Apache-2.0 binaries: only permissive licences, plus MPL-2.0
+# Lumenwall ships as MIT OR Apache-2.0 binaries: only permissive licences, plus MPL-2.0
 # (file-level copyleft, fine as long as the MPL files are not modified).
 # No GPL-*, no AGPL-*. LGPL-* only through an exception below, never globally.
 #
@@ -66,7 +66,7 @@ include-build = true
 # LGPL rule: an LGPL-* binding may be listed here only if ALL of the following hold,
 # and the reasoning is written next to the entry:
 #   1. the LGPL code is a separate shared library (.so / .dll) loaded at runtime,
-#      never linked statically into the Lumen binary;
+#      never linked statically into the Lumenwall binary;
 #   2. that library is an LGPL build (FFmpeg: built without --enable-gpl and
 #      --enable-nonfree), so the user can replace it with their own build;
 #   3. the installer ships the LGPL text, the library's copyright notice and a written
@@ -76,16 +76,16 @@ include-build = true
 #   { crate = "libmpv2", allow = ["LGPL-2.1"] },
 #   { crate = "libmpv2-sys", allow = ["LGPL-2.1"] },
 exceptions = [
-    # FFmpeg bindings of lumen-video (raw ffmpeg-sys-next only, no ffmpeg-next wrapper).
+    # FFmpeg bindings of lumenwall-video (raw ffmpeg-sys-next only, no ffmpeg-next wrapper).
     # The Rust crate is WTFPL (permissive, public-domain-like, but not OSI-approved:
     # confirm with legal before shipping). The FFmpeg C libraries themselves are LGPL-2.1+:
     # they follow the LGPL rule above (dynamic loading of an LGPL build, enforced by the
-    # ffmpeg-sys-next ban below and by lumen-video's build script).
+    # ffmpeg-sys-next ban below and by lumenwall-video's build script).
     { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
 
-    # PENDING DECISION (2026-11-03). The optional `cef` feature of lumen-web pulls
+    # PENDING DECISION (2026-11-03). The optional `cef` feature of lumenwall-web pulls
     # cef-dll-sys, whose build script uses download-cef to fetch the CEF binaries.
-    # That build-time-only chain (nothing of it is linked into Lumen) brings two
+    # That build-time-only chain (nothing of it is linked into Lumenwall) brings two
     # permissive licences that are not in `allow`, accepted here:
     #   bzip2-1.0.6: BSD-style licence of the bzip2 code (download-cef -> bzip2).
     #   CDLA-Permissive-2.0: licence of Mozilla's CA certificate data
@@ -103,7 +103,7 @@ ignore = true
 # Duplicate versions cost build time and binary size; review, but do not block.
 multiple-versions = "warn"
 wildcards = "deny"
-# Internal path dependencies (`lumen-* = { path = ... }`) have no version: allowed
+# Internal path dependencies (`lumenwall-* = { path = ... }`) have no version: allowed
 # because every workspace crate is `publish = false`.
 allow-wildcard-paths = true
 highlight = "all"

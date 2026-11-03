@@ -1,8 +1,8 @@
-# Rules for agents working on Lumen
+# Rules for agents working on Lumenwall
 
 Read these before anything else, together with `CLEANROOM.md`, `docs/PERFORMANCE.md` and `docs/PARITY-POLICY.md`.
 
-- **Privacy:** never put the user's e-mail address, git identity or any personal data in a network request (User-Agent headers, query strings, API payloads). When an API asks for a contact in the User-Agent (crates.io does), use `lumen-dev-agent` with no address.
+- **Privacy:** never put the user's e-mail address, git identity or any personal data in a network request (User-Agent headers, query strings, API payloads). When an API asks for a contact in the User-Agent (crates.io does), use `lumenwall-dev-agent` with no address.
 - **Clean-room:** implementers never read the upstream project, its forks, or other third-party Wallpaper Engine reimplementations. See `CLEANROOM.md`.
 - **Wallpaper Engine content** is for local testing only and is never committed. See `docs/TESTING.md`.
 - **Builds:** use your own `CARGO_TARGET_DIR=target/agent-<name>` so parallel agents don't block each other on the build lock.

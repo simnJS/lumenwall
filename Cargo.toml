@@ -10,20 +10,20 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-lumen-formats = { path = "crates/lumen-formats" }
-lumen-scene = { path = "crates/lumen-scene" }
-lumen-shader = { path = "crates/lumen-shader" }
-lumen-render = { path = "crates/lumen-render" }
-lumen-platform = { path = "crates/lumen-platform" }
-lumen-audio = { path = "crates/lumen-audio" }
-lumen-video = { path = "crates/lumen-video" }
-lumen-script = { path = "crates/lumen-script" }
-lumen-web = { path = "crates/lumen-web" }
-lumen-particles = { path = "crates/lumen-particles" }
-lumen-assets = { path = "crates/lumen-assets" }
-lumen-ipc = { path = "crates/lumen-ipc" }
-lumen-ui = { path = "crates/lumen-ui" }
-lumen-engine = { path = "crates/lumen-engine" }
+lumenwall-formats = { path = "crates/lumenwall-formats" }
+lumenwall-scene = { path = "crates/lumenwall-scene" }
+lumenwall-shader = { path = "crates/lumenwall-shader" }
+lumenwall-render = { path = "crates/lumenwall-render" }
+lumenwall-platform = { path = "crates/lumenwall-platform" }
+lumenwall-audio = { path = "crates/lumenwall-audio" }
+lumenwall-video = { path = "crates/lumenwall-video" }
+lumenwall-script = { path = "crates/lumenwall-script" }
+lumenwall-web = { path = "crates/lumenwall-web" }
+lumenwall-particles = { path = "crates/lumenwall-particles" }
+lumenwall-assets = { path = "crates/lumenwall-assets" }
+lumenwall-ipc = { path = "crates/lumenwall-ipc" }
+lumenwall-ui = { path = "crates/lumenwall-ui" }
+lumenwall-engine = { path = "crates/lumenwall-engine" }
 
 thiserror = "2"
 anyhow = "1"

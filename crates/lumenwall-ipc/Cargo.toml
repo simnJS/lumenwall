@@ -1,0 +1,20 @@
+[package]
+name = "lumenwall-ipc"
+description = "IPC protocol between the Lumenwall daemon and its clients (UI, CLI)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Unix domain sockets on Linux, named pipes on Windows, behind one blocking API.
+# No async runtime: one thread blocked in accept() costs nothing while no client is connected.
+interprocess = { version = "2.4.7", default-features = false }
+
+[lints]
+workspace = true
