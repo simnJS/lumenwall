@@ -1100,17 +1100,96 @@ raw_struct! {
 }
 
 /// Parses a whole document. A UTF-8 byte order mark is skipped.
+///
+/// Lumenwall: a document that is not valid JSON is parsed again with its `//` and `/* */`
+/// comments blanked out (Wallpaper Engine accepts them: `fantasticcar/materials/car/glass.json`,
+/// spec 09 §1.11.2). The copy lives in `scratch`; valid documents are never copied.
 pub(crate) fn parse_doc<'a, T: Deserialize<'a>>(
     file: &str,
     bytes: &'a [u8],
+    scratch: &'a mut Option<Vec<u8>>,
 ) -> Result<T, crate::LoadError> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
-    serde_json::from_slice(bytes).map_err(|e| crate::LoadError::syntax(file, &e))
+    match serde_json::from_slice(bytes) {
+        Ok(v) => Ok(v),
+        Err(e) => match strip_comments(bytes) {
+            Some(clean) => {
+                let clean: &'a [u8] = scratch.insert(clean);
+                serde_json::from_slice(clean).map_err(|_| crate::LoadError::syntax(file, &e))
+            }
+            None => Err(crate::LoadError::syntax(file, &e)),
+        },
+    }
+}
+
+/// `bytes` with every comment outside strings replaced by spaces (line breaks kept), or `None`
+/// when there is no comment.
+pub(crate) fn strip_comments(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut out = bytes.to_vec();
+    let mut found = false;
+    let mut i = 0;
+    let mut in_string = false;
+    while i < out.len() {
+        let c = out[i];
+        if in_string {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match (c, out.get(i + 1)) {
+            (b'"', _) => in_string = true,
+            (b'/', Some(b'/')) => {
+                found = true;
+                while i < out.len() && out[i] != b'\n' {
+                    out[i] = b' ';
+                    i += 1;
+                }
+                continue;
+            }
+            (b'/', Some(b'*')) => {
+                found = true;
+                let mut j = i + 2;
+                while j + 1 < out.len() && !(out[j] == b'*' && out[j + 1] == b'/') {
+                    j += 1;
+                }
+                let end = (j + 2).min(out.len());
+                for b in &mut out[i..end] {
+                    if *b != b'\n' {
+                        *b = b' ';
+                    }
+                }
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    found.then_some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comments_are_blanked_outside_strings() {
+        let src = b"{\n\t\"a\": \"x//y\", // c\n\t/* b */ \"b\": 1\n}";
+        let out = strip_comments(src).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\n\t\"a\": \"x//y\",     \n\t        \"b\": 1\n}"
+        );
+        assert_eq!(strip_comments(b"{\"a\": \"//\"}"), None);
+        let mut scratch = None;
+        let m: RawMap<'_, Json<'_>> =
+            parse_doc("t", b"{ \"a\": 1 //, \"b\": 2\n }", &mut scratch).unwrap();
+        assert_eq!(m.entries.len(), 1);
+    }
 
     #[test]
     fn json_kinds_and_borrowing() {

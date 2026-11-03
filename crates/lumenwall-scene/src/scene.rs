@@ -189,8 +189,8 @@ pub struct SceneGeneral {
     pub orthogonal_projection: Option<OrthogonalProjection>,
     /// `clearenabled` (spec 09 §1.2): clear the scene target each frame; `null` = true.
     pub clear_enabled: SettingId,
-    /// `transparentsorting` (spec 09 §3.6), read once.
-    pub transparent_sorting: bool,
+    /// `transparentsorting` (spec 09 §3.6), read once; `None` when absent.
+    pub transparent_sorting: Option<bool>,
     /// `hdr` (spec 09 §2.8), read once.
     pub hdr: bool,
     /// `perspectiveoverridefov` (2D scenes, spec 09 §3.12).

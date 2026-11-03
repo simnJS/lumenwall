@@ -85,7 +85,8 @@ impl<'s> Loader<'s, '_> {
             path: file.to_owned(),
             source,
         })?;
-        let raw: RawScene<'_> = parse_doc(file, &bytes)?;
+        let mut scratch = None;
+        let raw: RawScene<'_> = parse_doc(file, &bytes, &mut scratch)?;
         self.scene_doc(file, raw).map_err(|e| e.into_load(file))
     }
 
@@ -315,7 +316,10 @@ impl<'s> Loader<'s, '_> {
                 .b
                 .setting(&g.clearenabled, b(true), false)
                 .at("clearenabled")?,
-            transparent_sorting: opt_bool(&g.transparentsorting, false).at("transparentsorting")?,
+            transparent_sorting: match &g.transparentsorting {
+                Json::Absent | Json::Null => None,
+                j => Some(opt_bool(j, false).at("transparentsorting")?),
+            },
             hdr: opt_bool(&g.hdr, false).at("hdr")?,
             perspective_override_fov: match &g.perspectiveoverridefov {
                 Json::Absent | Json::Null => None,
@@ -942,7 +946,8 @@ impl<'s> Loader<'s, '_> {
         let Some(bytes) = self.read_optional(path, path) else {
             return Ok(None);
         };
-        let raw: RawModel<'_> = parse_doc(path, &bytes)?;
+        let mut scratch = None;
+        let raw: RawModel<'_> = parse_doc(path, &bytes, &mut scratch)?;
         let r = (|| -> Result<Option<Model>, Fail> {
             require_object(raw.kind)?;
             let material_path = req_str(&raw.material).at("material")?;
@@ -977,7 +982,8 @@ impl<'s> Loader<'s, '_> {
         let Some(bytes) = self.read_optional(path, path) else {
             return Ok(None);
         };
-        let raw: RawMaterial<'_> = parse_doc(path, &bytes)?;
+        let mut scratch = None;
+        let raw: RawMaterial<'_> = parse_doc(path, &bytes, &mut scratch)?;
         let material = self
             .material_doc(path, &raw)
             .map_err(|e| e.into_load(path))?;
@@ -1140,7 +1146,8 @@ impl<'s> Loader<'s, '_> {
         let Some(bytes) = self.read_optional(path, path) else {
             return Ok(None);
         };
-        let raw: RawEffect<'_> = parse_doc(path, &bytes)?;
+        let mut scratch = None;
+        let raw: RawEffect<'_> = parse_doc(path, &bytes, &mut scratch)?;
         let effect = self.effect_doc(path, &raw).map_err(|e| e.into_load(path))?;
         Ok(effect.map(|e| {
             self.arenas.effects.push(e);
