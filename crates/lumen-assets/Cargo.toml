@@ -1,0 +1,13 @@
+[package]
+name = "lumen-assets"
+description = "Virtual file system: wallpaper folders, .pkg mounts, assets folder, Steam discovery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

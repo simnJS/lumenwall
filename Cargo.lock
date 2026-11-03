@@ -156,6 +156,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-assets"
+version = "0.1.0"
+
+[[package]]
 name = "lumen-audio"
 version = "0.1.0"
 
