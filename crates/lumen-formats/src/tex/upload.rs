@@ -1,5 +1,5 @@
 //! Conversion of a parsed `.tex` into a GPU-agnostic upload description
-//! (spec 01 §2.10, §2.11).
+//! (spec 01 §2.10, §2.11, amendment A.1 for volume textures).
 
 use std::borrow::Cow;
 
@@ -93,15 +93,22 @@ impl GpuFormat {
         u64::from(height.div_ceil(self.block_dimension()).max(1))
     }
 
-    /// Size of a whole level: `max(1, ceil(w/4)) × max(1, ceil(h/4)) × block` for BCn.
-    /// Saturates instead of overflowing on hostile sizes.
+    /// Size of one 2D level (or one slice of a 3D level):
+    /// `max(1, ceil(w/4)) × max(1, ceil(h/4)) × block` for BCn. Saturates instead of
+    /// overflowing on hostile sizes.
     pub fn level_size(self, width: u32, height: u32) -> u64 {
         self.bytes_per_row(width)
             .saturating_mul(self.rows_per_image(height))
     }
+
+    /// Size of a 3D level: `depth` slices of [`level_size`](Self::level_size).
+    pub fn volume_size(self, width: u32, height: u32, depth: u32) -> u64 {
+        self.level_size(width, height)
+            .saturating_mul(u64::from(depth.max(1)))
+    }
 }
 
-/// Texture addressing on U and V.
+/// Texture addressing, applied to every axis (U, V, and W for volumes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AddressMode {
     /// Clamp to edge (`CLAMP_UVS` flag).
@@ -122,7 +129,7 @@ pub enum FilterMode {
 /// Sampler of a `.tex` texture (§2.10.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SamplerDesc {
-    /// Addressing on U and V.
+    /// Addressing on U and V (and W for volume textures).
     pub address_mode: AddressMode,
     /// Magnification filter.
     pub mag_filter: FilterMode,
@@ -143,38 +150,48 @@ impl SamplerDesc {
         } else {
             AddressMode::Repeat
         };
-        if flags.contains(TexFlags::NO_INTERPOLATION) {
+        let (filter, anisotropy_clamp) = if flags.contains(TexFlags::NO_INTERPOLATION) {
             // The reference requests anisotropy 8 in every case. wgpu only allows
             // anisotropy with linear filters, and it has no effect on nearest
             // sampling, so nearest textures get 1.
-            Self {
-                address_mode,
-                mag_filter: FilterMode::Nearest,
-                min_filter: FilterMode::Nearest,
-                mipmap_filter: FilterMode::Nearest,
-                anisotropy_clamp: 1,
-            }
+            (FilterMode::Nearest, 1)
+        } else if flags.contains(TexFlags::VOLUME) {
+            // A.1: anisotropy is meaningless for volume textures.
+            (FilterMode::Linear, 1)
         } else {
-            Self {
-                address_mode,
-                mag_filter: FilterMode::Linear,
-                min_filter: FilterMode::Linear,
-                mipmap_filter: FilterMode::Linear,
-                anisotropy_clamp: 8,
-            }
+            (FilterMode::Linear, 8)
+        };
+        Self {
+            address_mode,
+            mag_filter: filter,
+            min_filter: filter,
+            mipmap_filter: filter,
+            anisotropy_clamp,
         }
     }
 }
 
+/// Dimension of the GPU textures of a `.tex`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureDimension {
+    /// Ordinary 2D textures.
+    D2,
+    /// 3D textures (`VOLUME` flag, A.1): slices of `width × height`, `depth` deep.
+    D3,
+}
+
 /// One level ready for `write_texture`: tightly packed rows (alignment 1, QO-10),
-/// first row of the file first (no flip).
+/// first row of the file first (no flip). For a 3D level, slices follow each other
+/// (x fastest, then y, then z) with no padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuMip<'a> {
     /// Level width in pixels.
     pub width: u32,
     /// Level height in pixels.
     pub height: u32,
-    /// Exactly `format.level_size(width, height)` bytes.
+    /// Level depth in slices (1 for 2D textures).
+    pub depth: u32,
+    /// Exactly `format.volume_size(width, height, depth)` bytes.
     pub data: Cow<'a, [u8]>,
 }
 
@@ -196,6 +213,11 @@ impl GpuImage<'_> {
         self.mips.first().map_or(1, |m| m.height)
     }
 
+    /// Depth of level 0 (1 for 2D textures).
+    pub fn depth(&self) -> u32 {
+        self.mips.first().map_or(1, |m| m.depth)
+    }
+
     /// Number of mip levels.
     pub fn mip_level_count(&self) -> u32 {
         self.mips.len() as u32
@@ -209,6 +231,8 @@ pub enum GpuContent<'a> {
     Images {
         /// Format shared by every image.
         format: GpuFormat,
+        /// 2D, or 3D for volume textures.
+        dimension: TextureDimension,
         /// The textures.
         images: Vec<GpuImage<'a>>,
     },
@@ -246,9 +270,10 @@ pub struct PreparedTexture<'a> {
     pub animation_duration: f64,
     /// Spritesheet values (consumed by particles).
     pub spritesheet: Spritesheet,
-    /// Forced `TEX0FORMAT` combo (§2.10.5).
+    /// `TEX0FORMAT` value forced by the declared format (§2.10.5, A.3); applies when
+    /// this texture is an object's main texture.
     pub tex0_format_combo: Option<u32>,
-    /// Pixel format field of the file.
+    /// Declared pixel format (offset 0x12), independent of the uploaded GPU format.
     pub source_format: TexFormat,
     /// Flags of the file.
     pub flags: TexFlags,
@@ -268,6 +293,14 @@ impl PreparedTexture<'_> {
         uv_extent(self.real_size, self.texture_size(0))
     }
 
+    /// Dimension of the textures (`None` for videos).
+    pub fn dimension(&self) -> Option<TextureDimension> {
+        match &self.content {
+            GpuContent::Images { dimension, .. } => Some(*dimension),
+            GpuContent::Video { .. } => None,
+        }
+    }
+
     /// Bound image and uniforms at `time` seconds since start (§2.12). Zeros and
     /// image 0 when the texture is not animated.
     pub fn frame_state(&self, time: f64) -> FrameState {
@@ -283,12 +316,18 @@ impl PreparedTexture<'_> {
     }
 
     /// Whether the texture must go through [`decode_compressed`](Self::decode_compressed)
-    /// before upload: BCn data on a device without BC support, or a base size that is
-    /// not a multiple of the block size (which wgpu refuses).
+    /// before upload: BCn data on a device without BC support, a base size that is
+    /// not a multiple of the block size (which wgpu refuses), or BCn volume data
+    /// (never observed; decoded conservatively instead of relying on sliced-3D BC).
     pub fn requires_cpu_decode(&self, bc_supported: bool) -> bool {
         match &self.content {
-            GpuContent::Images { format, images } if format.is_block_compressed() => {
+            GpuContent::Images {
+                format,
+                dimension,
+                images,
+            } if format.is_block_compressed() => {
                 !bc_supported
+                    || *dimension == TextureDimension::D3
                     || images
                         .iter()
                         .any(|img| img.width() % 4 != 0 || img.height() % 4 != 0)
@@ -297,10 +336,10 @@ impl PreparedTexture<'_> {
         }
     }
 
-    /// Fallback for GPUs without BC support: decodes every BCn level to RGBA8 in
-    /// place. No-op for other formats.
+    /// Fallback for GPUs without BC support: decodes every BCn level (every slice of
+    /// volume levels) to RGBA8 in place. No-op for other formats.
     pub fn decode_compressed(&mut self, max_level_bytes: u64) -> Result<(), TexError> {
-        let GpuContent::Images { format, images } = &mut self.content else {
+        let GpuContent::Images { format, images, .. } = &mut self.content else {
             return Ok(());
         };
         if !format.is_block_compressed() {
@@ -308,7 +347,7 @@ impl PreparedTexture<'_> {
         }
         for (i, image) in images.iter_mut().enumerate() {
             for (k, mip) in image.mips.iter_mut().enumerate() {
-                let bytes = GpuFormat::Rgba8Unorm.level_size(mip.width, mip.height);
+                let bytes = GpuFormat::Rgba8Unorm.volume_size(mip.width, mip.height, mip.depth);
                 let too_large = || TexError::TooLarge {
                     image: i as u32,
                     mip: k as u32,
@@ -318,8 +357,20 @@ impl PreparedTexture<'_> {
                 if bytes > max_level_bytes {
                     return Err(too_large());
                 }
-                let rgba = decode_block_compressed(*format, mip.width, mip.height, &mip.data)
+                let slice_len = format.level_size(mip.width, mip.height) as usize;
+                let mut rgba = Vec::with_capacity(bytes as usize);
+                for z in 0..mip.depth as usize {
+                    let start = (z * slice_len).min(mip.data.len());
+                    let end = (start + slice_len).min(mip.data.len());
+                    let slice = decode_block_compressed(
+                        *format,
+                        mip.width,
+                        mip.height,
+                        &mip.data[start..end],
+                    )
                     .ok_or_else(too_large)?;
+                    rgba.extend_from_slice(&slice);
+                }
                 mip.data = Cow::Owned(rgba);
             }
         }
@@ -382,7 +433,7 @@ impl<'a> Tex<'a> {
     /// is required (embedded images, extended formats, size fix-ups).
     pub fn into_upload(self, options: &UploadOptions) -> Result<PreparedTexture<'a>, TexError> {
         // §2.10.1: resolution, then the GPU format (even for videos, QO-12), then the
-        // video test.
+        // volume check (A.1), then the video test.
         let resolution = self.resolution();
         let real_size = self.real_size();
         let texture_sizes: Vec<[u32; 2]> = (0..self.image_count())
@@ -390,6 +441,13 @@ impl<'a> Tex<'a> {
             .collect();
         let embedded = self.has_embedded_image();
         let (format, conversion) = gpu_format(self.format, embedded, options.extended_formats)?;
+        let volume = self.is_volume();
+        if volume && (self.is_animated() || self.is_video()) {
+            return Err(TexError::UnsupportedVolume {
+                flags: self.flags.bits(),
+                mp4: self.is_mp4,
+            });
+        }
         let sampler = SamplerDesc::from_flags(self.flags);
         let tex0_format_combo = self.tex0_format_combo();
         let is_video = self.is_video();
@@ -427,21 +485,26 @@ impl<'a> Tex<'a> {
                 mip_count: first.count,
             }
         } else {
+            let ctx = LevelContext {
+                format,
+                conversion,
+                embedded,
+                volume,
+                options,
+            };
             let mut levels = mips.into_iter();
             let mut out = Vec::with_capacity(images.len());
             for (i, range) in images.iter().enumerate() {
                 let image_levels = levels.by_ref().take(range.count as usize);
-                out.push(prepare_image(
-                    i as u32,
-                    image_levels,
-                    format,
-                    conversion,
-                    embedded,
-                    options,
-                )?);
+                out.push(prepare_image(i as u32, image_levels, &ctx)?);
             }
             GpuContent::Images {
                 format,
+                dimension: if volume {
+                    TextureDimension::D3
+                } else {
+                    TextureDimension::D2
+                },
                 images: out,
             }
         };
@@ -463,13 +526,19 @@ impl<'a> Tex<'a> {
     }
 }
 
-fn prepare_image<'a>(
-    image: u32,
-    mips: impl Iterator<Item = Mip<'a>>,
+/// Settings shared by every level of a texture.
+struct LevelContext<'o> {
     format: GpuFormat,
     conversion: Conversion,
     embedded: bool,
-    options: &UploadOptions,
+    volume: bool,
+    options: &'o UploadOptions,
+}
+
+fn prepare_image<'a>(
+    image: u32,
+    mips: impl Iterator<Item = Mip<'a>>,
+    ctx: &LevelContext<'_>,
 ) -> Result<GpuImage<'a>, TexError> {
     let mut levels: Vec<GpuMip<'a>> = Vec::new();
     let mut chain_broken = false;
@@ -479,21 +548,26 @@ fn prepare_image<'a>(
             continue;
         }
         let k = k as u32;
-        let level = if embedded {
-            decode_level(image, k, &mip, options)
-        } else {
-            raw_level(image, k, mip, format, conversion, options)?
+        let level = match (ctx.embedded, ctx.volume) {
+            (true, false) => decode_level(image, k, &mip, ctx.options),
+            (true, true) => decode_volume_level(image, k, &mip, ctx.options),
+            (false, _) => raw_level(image, k, mip, ctx)?,
         };
         if let Some(base) = levels.first() {
-            let expected = [level_extent(base.width, k), level_extent(base.height, k)];
-            if [level.width, level.height] != expected
-                || k >= max_mip_levels(base.width, base.height)
+            let expected = [
+                level_extent(base.width, k),
+                level_extent(base.height, k),
+                level_extent(base.depth, k),
+            ];
+            if [level.width, level.height, level.depth] != expected
+                || k >= max_mip_levels(base.width, base.height, base.depth)
             {
                 tracing::warn!(
                     image,
                     mip = k,
                     width = level.width,
                     height = level.height,
+                    depth = level.depth,
                     "mip level does not follow the mip chain; it and the following levels are dropped"
                 );
                 chain_broken = true;
@@ -508,7 +582,7 @@ fn prepare_image<'a>(
             image,
             "image has no mipmap; using a 1x1 transparent texture"
         );
-        levels.push(transparent_texel(format));
+        levels.push(transparent_texel(ctx.format));
     }
     Ok(GpuImage { mips: levels })
 }
@@ -517,8 +591,8 @@ fn level_extent(base: u32, level: u32) -> u32 {
     base.checked_shr(level).unwrap_or(0).max(1)
 }
 
-fn max_mip_levels(width: u32, height: u32) -> u32 {
-    32 - width.max(height).max(1).leading_zeros()
+fn max_mip_levels(width: u32, height: u32, depth: u32) -> u32 {
+    32 - width.max(height).max(depth).max(1).leading_zeros()
 }
 
 fn transparent_texel(format: GpuFormat) -> GpuMip<'static> {
@@ -532,7 +606,24 @@ fn transparent_texel(format: GpuFormat) -> GpuMip<'static> {
     GpuMip {
         width: 1,
         height: 1,
+        depth: 1,
         data: Cow::Owned(data),
+    }
+}
+
+/// Transparent black RGBA8 level of the given size, or 1×1×1 when that size exceeds
+/// the limit (decode failure path of §2.6).
+fn zero_rgba_level<'a>(width: u32, height: u32, depth: u32, options: &UploadOptions) -> GpuMip<'a> {
+    let (mut width, mut height, mut depth) = (width.max(1), height.max(1), depth.max(1));
+    if GpuFormat::Rgba8Unorm.volume_size(width, height, depth) > options.max_level_bytes {
+        (width, height, depth) = (1, 1, 1);
+    }
+    let len = GpuFormat::Rgba8Unorm.volume_size(width, height, depth) as usize;
+    GpuMip {
+        width,
+        height,
+        depth,
+        data: Cow::Owned(vec![0; len]),
     }
 }
 
@@ -541,6 +632,7 @@ fn decode_level<'a>(image: u32, mip: u32, level: &Mip<'_>, options: &UploadOptio
         Ok(decoded) if decoded.width > 0 && decoded.height > 0 => GpuMip {
             width: decoded.width,
             height: decoded.height,
+            depth: 1,
             data: Cow::Owned(decoded.rgba),
         },
         result => {
@@ -548,55 +640,80 @@ fn decode_level<'a>(image: u32, mip: u32, level: &Mip<'_>, options: &UploadOptio
             // header size and logs (QO-07).
             let error = result.err().map(|e| e.to_string()).unwrap_or_default();
             tracing::warn!(image, mip, %error, "embedded image failed to decode; using transparent black");
-            let (mut width, mut height) = (level.width.max(1), level.height.max(1));
-            if GpuFormat::Rgba8Unorm.level_size(width, height) > options.max_level_bytes {
-                (width, height) = (1, 1);
-            }
-            let len = GpuFormat::Rgba8Unorm.level_size(width, height) as usize;
-            GpuMip {
-                width,
-                height,
-                data: Cow::Owned(vec![0; len]),
-            }
+            zero_rgba_level(level.width, level.height, 1, options)
         }
     }
+}
+
+/// A.1: an embedded volume level is one 2D image of `width × (height × depth)`
+/// whose slice `z` is rows `[z·h, (z+1)·h)`, which is already the 3D texel order.
+/// Its size must match the header exactly, otherwise the level is zeroed.
+fn decode_volume_level<'a>(
+    image: u32,
+    mip: u32,
+    level: &Mip<'_>,
+    options: &UploadOptions,
+) -> GpuMip<'a> {
+    let (width, height, depth) = (level.width.max(1), level.height.max(1), level.depth.max(1));
+    let error = match decode_embedded_image(&level.data, options.extended_formats) {
+        Ok(decoded)
+            if decoded.width == width
+                && u64::from(decoded.height) == u64::from(height) * u64::from(depth) =>
+        {
+            return GpuMip {
+                width,
+                height,
+                depth,
+                data: Cow::Owned(decoded.rgba),
+            };
+        }
+        Ok(decoded) => format!(
+            "decoded {}x{} instead of {width}x({height}x{depth})",
+            decoded.width, decoded.height
+        ),
+        Err(e) => e.to_string(),
+    };
+    tracing::warn!(image, mip, %error, "embedded volume image unusable; using transparent black");
+    zero_rgba_level(width, height, depth, options)
 }
 
 fn raw_level<'a>(
     image: u32,
     mip: u32,
     level: Mip<'a>,
-    format: GpuFormat,
-    conversion: Conversion,
-    options: &UploadOptions,
+    ctx: &LevelContext<'_>,
 ) -> Result<GpuMip<'a>, TexError> {
-    // A zero-sized level cannot exist on the GPU; it is treated as 1 pixel wide/high.
+    // A zero-sized level cannot exist on the GPU; it is treated as 1 texel on that axis.
     let (width, height) = (level.width.max(1), level.height.max(1));
-    let expected = format.level_size(width, height);
-    if expected > options.max_level_bytes {
+    // A.1: raw volume data is `width × height × depth` texels, x fastest, then y, z.
+    let depth = if ctx.volume { level.depth.max(1) } else { 1 };
+    let expected = ctx.format.volume_size(width, height, depth);
+    if expected > ctx.options.max_level_bytes {
         return Err(TexError::TooLarge {
             image,
             mip,
             bytes: expected,
-            limit: options.max_level_bytes,
+            limit: ctx.options.max_level_bytes,
         });
     }
-    let data = convert(level.data, conversion, width, height);
+    // Bounded by the limit check above.
+    let texels = width as usize * height as usize * depth as usize;
+    let data = convert(level.data, ctx.conversion, texels);
     let data = fit_length(data, expected as usize, image, mip);
     Ok(GpuMip {
         width,
         height,
+        depth,
         data,
     })
 }
 
 /// CPU expansion for formats that have no GPU equivalent (extended formats only).
-fn convert(data: Cow<'_, [u8]>, conversion: Conversion, width: u32, height: u32) -> Cow<'_, [u8]> {
-    let pixels = width as usize * height as usize;
+fn convert(data: Cow<'_, [u8]>, conversion: Conversion, texels: usize) -> Cow<'_, [u8]> {
     match conversion {
         Conversion::None => data,
         Conversion::Rgb8ToRgba8 => {
-            let mut out = vec![0u8; pixels * 4];
+            let mut out = vec![0u8; texels * 4];
             for (dst, src) in out
                 .as_chunks_mut::<4>()
                 .0
@@ -609,7 +726,7 @@ fn convert(data: Cow<'_, [u8]>, conversion: Conversion, width: u32, height: u32)
         }
         Conversion::Rgb565ToRgba8 => {
             // Assumed layout: little-endian u16, red in the high 5 bits (README).
-            let mut out = vec![0u8; pixels * 4];
+            let mut out = vec![0u8; texels * 4];
             for (dst, &src) in out
                 .as_chunks_mut::<4>()
                 .0
@@ -629,7 +746,7 @@ fn convert(data: Cow<'_, [u8]>, conversion: Conversion, width: u32, height: u32)
         }
         Conversion::Rgb16fToRgba16f => {
             const ONE_HALF: [u8; 2] = 0x3C00u16.to_le_bytes();
-            let mut out = vec![0u8; pixels * 8];
+            let mut out = vec![0u8; texels * 8];
             for (dst, src) in out
                 .as_chunks_mut::<8>()
                 .0
@@ -691,6 +808,8 @@ mod tests {
         assert_eq!(GpuFormat::Bc3RgbaUnorm.level_size(5, 4), 32);
         assert_eq!(GpuFormat::Rgba8Unorm.level_size(3, 2), 24);
         assert_eq!(GpuFormat::Rg8Unorm.bytes_per_row(3), 6);
+        assert_eq!(GpuFormat::Rgba8Unorm.volume_size(32, 32, 32), 131_072);
+        assert_eq!(GpuFormat::Rgba8Unorm.volume_size(2, 2, 0), 16);
     }
 
     #[test]
@@ -698,26 +817,35 @@ mod tests {
         assert_eq!(level_extent(8, 1), 4);
         assert_eq!(level_extent(8, 5), 1);
         assert_eq!(level_extent(8, 40), 1);
-        assert_eq!(max_mip_levels(8, 2), 4);
-        assert_eq!(max_mip_levels(1, 1), 1);
+        assert_eq!(max_mip_levels(8, 2, 1), 4);
+        assert_eq!(max_mip_levels(1, 1, 1), 1);
+        assert_eq!(max_mip_levels(2, 2, 32), 6);
     }
 
     #[test]
     fn conversions() {
         let rgb = Cow::Borrowed(&[1u8, 2, 3, 4, 5, 6][..]);
         assert_eq!(
-            &*convert(rgb, Conversion::Rgb8ToRgba8, 2, 1),
+            &*convert(rgb, Conversion::Rgb8ToRgba8, 2),
             &[1, 2, 3, 255, 4, 5, 6, 255]
         );
         let white = Cow::Borrowed(&[0xFF, 0xFF][..]);
         assert_eq!(
-            &*convert(white, Conversion::Rgb565ToRgba8, 1, 1),
+            &*convert(white, Conversion::Rgb565ToRgba8, 1),
             &[255, 255, 255, 255]
         );
         let half = Cow::Borrowed(&[1u8, 2, 3, 4, 5, 6][..]);
         assert_eq!(
-            &*convert(half, Conversion::Rgb16fToRgba16f, 1, 1),
+            &*convert(half, Conversion::Rgb16fToRgba16f, 1),
             &[1, 2, 3, 4, 5, 6, 0x00, 0x3C]
         );
+    }
+
+    #[test]
+    fn volume_sampler_has_no_anisotropy() {
+        let lut = SamplerDesc::from_flags(TexFlags::from_raw(0x42).unwrap());
+        assert_eq!(lut.address_mode, AddressMode::ClampToEdge);
+        assert_eq!(lut.min_filter, FilterMode::Linear);
+        assert_eq!(lut.anisotropy_clamp, 1);
     }
 }

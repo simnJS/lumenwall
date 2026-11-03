@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc d6c748642f0d3a385848c1431e5510b9f3168e657b687a5585d96f787452867c # shrinks to which = 3, edits = [(5352818018648292784, 75), (16722610582669330290, 0), (14740307683249553961, 219)], cut = None, extended = false
+cc f2867b6f979345b78e0862d26669f6c045277cad683a5b8579b6e05be580707e # shrinks to is_psd = true, edits = [(13194173382030459722, 92), (4629759313232946752, 179)], cut = None
+cc a59fda054277b459bf1956313705e646ccdf87f3306133dccddfb8f035737da7 # shrinks to which = 7, edits = [(16902313151458708199, 104), (11180882108678750860, 158)], cut = None, extended = false

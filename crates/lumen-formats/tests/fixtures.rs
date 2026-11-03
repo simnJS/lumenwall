@@ -1,4 +1,4 @@
-//! Spec 01 §7 fixtures F1 to F10, positive and negative.
+//! Spec 01 §7 fixtures F1 to F11, positive and negative.
 
 mod common;
 
@@ -9,11 +9,18 @@ use lumen_formats::mdl::{self, MdlError, MdlVersion};
 use lumen_formats::pkg::PkgArchive;
 use lumen_formats::tex::{
     self, AddressMode, EmbeddedFormat, FilterMode, FrameState, GpuContent, GpuFormat, Spritesheet,
-    TexError, TexFlags, TexFormat, UploadOptions,
+    TexError, TexFlags, TexFormat, TextureDimension, UploadOptions,
 };
 
 fn tex_err(data: &[u8]) -> TexError {
     tex::parse(data).expect_err("parse should fail")
+}
+
+/// Contents of an existing, in-bounds archive entry.
+fn read<'a>(pkg: &'a PkgArchive, name: &str) -> &'a [u8] {
+    pkg.read(name)
+        .expect("entry exists")
+        .expect("entry in bounds")
 }
 
 /// Per image, per level: (width, height, bytes).
@@ -21,7 +28,7 @@ type Levels = Vec<Vec<(u32, u32, Vec<u8>)>>;
 
 fn images(content: &GpuContent<'_>) -> (GpuFormat, Levels) {
     match content {
-        GpuContent::Images { format, images } => (
+        GpuContent::Images { format, images, .. } => (
             *format,
             images
                 .iter()
@@ -46,7 +53,7 @@ fn f1_minimal_pkg() {
     let pkg = PkgArchive::from_vec(bytes).unwrap();
     assert_eq!(pkg.base(), 33);
     assert_eq!(pkg.header(), b"PKGV0001");
-    assert_eq!(pkg.read("a.txt"), Some(&b"hi"[..]));
+    assert_eq!(read(&pkg, "a.txt"), b"hi");
     assert!(!pkg.contains("A.txt"), "lookup is case-sensitive");
     assert!(!pkg.contains("b"));
     let names: Vec<_> = pkg.entries().map(|e| e.name).collect();
@@ -59,17 +66,17 @@ fn f2_two_entries_with_offset() {
     assert_eq!(bytes.len(), 77);
     let pkg = PkgArchive::from_vec(bytes).unwrap();
     assert_eq!(pkg.base(), 67);
-    let project = pkg.get("project.json").unwrap();
-    assert_eq!(project.data, b"{\"a\":1}");
+    let project = pkg.get("project.json").unwrap().data().unwrap();
+    assert_eq!(project, b"{\"a\":1}");
     assert_eq!(
-        project.data.as_ptr() as usize - pkg.as_bytes().as_ptr() as usize,
+        project.as_ptr() as usize - pkg.as_bytes().as_ptr() as usize,
         67
     );
     let tex = pkg.get("materials/x.tex").unwrap();
-    assert_eq!(tex.data, b"XYZ");
-    assert_eq!(tex.offset, 7);
+    assert_eq!(tex.data().unwrap(), b"XYZ");
+    assert_eq!((tex.offset, tex.size), (7, 3));
     assert_eq!(
-        tex.data.as_ptr() as usize - pkg.as_bytes().as_ptr() as usize,
+        tex.data().unwrap().as_ptr() as usize - pkg.as_bytes().as_ptr() as usize,
         74
     );
     // The archive itself does no normalization (that is the VFS's job, §1.5).
@@ -91,8 +98,8 @@ fn f2_bare_pkgv_header_is_accepted() {
     let pkg = PkgArchive::from_vec(bytes).unwrap();
     assert_eq!(pkg.header(), b"PKGV");
     assert_eq!(pkg.base(), 63);
-    assert_eq!(pkg.read("project.json"), Some(&b"{\"a\":1}"[..]));
-    assert_eq!(pkg.read("materials/x.tex"), Some(&b"XYZ"[..]));
+    assert_eq!(read(&pkg, "project.json"), b"{\"a\":1}");
+    assert_eq!(read(&pkg, "materials/x.tex"), b"XYZ");
 }
 
 #[test]
@@ -117,12 +124,35 @@ fn pkg_truncations_and_out_of_bounds() {
         let err = PkgArchive::from_vec(bytes[..len].to_vec()).unwrap_err();
         assert_eq!(err.code(), "FinDeFluxInattendue", "len {len}");
     }
-    // Truncating the data area leaves the entry out of bounds.
-    let err = PkgArchive::from_vec(bytes[..34].to_vec()).unwrap_err();
+    // A.4: a truncated data area still opens; the entry exists but fails on read.
+    for truncated in [bytes[..34].to_vec(), bytes[..33].to_vec()] {
+        let pkg = PkgArchive::from_vec(truncated).unwrap();
+        assert!(pkg.contains("a.txt"));
+        let err = pkg.read("a.txt").unwrap().unwrap_err();
+        assert_eq!(err.code(), "E_PKG_ENTREE_HORS_LIMITES");
+        assert!(!pkg.get("a.txt").unwrap().is_in_bounds());
+    }
+    // So does a huge offset (64-bit arithmetic, no overflow).
+    let pkg = PkgArchive::from_vec(patch(bytes, 0x19, &[0xFF, 0xFF, 0xFF, 0xFF])).unwrap();
+    let err = pkg.read("a.txt").unwrap().unwrap_err();
     assert_eq!(err.code(), "E_PKG_ENTREE_HORS_LIMITES");
-    // So does a huge offset (no overflow on 32-bit arithmetic).
-    let err = PkgArchive::from_vec(patch(bytes, 0x19, &[0xFF, 0xFF, 0xFF, 0xFF])).unwrap_err();
+    let message = err.to_string();
+    for part in ["a.txt", "offset 4294967295", "size 2", "35 bytes"] {
+        assert!(message.contains(part), "{message}");
+    }
+}
+
+#[test]
+fn a4_out_of_bounds_entry_does_not_poison_the_archive() {
+    // F2 with entry 1 (project.json) pointing past the end: entry 2 stays readable,
+    // before and after the failed read (QO-37 is not reproduced).
+    let pkg = PkgArchive::from_vec(patch(f2_pkg(), 0x20, &[0x50, 0, 0, 0])).unwrap();
+    assert_eq!(read(&pkg, "materials/x.tex"), b"XYZ");
+    let err = pkg.read("project.json").unwrap().unwrap_err();
     assert_eq!(err.code(), "E_PKG_ENTREE_HORS_LIMITES");
+    assert_eq!(read(&pkg, "materials/x.tex"), b"XYZ");
+    let in_bounds: Vec<bool> = pkg.entries().map(|e| e.is_in_bounds()).collect();
+    assert_eq!(in_bounds, [false, true]);
 }
 
 #[test]
@@ -132,10 +162,10 @@ fn pkg_open_from_disk_mapped_and_read() {
     std::fs::write(&path, f2_pkg()).unwrap();
     let mut mapped = PkgArchive::open(&path).unwrap();
     assert!(mapped.is_mapped());
-    assert_eq!(mapped.read("materials/x.tex"), Some(&b"XYZ"[..]));
+    assert_eq!(read(&mapped, "materials/x.tex"), b"XYZ");
     mapped.release_mapping();
     assert!(!mapped.is_mapped());
-    assert_eq!(mapped.read("project.json"), Some(&b"{\"a\":1}"[..]));
+    assert_eq!(read(&mapped, "project.json"), b"{\"a\":1}");
     let read = PkgArchive::open_with(&path, lumen_formats::pkg::OpenMode::Read).unwrap();
     assert_eq!(read.len(), 2);
     std::fs::write(&path, b"").unwrap();
@@ -183,10 +213,17 @@ fn f3_rgba_2x2_uncompressed() {
     assert_eq!(up.resolution, [2, 2, 2, 2]);
     assert_eq!(up.uv_extent(), [1.0, 1.0]);
     assert_eq!(up.frame_state(0.3), FrameState::default());
-    let GpuContent::Images { format, images } = &up.content else {
+    let GpuContent::Images {
+        format,
+        dimension,
+        images,
+    } = &up.content
+    else {
         panic!("expected images")
     };
     assert_eq!(*format, GpuFormat::Rgba8Unorm);
+    assert_eq!(*dimension, TextureDimension::D2);
+    assert_eq!(images[0].depth(), 1);
     assert!(
         matches!(images[0].mips[0].data, Cow::Borrowed(_)),
         "no copy on upload"
@@ -637,9 +674,147 @@ fn flags_rule_is_a_comparison() {
     assert!(TexFlags::from_raw(64 | 128).is_ok());
 }
 
+// ---------------------------------------------------------------- F11: VOLUME (A.1, A.5)
+
+#[test]
+fn f11_volume_texture() {
+    let bytes = f11_tex();
+    assert_eq!(bytes.len(), 174);
+    let t = tex::parse(&bytes).unwrap();
+    // The analysis stops exactly at the end of the file.
+    assert_eq!(t.end_offset, 174);
+    assert!(t.is_volume());
+    assert_eq!(t.flags.bits(), 0x42);
+    assert_eq!(
+        (t.texture_width, t.texture_height, t.texture_depth),
+        (2, 1, 2)
+    );
+    assert_eq!((t.image_width, t.image_height), (4, 1));
+    assert_eq!((t.container_version, t.effective_version), (4, 3));
+    assert_eq!(t.embedded_format, EmbeddedFormat::Png);
+    let mip = &t.image(0).unwrap()[0];
+    assert_eq!((mip.width, mip.height, mip.depth), (2, 1, 2));
+    assert_eq!(mip.data.len(), 75);
+    assert_eq!(t.resolution(), [2, 1, 4, 1]);
+    assert_eq!(t.tex0_format_combo(), None);
+
+    let up = t.into_upload(&UploadOptions::default()).unwrap();
+    assert_eq!(up.resolution, [2, 1, 4, 1]);
+    assert_eq!(up.dimension(), Some(TextureDimension::D3));
+    assert_eq!(up.sampler.address_mode, AddressMode::ClampToEdge);
+    assert_eq!(up.sampler.mag_filter, FilterMode::Linear);
+    assert_eq!(up.sampler.min_filter, FilterMode::Linear);
+    assert_eq!(up.sampler.anisotropy_clamp, 1);
+    let GpuContent::Images { format, images, .. } = &up.content else {
+        panic!("expected images")
+    };
+    assert_eq!(*format, GpuFormat::Rgba8Unorm);
+    let level = &images[0].mips[0];
+    assert_eq!((level.width, level.height, level.depth), (2, 1, 2));
+    // Texels (x, y, z): (0,0,0) red, (1,0,0) green, (0,0,1) blue, (1,0,1) white.
+    assert_eq!(
+        &*level.data,
+        &[
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255
+        ]
+    );
+}
+
+#[test]
+fn f11_variants() {
+    // VOLUME bit removed: the reference layout reads the colour as the magic.
+    let err = tex_err(&patch(f11_tex(), 0x16, &[0x02]));
+    assert_eq!(err.code(), "E_TEX_TEXB");
+    assert!(err.to_string().contains(r"\x80\x80\x80\xffTEXB0"), "{err}");
+    // VOLUME + VIDEO: parses, refused at GPU creation.
+    let bytes = patch(f11_tex(), 0x16, &[0x62]);
+    let t = tex::parse(&bytes).unwrap();
+    let err = t.into_upload(&UploadOptions::default()).unwrap_err();
+    assert_eq!(err.code(), "E_TEX_VOLUME");
+    // VOLUME + ANIMATED is refused the same way (TEXS appended so it parses).
+    let mut bytes = patch(f11_tex(), 0x16, &[0x46]);
+    bytes.extend_from_slice(b"TEXS0003\0");
+    bytes.extend_from_slice(&[0; 12]);
+    let t = tex::parse(&bytes).unwrap();
+    assert_eq!(
+        t.into_upload(&UploadOptions::default()).unwrap_err().code(),
+        "E_TEX_VOLUME"
+    );
+    // Mip depth 3: the decoded 2×2 image is not 2×(1×3): zeroed 2×1×3 level.
+    let bytes = patch(f11_tex(), 0x53, &[0x03]);
+    let t = tex::parse(&bytes).unwrap();
+    let up = t.into_upload(&UploadOptions::default()).unwrap();
+    let GpuContent::Images { images, .. } = &up.content else {
+        panic!("expected images")
+    };
+    let level = &images[0].mips[0];
+    assert_eq!((level.width, level.height, level.depth), (2, 1, 3));
+    assert_eq!(&*level.data, &[0u8; 24][..]);
+    // Truncation.
+    assert_eq!(tex_err(&f11_tex()[..173]).code(), "FinDeFluxInattendue");
+}
+
+#[test]
+fn volume_with_raw_pixels_is_a_3d_level() {
+    // Extrapolated case (QO-35): TEXB0003, no embedded image, RGBA 2×1×2 raw.
+    let mut bytes = f11_tex()[..0x32].to_vec();
+    bytes.extend_from_slice(b"TEXB0003\0");
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // NI
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // TIE unknown
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // NM
+    for v in [2u32, 1, 2, 0, 16, 16] {
+        bytes.extend_from_slice(&v.to_le_bytes()); // w, h, depth, C, TD, TS
+    }
+    bytes.extend(0u8..16);
+    let t = tex::parse(&bytes).unwrap();
+    assert_eq!(t.end_offset, bytes.len());
+    let up = t.into_upload(&UploadOptions::default()).unwrap();
+    let GpuContent::Images {
+        dimension, images, ..
+    } = &up.content
+    else {
+        panic!("expected images")
+    };
+    assert_eq!(*dimension, TextureDimension::D3);
+    let level = &images[0].mips[0];
+    assert_eq!((level.width, level.height, level.depth), (2, 1, 2));
+    assert!(matches!(level.data, Cow::Borrowed(_)), "zero-copy");
+    assert_eq!(&*level.data, &(0u8..16).collect::<Vec<_>>()[..]);
+}
+
+// ---------------------------------------------------------------- A.3: TEX0FORMAT
+
+#[test]
+fn a3_tex0format_follows_the_declared_format() {
+    // F6 (embedded PNG, uploaded as RGBA8) declaring RG88, then R8.
+    for (declared, combo) in [(8u8, Some(8)), (9, Some(9)), (0, None), (4, None)] {
+        let bytes = patch(f6_tex(), 0x12, &[declared]);
+        let t = tex::parse(&bytes).unwrap();
+        assert_eq!(t.tex0_format_combo(), combo);
+        let up = t.into_upload(&UploadOptions::default()).unwrap();
+        assert_eq!(up.tex0_format_combo, combo);
+        assert_eq!(up.source_format.raw(), u32::from(declared));
+        assert_eq!(up.source_format.tex0_format_combo(), combo);
+        let (format, _) = images(&up.content);
+        assert_eq!(
+            format,
+            GpuFormat::Rgba8Unorm,
+            "embedded image sent as RGBA8"
+        );
+    }
+}
+
 #[test]
 fn every_truncation_of_every_fixture_fails_cleanly() {
-    for fixture in [f3_tex(), f4_tex(), f5_tex(), f6_tex(), f7_tex(), f8_tex()] {
+    for fixture in [
+        f3_tex(),
+        f4_tex(),
+        f5_tex(),
+        f6_tex(),
+        f7_tex(),
+        f8_tex(),
+        f11_tex(),
+    ] {
         let full = tex::parse(&fixture).unwrap();
         let needed = fixture.len();
         for len in 0..needed {

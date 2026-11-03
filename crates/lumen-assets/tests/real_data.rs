@@ -88,7 +88,7 @@ fn reference_wallpaper_resolves_through_pkg_and_assets() {
         let files = vfs.read_texture(name).unwrap();
         let parsed = files.parse().unwrap();
         let prepared = parsed.into_upload(&UploadOptions::default()).unwrap();
-        let GpuContent::Images { format, images } = &prepared.content else {
+        let GpuContent::Images { format, images, .. } = &prepared.content else {
             panic!("{name}: expected images");
         };
         println!(

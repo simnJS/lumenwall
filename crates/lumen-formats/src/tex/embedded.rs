@@ -1,11 +1,12 @@
-//! CPU decoders: embedded image files (spec 01 §2.6) and the BCn fallback for GPUs
-//! without block-compression support.
+//! CPU decoders: embedded image files (spec 01 §2.6, amendment A.2) and the BCn
+//! fallback for GPUs without block-compression support.
 
 use std::io::Cursor;
 
-use image::{ImageFormat, ImageReader};
+use image::{DynamicImage, ImageFormat, ImageReader};
 
 use super::GpuFormat;
+use super::psd::{PsdError, decode_psd, is_psd};
 
 /// An image decoded to tightly packed RGBA8.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,9 +19,25 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
-/// Formats the reference decoder recognises and `image` supports (§2.6). PSD and
-/// Softimage PIC are recognised upstream but have no decoder here (see README).
-const PARITY_FORMATS: [ImageFormat; 7] = [
+/// Why an embedded image could not be decoded. The caller zero-fills the level and
+/// logs (§2.6); none of these is fatal.
+#[derive(Debug, thiserror::Error)]
+pub enum EmbeddedImageError {
+    /// Error from the `image` decoders (PNG, JPEG, GIF, BMP, TGA, HDR, PNM, WEBP).
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+    /// PSD outside the A.2 subset, or corrupt.
+    #[error(transparent)]
+    Psd(#[from] PsdError),
+    /// Recognised but not decoded by Lumen.
+    #[error("unsupported embedded image format: {0}")]
+    Unsupported(&'static str),
+}
+
+/// Formats decoded through `image` (A.2: PNG and JPEG required, GIF, BMP and TGA
+/// recommended, HDR and PNM optional). PSD has its own decoder; Softimage PIC is
+/// not decoded.
+const SUPPORTED_FORMATS: [ImageFormat; 7] = [
     ImageFormat::Png,
     ImageFormat::Jpeg,
     ImageFormat::Gif,
@@ -30,40 +47,78 @@ const PARITY_FORMATS: [ImageFormat; 7] = [
     ImageFormat::Pnm,
 ];
 
+/// Softimage PIC: `53 80 F6 34` at 0 and `PICT` at 88 (A.2).
+fn is_softimage_pic(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x53, 0x80, 0xF6, 0x34]) && bytes.get(88..92) == Some(b"PICT")
+}
+
 /// Picks the decoder from the content, never from the `TIE` field.
-fn sniff(bytes: &[u8], allow_extra_formats: bool) -> Option<ImageFormat> {
+fn sniff(bytes: &[u8], allow_extra_formats: bool) -> Result<ImageFormat, EmbeddedImageError> {
     match image::guess_format(bytes) {
-        Ok(format) if PARITY_FORMATS.contains(&format) => Some(format),
-        Ok(ImageFormat::WebP) if allow_extra_formats => Some(ImageFormat::WebP),
-        Ok(_) => None,
+        Ok(format) if SUPPORTED_FORMATS.contains(&format) => Ok(format),
+        Ok(ImageFormat::WebP) if allow_extra_formats => Ok(ImageFormat::WebP),
+        Ok(other) => Err(EmbeddedImageError::Unsupported(other.extensions_str()[0])),
         // TGA has no signature: it is the last candidate of a sniffing decoder.
-        Err(_) => Some(ImageFormat::Tga),
+        Err(_) => Ok(ImageFormat::Tga),
     }
 }
 
-/// Decodes an embedded image file to RGBA8 (§2.6): format sniffed from the content,
-/// GIF reduced to its first frame, 16-bit and HDR data brought down to 8 bits, no
-/// EXIF orientation, no flip, no alpha premultiplication.
+/// Decodes an embedded image file to RGBA8 (§2.6, A.2): format sniffed from the
+/// content, GIF reduced to its first frame, 16-bit samples reduced to their high
+/// byte, HDR clamped to 8 bits, no gamma/ICC/sRGB correction, no EXIF orientation,
+/// no flip, no alpha premultiplication. PSD composites follow the A.2 subset.
 ///
 /// `allow_extra_formats` also accepts WEBP, which the reference cannot decode
 /// (QO-06, QO-07). Decoding uses `image`'s default memory limits.
 pub fn decode_embedded_image(
     bytes: &[u8],
     allow_extra_formats: bool,
-) -> Result<DecodedImage, image::ImageError> {
-    let format = sniff(bytes, allow_extra_formats).ok_or_else(|| {
-        image::ImageError::Unsupported(image::error::UnsupportedError::from_format_and_kind(
-            image::error::ImageFormatHint::Unknown,
-            image::error::UnsupportedErrorKind::Format(image::error::ImageFormatHint::Unknown),
-        ))
-    })?;
+) -> Result<DecodedImage, EmbeddedImageError> {
+    if is_psd(bytes) {
+        return Ok(decode_psd(bytes)?);
+    }
+    if is_softimage_pic(bytes) {
+        return Err(EmbeddedImageError::Unsupported("Softimage PIC"));
+    }
+    let format = sniff(bytes, allow_extra_formats)?;
     let image = ImageReader::with_format(Cursor::new(bytes), format).decode()?;
-    let rgba = image.into_rgba8();
+    let (width, height) = (image.width(), image.height());
     Ok(DecodedImage {
-        width: rgba.width(),
-        height: rgba.height(),
-        rgba: rgba.into_raw(),
+        width,
+        height,
+        rgba: to_rgba8(image),
     })
+}
+
+/// RGBA8 conversion. 16-bit samples keep their high byte (A.2), where `image`'s own
+/// conversion would round; grey is replicated, a missing alpha is 255.
+fn to_rgba8(image: DynamicImage) -> Vec<u8> {
+    fn high(v: u16) -> u8 {
+        (v >> 8) as u8
+    }
+    match image {
+        DynamicImage::ImageLuma16(img) => img
+            .as_raw()
+            .iter()
+            .flat_map(|&l| [high(l), high(l), high(l), 0xFF])
+            .collect(),
+        DynamicImage::ImageLumaA16(img) => img
+            .as_raw()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[l, a]| [high(l), high(l), high(l), high(a)])
+            .collect(),
+        DynamicImage::ImageRgb16(img) => img
+            .as_raw()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [high(r), high(g), high(b), 0xFF])
+            .collect(),
+        DynamicImage::ImageRgba16(img) => img.as_raw().iter().map(|&v| high(v)).collect(),
+        other => other.into_rgba8().into_raw(),
+    }
 }
 
 /// Decodes one level of BC1/BC2/BC3/BC7 blocks to RGBA8 (`width × height × 4`

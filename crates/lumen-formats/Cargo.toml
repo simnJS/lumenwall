@@ -19,6 +19,11 @@ memmap2 = "0.9.12"
 bcdec_rs = "0.2.1"
 
 [dev-dependencies]
+# `block::compress` (bench inputs) needs `alloc`; the library only decompresses.
+lz4_flex = { workspace = true, features = ["alloc"] }
+# Hand-built PNG test images (zlib stream and chunk CRCs).
+crc32fast = "1.5.0"
+miniz_oxide = "0.8.9"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 tempfile = "3.27.0"

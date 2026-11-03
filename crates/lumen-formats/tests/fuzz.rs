@@ -38,12 +38,24 @@ fn exercise_tex(data: &[u8], extended: bool) {
 
 fn exercise_pkg(data: Vec<u8>) {
     if let Ok(pkg) = PkgArchive::from_vec(data) {
+        let file_len = pkg.as_bytes().len() as u64;
         for entry in pkg.entries() {
             let found = pkg.get_bytes(entry.name).expect("every name resolves");
             assert!(found.index <= entry.index, "first occurrence wins");
-            let _ = entry.data.len();
+            // A.4: each entry is checked on its own when read.
+            let end = pkg.base() as u64 + u64::from(entry.offset) + u64::from(entry.size);
+            match entry.data() {
+                Ok(data) => {
+                    assert_eq!(data.len() as u64, u64::from(entry.size));
+                    assert!(end <= file_len);
+                }
+                Err(e) => {
+                    assert_eq!(e.code(), "E_PKG_ENTREE_HORS_LIMITES");
+                    assert!(end > file_len);
+                }
+            }
         }
-        let _ = pkg.get("project.json");
+        let _ = pkg.read("project.json");
     }
 }
 
@@ -62,14 +74,36 @@ fn mutate(mut data: Vec<u8>, edits: &[(usize, u8)], cut: Option<usize>) -> Vec<u
 }
 
 fn fixture(index: usize) -> Vec<u8> {
-    match index % 6 {
+    match index % 9 {
         0 => f3_tex(),
         1 => f4_tex(),
         2 => f5_tex(),
         3 => f6_tex(),
         4 => f7_tex(),
-        _ => f8_tex(),
+        5 => f8_tex(),
+        6 => f11_tex(),
+        7 => embedded_tex(20, &sample_psd()),
+        _ => embedded_tex(13, &sample_png()),
     }
+}
+
+/// RGBA 8-bit RLE PSD, 5×2.
+fn sample_psd() -> Vec<u8> {
+    let plane = |v: u8| vec![v, v, v, 1, 2, v, v, v, v, 3];
+    psd(
+        5,
+        2,
+        8,
+        3,
+        &[plane(9), plane(8), plane(7), plane(128)],
+        true,
+    )
+}
+
+/// Interlaced RGB PNG, 3×3.
+fn sample_png() -> Vec<u8> {
+    let pixels: Vec<u8> = (0u8..27).collect();
+    png(3, 3, 8, 2, true, &adam7_scanlines(3, 3, 3, &pixels), &[])
 }
 
 proptest! {
@@ -86,8 +120,21 @@ proptest! {
     }
 
     #[test]
+    fn mutated_embedded_images_never_panic(
+        is_psd in any::<bool>(),
+        edits in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..6),
+        cut in proptest::option::of(any::<usize>()),
+    ) {
+        let base = if is_psd { sample_psd() } else { sample_png() };
+        let data = mutate(base, &edits, cut);
+        if let Ok(img) = tex::decode_embedded_image(&data, true) {
+            prop_assert_eq!(img.rgba.len() as u64, u64::from(img.width) * u64::from(img.height) * 4);
+        }
+    }
+
+    #[test]
     fn mutated_textures_never_panic(
-        which in 0usize..6,
+        which in 0usize..9,
         edits in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..8),
         cut in proptest::option::of(any::<usize>()),
         extended in any::<bool>(),

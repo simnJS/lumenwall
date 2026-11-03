@@ -45,6 +45,16 @@ pub enum AssetError {
         #[source]
         source: PkgError,
     },
+    /// An archive entry cannot be read: it runs past the end of the file
+    /// (`E_PKG_ENTREE_HORS_LIMITES`, amendment A.4). Only that entry is affected.
+    #[error("cannot read \"{path}\": {source}")]
+    PkgEntry {
+        /// Requested path.
+        path: String,
+        /// Underlying error.
+        #[source]
+        source: PkgError,
+    },
     /// The assets folder cannot be mounted (fatal, spec 01 §4.8 priority 6).
     #[error("no valid assets folder at {}: {source}", path.display())]
     NoAssetsDir {
@@ -68,7 +78,10 @@ impl AssetError {
     pub fn category(&self) -> ErrorCategory {
         match self {
             Self::NotFound { .. } => ErrorCategory::NotFound,
-            Self::Io { .. } | Self::Pkg { .. } | Self::NoAssetsDir { .. } => ErrorCategory::Invalid,
+            Self::Io { .. }
+            | Self::Pkg { .. }
+            | Self::PkgEntry { .. }
+            | Self::NoAssetsDir { .. } => ErrorCategory::Invalid,
         }
     }
 

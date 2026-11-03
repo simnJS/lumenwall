@@ -1,13 +1,16 @@
 //! `.pkg` archive reader (spec 01 §1).
 //!
 //! The archive is memory-mapped (or held in memory) and parsed once at open time:
-//! one pass over the entry table, one bounds check per entry, then a hash index is
-//! sorted so lookups allocate nothing. Entry contents are slices borrowed from the
-//! mapping; nothing is copied.
+//! one pass over the entry table, then a hash index is sorted so lookups allocate
+//! nothing. Entry contents are slices borrowed from the mapping; nothing is copied.
 //!
 //! Layout: `sstr` header starting with `PKGV`, `u32` entry count N, N entries of
 //! (`sstr` name, `u32` offset, `u32` size), then the data area. Offsets are relative
 //! to `base`, the first byte after the table.
+//!
+//! Entry bounds are checked when an entry is read, never at open time: an entry
+//! that runs past the end of the file fails alone with `E_PKG_ENTREE_HORS_LIMITES`
+//! and every other entry stays readable (spec 01 §1.4, amendment A.4).
 
 use std::fs::File;
 use std::io;
@@ -17,8 +20,8 @@ use thiserror::Error;
 
 use crate::reader::{Reader, UnexpectedEof, escape_bytes};
 
-/// Errors raised while opening an archive. All of them are in the spec's `Invalide`
-/// category (the file exists but cannot be used).
+/// Errors raised while opening an archive or reading one of its entries. All of them
+/// are in the spec's `Invalide` category (the file exists but cannot be used).
 #[derive(Debug, Error)]
 pub enum PkgError {
     /// The header `sstr` does not start with `PKGV` (spec code `E_PKG_ENTETE`).
@@ -27,10 +30,11 @@ pub enum PkgError {
         /// The header bytes, escaped (at most 32 bytes shown).
         found: String,
     },
-    /// A length or count runs past the end of the file (`FinDeFluxInattendue`).
+    /// The header or the table runs past the end of the file (`FinDeFluxInattendue`).
     #[error(transparent)]
     UnexpectedEof(#[from] UnexpectedEof),
-    /// An entry's data ends past the end of the file (`E_PKG_ENTREE_HORS_LIMITES`).
+    /// The entry being read ends past the end of the file
+    /// (`E_PKG_ENTREE_HORS_LIMITES`, raised by [`PkgEntry::data`] only).
     #[error(
         "E_PKG_ENTREE_HORS_LIMITES: entry \"{name}\" (offset {offset}, size {size}) ends at byte {end}, \
          past the end of the file ({file_len} bytes, data area starts at {base})"
@@ -111,14 +115,42 @@ pub struct PkgEntry<'a> {
     pub name: &'a [u8],
     /// Offset relative to the data area.
     pub offset: u32,
-    /// Entry contents, borrowed from the mapping.
-    pub data: &'a [u8],
+    /// Declared size.
+    pub size: u32,
+    archive: &'a [u8],
+    base: usize,
 }
 
-impl PkgEntry<'_> {
+impl<'a> PkgEntry<'a> {
     /// Name as UTF-8, if it is valid UTF-8.
-    pub fn name_str(&self) -> Option<&str> {
+    pub fn name_str(&self) -> Option<&'a str> {
         std::str::from_utf8(self.name).ok()
+    }
+
+    /// Entry contents, borrowed from the mapping. Fails with
+    /// `E_PKG_ENTREE_HORS_LIMITES` when `base + offset + size` passes the end of the
+    /// file (64-bit arithmetic); only this entry is affected (A.4, QO-37).
+    pub fn data(&self) -> Result<&'a [u8], PkgError> {
+        let start = self.base as u64 + u64::from(self.offset);
+        let end = start + u64::from(self.size);
+        let file_len = self.archive.len() as u64;
+        if end > file_len {
+            return Err(PkgError::EntryOutOfBounds {
+                name: escape_bytes(self.name),
+                offset: self.offset,
+                size: self.size,
+                end,
+                base: self.base as u64,
+                file_len,
+            });
+        }
+        // Both bounds are at most `file_len`, which fits in `usize`.
+        Ok(&self.archive[start as usize..end as usize])
+    }
+
+    /// Whether the entry lies entirely inside the file.
+    pub fn is_in_bounds(&self) -> bool {
+        self.data().is_ok()
     }
 }
 
@@ -265,14 +297,15 @@ impl PkgArchive {
         Some(self.make_entry(index, &self.entries[index]))
     }
 
-    /// Whether an entry named `name` exists.
+    /// Whether an entry named `name` exists, even if it is out of bounds (A.4).
     pub fn contains(&self, name: &str) -> bool {
         self.find(name.as_bytes()).is_some()
     }
 
-    /// Contents of the entry named `name`, borrowed from the archive.
-    pub fn read(&self, name: &str) -> Option<&[u8]> {
-        self.get(name).map(|entry| entry.data)
+    /// Contents of the entry named `name`, borrowed from the archive: `None` when
+    /// there is no such entry, `Some(Err(_))` when it is out of bounds.
+    pub fn read(&self, name: &str) -> Option<Result<&[u8], PkgError>> {
+        self.get(name).map(|entry| entry.data())
     }
 
     fn find(&self, name: &[u8]) -> Option<usize> {
@@ -289,13 +322,13 @@ impl PkgArchive {
     #[inline]
     fn make_entry(&self, index: usize, raw: &RawEntry) -> PkgEntry<'_> {
         let bytes = self.as_bytes();
-        // Bounds were validated at open time.
-        let start = self.base + raw.offset as usize;
         PkgEntry {
             index,
             name: entry_name(bytes, raw),
             offset: raw.offset,
-            data: &bytes[start..start + raw.size as usize],
+            size: raw.size,
+            archive: bytes,
+            base: self.base,
         }
     }
 }
@@ -346,23 +379,8 @@ fn parse_table(bytes: &[u8]) -> Result<ParsedTable, PkgError> {
             size,
         });
     }
+    // Entry bounds are not checked here: only reading an entry checks its own (A.4).
     let base = r.pos();
-
-    // Lumen check (spec 01 §1.4 recommendation, QO-02): every entry fits in the file.
-    let file_len = bytes.len() as u64;
-    for raw in &entries {
-        let end = base as u64 + u64::from(raw.offset) + u64::from(raw.size);
-        if end > file_len {
-            return Err(PkgError::EntryOutOfBounds {
-                name: escape_bytes(entry_name(bytes, raw)),
-                offset: raw.offset,
-                size: raw.size,
-                end,
-                base: base as u64,
-                file_len,
-            });
-        }
-    }
 
     let mut index: Vec<(u64, u32)> = entries
         .iter()
@@ -438,9 +456,9 @@ mod tests {
         let bytes = build_pkg("PKGV0001", [("a", &b"1"[..]), ("b", b"2"), ("a", b"3")]);
         let pkg = PkgArchive::from_vec(bytes).unwrap();
         assert_eq!(pkg.len(), 3);
-        assert_eq!(pkg.read("a"), Some(&b"1"[..]));
+        assert_eq!(pkg.read("a").unwrap().unwrap(), b"1");
         assert_eq!(pkg.get("a").unwrap().index, 0);
-        assert_eq!(pkg.entry(2).unwrap().data, b"3");
+        assert_eq!(pkg.entry(2).unwrap().data().unwrap(), b"3");
     }
 
     #[test]
@@ -456,7 +474,7 @@ mod tests {
         );
         let pkg = PkgArchive::from_vec(bytes).unwrap();
         for (i, name) in names.iter().enumerate() {
-            assert_eq!(pkg.read(name).unwrap(), (i as u32).to_le_bytes());
+            assert_eq!(pkg.read(name).unwrap().unwrap(), (i as u32).to_le_bytes());
         }
         assert!(pkg.get("materials/x2000.tex").is_none());
     }

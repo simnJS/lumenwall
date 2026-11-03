@@ -4,7 +4,7 @@ Per-wallpaper virtual file system and Steam / assets folder discovery.
 
 ## Sources (clean room)
 
-- `specs/01-formats-binaires.md` §4 (VFS), §5 (Steam, assets), questions QO-19 to QO-32.
+- `specs/01-formats-binaires.md` §4 (VFS), §5 (Steam, assets), questions QO-19 to QO-32 and QO-37, amendment A.4 (2026-11-03).
 - `docs/research/platform.md` (steamlocate).
 - Public documentation of `steamlocate` and `winreg`.
 - Real Wallpaper Engine install, used only as test input (`docs/TESTING.md`).
@@ -12,6 +12,7 @@ Per-wallpaper virtual file system and Steam / assets folder discovery.
 ## Coverage
 
 - `Vfs`: ordered mount points; adapters for memory, `.pkg` (zero-copy), folder and `$mediaThumbnail` (via a `MediaArtSource` trait). Factory order (§4.1.2), §4.7 lookup including the `"/" + n` retry, without allocations. `read`, `physical_path`, `exists`, `resolve`.
+- `.pkg` entries out of bounds (A.4): the archive mounts, the entry "exists" (lookup stops on that mount, no fallback), and reading it gives `AssetError::PkgEntry` (`E_PKG_ENTREE_HORS_LIMITES`, category `Invalid`). Other entries stay readable.
 - `Vfs::for_wallpaper`: the §4.8 mount order. Built-in memory files (§4.4.1, `BUILTIN_FILES`), thumbnail, wallpaper (errors propagated), `scene.pkg` / `gifscene.pkg` (skipped when absent, logged when invalid), assets folder (fatal error), current directory (`mount_current_dir`). `release_mappings()` for Windows.
 - `path`: lexical normalization (§4.6), texture and `.tex-json` paths, shader paths with extension replacement, workshop `zcompat` substitution (§4.10.1), `config.json` playlist path cleanup (§5.6).
 - `Vfs::read_shader`, `Vfs::read_texture` + `TextureFiles::parse` (applies `.tex-json`), `find_texture` across wallpapers in byte order of their keys (§4.11; only `NotFound` moves on), `is_reserved_texture_name`.
@@ -19,8 +20,11 @@ Per-wallpaper virtual file system and Steam / assets folder discovery.
 
 Tests: `tests/vfs.rs` (F1/F2 through the VFS, mount order, adapters, thumbnail, shaders, textures), `tests/steam.rs` (fake home folders, `libraryfolders.vdf`), `tests/real_data.rs` (`--ignored`: Snap Steam install, reference wallpaper, assets).
 
-## Reference bugs not reproduced
+## Deviations
 
+Reference bugs not reproduced:
+
+- QO-37: an out-of-bounds `.pkg` entry fails alone instead of returning zeros and poisoning every later read of the archive.
 - QO-26: the adapter receives the path that matched during lookup, not the original query. `/materials/x.tex` and `../x` therefore open the file they resolved to (fixture F2 expects an open failure).
 - QO-22: a memory file returns its full content on every read.
 - QO-20: folder containment is checked by path component, not by string prefix.

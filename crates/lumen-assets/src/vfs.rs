@@ -230,10 +230,16 @@ impl Adapter {
                 .get(rel)
                 .map(Cow::Borrowed)
                 .ok_or_else(|| AssetError::not_found(query, "not in memory files")),
-            Self::Archive(pkg) => pkg
-                .read(rel)
-                .map(Cow::Borrowed)
-                .ok_or_else(|| AssetError::not_found(query, "not in archive")),
+            // A.4: an out-of-bounds entry still exists (lookup stopped here) but
+            // fails alone with an `Invalid` error; other entries stay readable.
+            Self::Archive(pkg) => match pkg.read(rel) {
+                None => Err(AssetError::not_found(query, "not in archive")),
+                Some(Ok(data)) => Ok(Cow::Borrowed(data)),
+                Some(Err(source)) => Err(AssetError::PkgEntry {
+                    path: query.to_owned(),
+                    source,
+                }),
+            },
             Self::Directory(dir) => dir.open(rel, query).map(Cow::Owned),
             Self::MediaThumbnail(thumb) => thumb.open(rel, query).map(Cow::Owned),
         }

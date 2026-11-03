@@ -503,6 +503,39 @@ fn textures_and_multi_wallpaper_search() {
 }
 
 #[test]
+fn a4_out_of_bounds_pkg_entry() {
+    // scene.pkg = F2 with project.json pointing past the end of the file; the assets
+    // folder also has a project.json.
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path().join("w");
+    let a = dir.path().join("a");
+    let mut pkg = f2_pkg();
+    pkg[0x20] = 0x50;
+    write(&w.join("scene.pkg"), &pkg);
+    write(&a.join("project.json"), b"{\"from\":\"assets\"}");
+    // The archive mounts (it used to be refused as a whole).
+    let vfs = Vfs::for_wallpaper(&w, &a, &options()).unwrap();
+    assert_eq!(
+        vfs.mounts()
+            .iter()
+            .filter(|m| matches!(m.adapter(), Adapter::Archive(_)))
+            .count(),
+        1
+    );
+    // The entry exists, so lookup stops on the archive: no fallback to the assets.
+    assert!(vfs.exists("project.json"));
+    let err = vfs.read("project.json").unwrap_err();
+    assert_eq!(err.category(), ErrorCategory::Invalid);
+    assert!(
+        err.to_string().contains("E_PKG_ENTREE_HORS_LIMITES"),
+        "{err}"
+    );
+    assert!(matches!(err, lumen_assets::AssetError::PkgEntry { .. }));
+    // Other entries stay readable, before and after the failed read.
+    assert_eq!(&*vfs.read("materials/x.tex").unwrap(), b"XYZ");
+}
+
+#[test]
 fn release_mappings_keeps_archives_usable() {
     let (_dir, mut vfs) = wallpaper_fixture();
     vfs.release_mappings();

@@ -5,10 +5,12 @@
 //! decompressed, straight into a buffer of the final size. [`Tex::into_upload`] then
 //! turns the result into a GPU-agnostic [`PreparedTexture`]: BC1/BC2/BC3 blocks are
 //! passed through untouched, R8/RG8/RGBA8 pixels are borrowed, and only embedded
-//! images (PNG, JPEG…) are decoded on the CPU.
+//! images (PNG, JPEG, PSD…) are decoded on the CPU. Textures with the `VOLUME` flag
+//! (amendment A.1, colour LUTs) become 3D textures.
 
 mod animation;
 mod embedded;
+mod psd;
 mod texjson;
 mod upload;
 
@@ -19,10 +21,13 @@ use thiserror::Error;
 use crate::reader::{Reader, UnexpectedEof, escape_bytes};
 
 pub use animation::{Animation, Frame, FrameState};
-pub use embedded::{DecodedImage, decode_block_compressed, decode_embedded_image};
+pub use embedded::{
+    DecodedImage, EmbeddedImageError, decode_block_compressed, decode_embedded_image,
+};
+pub use psd::PsdError;
 pub use upload::{
     AddressMode, FilterMode, GpuContent, GpuFormat, GpuImage, GpuMip, PreparedTexture, SamplerDesc,
-    UploadOptions,
+    TextureDimension, UploadOptions,
 };
 
 /// Default cap on any single level the parser or the upload step allocates (1 GiB,
@@ -97,6 +102,17 @@ pub enum TexError {
     /// Video texture without any mipmap (`E_TEX_VIDEO_VIDE`, raised at upload).
     #[error("E_TEX_VIDEO_VIDE: video texture has no image or no mipmap")]
     EmptyVideo,
+    /// `VOLUME` combined with `ANIMATED`, `VIDEO` or MP4 (`E_TEX_VOLUME`,
+    /// Lumen-specific, raised at upload, amendment A.1).
+    #[error(
+        "E_TEX_VOLUME: volume texture combined with animation or video (flags {flags:#x}, mp4 {mp4})"
+    )]
+    UnsupportedVolume {
+        /// Flags of the file.
+        flags: u32,
+        /// MP4 indicator.
+        mp4: bool,
+    },
 }
 
 impl TexError {
@@ -115,6 +131,7 @@ impl TexError {
             Self::UnexpectedEof(_) => "FinDeFluxInattendue",
             Self::UnsupportedGpuFormat(_) => "E_TEX_FORMAT_GPU",
             Self::EmptyVideo => "E_TEX_VIDEO_VIDE",
+            Self::UnsupportedVolume { .. } => "E_TEX_VOLUME",
         }
     }
 }
@@ -198,6 +215,20 @@ impl TexFormat {
             Self::Rgb161616f => 15,
         }
     }
+
+    /// Value the `TEX0FORMAT` shader combo is forced to when this is the **declared**
+    /// format (offset 0x12) of an object's main texture (§2.10.5, amendment A.3): 8
+    /// for RG88, 9 for R8, `None` (combo untouched) otherwise. The renderer applies it
+    /// to every pass of the object, effects included.
+    pub fn tex0_format_combo(self) -> Option<u32> {
+        // parity: decided on the declared format only, even when an embedded image is
+        // uploaded as RGBA8 (QO-36).
+        match self {
+            Self::Rg88 => Some(8),
+            Self::R8 => Some(9),
+            _ => None,
+        }
+    }
 }
 
 /// TEXI flags (spec 01 §2.4).
@@ -215,6 +246,8 @@ impl TexFlags {
     pub const CLAMP_UVS_BORDER: u32 = 0x8;
     /// Video texture.
     pub const VIDEO: u32 = 0x20;
+    /// 3D texture: a depth field in TEXI and in every mip header (amendment A.1).
+    pub const VOLUME: u32 = 0x40;
     /// Alpha carried by G (RG88) or R (R8). Read, never used.
     pub const ALPHA_PRIORITY: u32 = 0x8_0000;
     /// All documented bits.
@@ -223,14 +256,15 @@ impl TexFlags {
         | Self::ANIMATED
         | Self::CLAMP_UVS_BORDER
         | Self::VIDEO
+        | Self::VOLUME
         | Self::ALPHA_PRIORITY;
 
     /// Validates a raw flags value.
     pub fn from_raw(raw: u32) -> Result<Self, TexError> {
         // parity: the value is accepted iff it is numerically below 524335 (0x8002F,
-        // the sum of all documented bits). This is a comparison, not a mask: the
-        // combination of every known bit is refused and undocumented low bits are
-        // accepted (spec 01 §2.4, QO-04).
+        // the sum of the documented bits other than VOLUME). This is a comparison, not
+        // a mask: the combination of those bits is refused and undocumented low bits
+        // are accepted (spec 01 §2.4, QO-04).
         if raw >= 524_335 {
             return Err(TexError::BadFlags(raw));
         }
@@ -367,6 +401,8 @@ pub struct Mip<'a> {
     pub width: u32,
     /// Height from the level header.
     pub height: u32,
+    /// Depth from the level header (`PM`); 1 without the `VOLUME` flag.
+    pub depth: u32,
     /// Compression field (`C`): 0 raw, 1 LZ4, other values raw `TD` bytes (QO-08).
     pub compression: u32,
     /// Final bytes: borrowed from the input unless LZ4 was decoded.
@@ -431,6 +467,8 @@ pub struct Tex<'a> {
     pub image_width: u32,
     /// Useful content height `HI`.
     pub image_height: u32,
+    /// Texture depth `PT` (number of slices); 1 without the `VOLUME` flag.
+    pub texture_depth: u32,
     /// Version in the container magic (1..=4).
     pub container_version: u8,
     /// Effective container version (TEXB0004 can fall back to 3).
@@ -443,6 +481,8 @@ pub struct Tex<'a> {
     pub animation: Option<Animation>,
     /// Spritesheet values.
     pub spritesheet: Spritesheet,
+    /// Offset just past the last block read; bytes after it are ignored (§2.1).
+    pub end_offset: usize,
     images: Vec<ImageRange>,
     mips: Vec<Mip<'a>>,
 }
@@ -472,7 +512,10 @@ pub fn parse_with<'a>(data: &'a [u8], options: &ParseOptions) -> Result<Tex<'a>,
     let texture_height = r.u32()?;
     let image_width = r.u32()?;
     let image_height = r.u32()?;
-    let _reserved = r.u32()?;
+    // A.1: with VOLUME a depth field comes first and shifts everything after by +4.
+    let volume = flags.contains(TexFlags::VOLUME);
+    let texture_depth = if volume { r.u32()? } else { 1 };
+    let _reserved_color = r.u32()?;
 
     // Spec 01 §2.5: the image count is read before the container magic is checked.
     let texb: [u8; 9] = r.array()?;
@@ -508,13 +551,17 @@ pub fn parse_with<'a>(data: &'a [u8], options: &ParseOptions) -> Result<Tex<'a>,
         1 => 12,
         2 | 3 => 20,
         _ => 33,
+    } + if volume { 4 } else { 0 };
+    let layout = MipLayout {
+        version: effective_version,
+        volume,
     };
     for image in 0..image_count {
         let mip_count = r.u32()?;
         let start = mips.len() as u32;
         mips.reserve((mip_count as usize).min(r.remaining() / min_mip));
         for mip in 0..mip_count {
-            mips.push(read_mip(&mut r, effective_version, image, mip, options)?);
+            mips.push(read_mip(&mut r, layout, image, mip, options)?);
         }
         images.push(ImageRange {
             start,
@@ -529,12 +576,14 @@ pub fn parse_with<'a>(data: &'a [u8], options: &ParseOptions) -> Result<Tex<'a>,
         texture_height,
         image_width,
         image_height,
+        texture_depth,
         container_version,
         effective_version,
         embedded_format,
         is_mp4,
         animation: None,
         spritesheet: Spritesheet::default(),
+        end_offset: 0,
         images,
         mips,
     };
@@ -545,16 +594,27 @@ pub fn parse_with<'a>(data: &'a [u8], options: &ParseOptions) -> Result<Tex<'a>,
         tex.animation = Some(animation);
     }
     // Anything after the last expected block is ignored (§2.1).
+    tex.end_offset = r.pos();
     Ok(tex)
+}
+
+/// What decides the layout of a mip header.
+#[derive(Debug, Clone, Copy)]
+struct MipLayout {
+    /// Effective container version.
+    version: u8,
+    /// `VOLUME` flag: a depth `u32` follows the height (A.1).
+    volume: bool,
 }
 
 fn read_mip<'a>(
     r: &mut Reader<'a>,
-    version: u8,
+    layout: MipLayout,
     image: u32,
     mip: u32,
     options: &ParseOptions,
 ) -> Result<Mip<'a>, TexError> {
+    let version = layout.version;
     let negative = |field, value| TexError::NegativeSize {
         image,
         mip,
@@ -571,6 +631,8 @@ fn read_mip<'a>(
     }
     let width = r.u32()?;
     let height = r.u32()?;
+    // A.1: the depth follows the height in every version (only v3 is observed).
+    let depth = if layout.volume { r.u32()? } else { 1 };
 
     if version == 1 {
         // No compression field: raw data, TD = TS.
@@ -579,6 +641,7 @@ fn read_mip<'a>(
         return Ok(Mip {
             width,
             height,
+            depth,
             compression: 0,
             data: Cow::Borrowed(r.take(stored)?),
             metadata,
@@ -637,6 +700,7 @@ fn read_mip<'a>(
     Ok(Mip {
         width,
         height,
+        depth,
         compression,
         data,
         metadata,
@@ -677,6 +741,11 @@ impl<'a> Tex<'a> {
     /// Whether the texture goes through the video path (§2.10.1 step 3).
     pub fn is_video(&self) -> bool {
         self.is_mp4 || self.flags.contains(TexFlags::VIDEO)
+    }
+
+    /// Whether the `VOLUME` flag is set: one 3D texture per image (A.1).
+    pub fn is_volume(&self) -> bool {
+        self.flags.contains(TexFlags::VOLUME)
     }
 
     /// Real size `(LR, HR)`: animation size if animated, else image size (§2.11).
@@ -720,13 +789,11 @@ impl<'a> Tex<'a> {
         uv_extent(self.real_size(), self.texture_size(0))
     }
 
-    /// Forced value of the `TEX0FORMAT` shader combo (§2.10.5).
+    /// Forced value of the `TEX0FORMAT` shader combo when this texture is an object's
+    /// main texture: decided on the declared format [`format`](Self::format) only
+    /// (§2.10.5, A.3). See [`TexFormat::tex0_format_combo`].
     pub fn tex0_format_combo(&self) -> Option<u32> {
-        match self.format {
-            TexFormat::Rg88 => Some(8),
-            TexFormat::R8 => Some(9),
-            _ => None,
-        }
+        self.format.tex0_format_combo()
     }
 
     /// Applies a `materials/<name>.tex-json` companion (§2.9.2). Any error is
