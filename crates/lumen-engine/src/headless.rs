@@ -11,7 +11,7 @@ use lumen_render::stats::GpuTimer;
 use lumen_render::{ClampMode, ContextOptions, GpuContext, HeadlessOutput, ScalingMode};
 
 use crate::plan::DebugPlan;
-use crate::scene::{FrameState, SceneOptions, SceneStats, build_scene};
+use crate::scene::{FrameState, SceneOptions, SceneStats, ScreenState, build_scene};
 use crate::shaders::default_provider;
 use crate::wallpaper::Wallpaper;
 
@@ -137,13 +137,19 @@ pub fn render_headless(
     let mut cpu = Duration::ZERO;
     let mut gpu_total = Duration::ZERO;
     let mut gpu_samples = 0u32;
+    // Frames that differ from the previous one (the live engine skips the others).
+    let mut changed_frames = 0u32;
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
     for i in 0..opts.frames {
         let time = opts.start_time + f64::from(i) * f64::from(dt);
+        let cursor = opts.pointer.map_or(
+            Vec2::new(opts.width as f32, opts.height as f32) * 0.5,
+            |p| Vec2::new(p.x, opts.height as f32 - p.y),
+        );
         let pointer = match opts.pointer {
-            Some(p) => lumen_render::math::pointer_position(
-                Vec2::new(p.x, opts.height as f32 - p.y),
+            Some(_) => lumen_render::math::pointer_position(
+                cursor,
                 lumen_render::math::Viewport {
                     x: 0.0,
                     y: 0.0,
@@ -157,7 +163,7 @@ pub fn render_headless(
         let start = Instant::now();
         rt.update(
             &ctx,
-            &wp.project,
+            &mut wp.project,
             &FrameState {
                 time,
                 dt: if i == 0 { time as f32 } else { dt },
@@ -169,6 +175,11 @@ pub fn render_headless(
                 audio16: &a16,
                 audio32: &a32,
                 audio64: &a64,
+                screen: ScreenState {
+                    size: (opts.width, opts.height),
+                    cursor,
+                    left_down: false,
+                },
             },
         );
         let mut enc = ctx
@@ -179,6 +190,7 @@ pub fn render_headless(
         if let Some(t) = &mut timer {
             t.begin(&mut enc);
         }
+        changed_frames += u32::from(rt.scene.needs_redraw());
         rt.scene.encode(&ctx, &mut enc);
         uv = composer.update(&ctx, out.size(), rt.logical);
         compositor.encode(
@@ -220,5 +232,23 @@ pub fn render_headless(
     report.gpu_memory = ctx.memory().bytes();
     report.live_particles = rt.live_particles();
     report.stats = rt.stats;
+    tracing::debug!(
+        "{changed_frames}/{} frame(s) needed a redraw (animated: {})",
+        opts.frames,
+        rt.animated
+    );
+    if let Some((s, tick)) = rt.script_stats() {
+        tracing::info!(
+            "scripts: {} loaded, {} active, {} per-frame update(s), {} timer(s), {:.1} µs per frame, {:.0} KiB JS heap; {changed_frames}/{} frame(s) needed a redraw",
+            s.scripts,
+            s.active,
+            s.per_frame,
+            s.timers,
+            tick.as_secs_f64() * 1e6,
+            s.memory_used as f64 / 1024.0,
+            opts.frames,
+        );
+    }
+    rt.shutdown_scripts(&mut wp.project);
     Ok(report)
 }

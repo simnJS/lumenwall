@@ -7,6 +7,7 @@
 //! - [`render_headless`]: off-screen rendering of a wallpaper to PNG files.
 //! - [`ShaderProvider`]: WE shader + combos → render-ready shader (lumen-shader, or WGSL
 //!   stand-ins).
+//! - [`TextSink`]: receives the text that SceneScript computes for text layers.
 
 mod assets;
 mod audio;
@@ -15,6 +16,7 @@ mod headless;
 mod particles;
 pub mod plan;
 mod scene;
+mod script;
 pub mod shaders;
 mod texture;
 mod wallpaper;
@@ -27,10 +29,14 @@ pub use headless::{HeadlessOptions, HeadlessReport, render_headless};
 pub use plan::{
     AudioPlan, DebugPlan, EngineControl, EnginePlan, OutputMode, PausePlan, Stopped, TargetPlan,
 };
-pub use scene::{FrameState, SceneOptions, SceneRuntime, SceneStats, build_scene};
+pub use scene::{FrameState, SceneOptions, SceneRuntime, SceneStats, ScreenState, build_scene};
+pub use script::TextSink;
 pub use shaders::{ShaderProvider, default_provider};
 pub use texture::{LoadedTexture, TextureCache};
 pub use wallpaper::Wallpaper;
+
+/// Script types used by [`SceneRuntime::media_changed`] and [`SceneRuntime::script_stats`].
+pub use lumen_script::{MediaSnapshot, ScriptStats};
 
 /// Output composition modes (spec 04 §21), re-exported for the application.
 pub use lumen_render::{ClampMode, ScalingMode};

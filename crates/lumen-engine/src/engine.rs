@@ -23,7 +23,7 @@ use lumen_render::{ContextOptions, GpuContext, GpuInstance, OutputSurface};
 
 use crate::audio::Audio;
 use crate::plan::{EngineControl, EnginePlan, OutputMode, Stopped};
-use crate::scene::{FrameState, SceneOptions, SceneRuntime, build_scene};
+use crate::scene::{FrameState, SceneOptions, SceneRuntime, ScreenState, build_scene};
 use crate::shaders::{ShaderProvider, default_provider};
 use crate::wallpaper::Wallpaper;
 use crate::{WallpaperResolver, cache_dir};
@@ -369,6 +369,11 @@ impl Engine {
             }
         };
         log_summary(&running.stats);
+        for (slot, wp) in running.scenes.iter_mut().zip(&mut self.wallpapers) {
+            if let Some(slot) = slot {
+                slot.runtime.shutdown_scripts(&mut wp.project);
+            }
+        }
         running.ctx.wait_idle();
         drop(running);
         result
@@ -617,7 +622,7 @@ impl Engine {
         let Some(slot) = r.scenes[target].as_mut() else {
             return;
         };
-        let wp = &self.wallpapers[target];
+        let wp = &mut self.wallpapers[target];
         let fresh = slot.updated_at != r.iteration;
         if fresh {
             let time = r.clock.elapsed().as_secs_f64();
@@ -629,10 +634,17 @@ impl Engine {
             slot.last_time = time;
             r.audio.update(dt, false);
             let o = &r.outputs[oi];
+            let mut screen = ScreenState {
+                size: o.size,
+                cursor: Vec2::new(o.size.0 as f32, o.size.1 as f32) * 0.5,
+                left_down: false,
+            };
             let pointer = if self.plan.mouse {
                 let p = r.pointer.state(id, o.size);
+                screen.cursor = Vec2::new(p.x as f32, p.y as f32);
+                screen.left_down = p.left;
                 pointer_position(
-                    Vec2::new(p.x as f32, p.y as f32),
+                    screen.cursor,
                     Viewport {
                         x: 0.0,
                         y: 0.0,
@@ -647,7 +659,7 @@ impl Engine {
             let (a16, a32, a64) = r.audio.bands();
             slot.runtime.update(
                 &r.ctx,
-                &wp.project,
+                &mut wp.project,
                 &FrameState {
                     time,
                     dt,
@@ -656,8 +668,12 @@ impl Engine {
                     audio16: a16,
                     audio32: a32,
                     audio64: a64,
+                    screen,
                 },
             );
+            // Once per iteration even when nothing is redrawn (spec 06 §8.2: scripts tick once
+            // per frame and scene, whatever the number of outputs).
+            slot.updated_at = r.iteration;
         }
         let o = &mut r.outputs[oi];
         let redraw = slot.runtime.scene.needs_redraw();
