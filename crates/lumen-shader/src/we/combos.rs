@@ -30,7 +30,9 @@ fn combo_default(v: Option<&Value>, warnings: &mut Vec<String>, name: &str) -> i
         Some(Value::Number(n)) => match n.as_i64().or_else(|| n.as_u64().map(|u| u as i64)) {
             Some(i) => i,
             None => {
-                warnings.push(format!("combo '{name}': non-integer default {n}, truncated"));
+                warnings.push(format!(
+                    "combo '{name}': non-integer default {n}, truncated"
+                ));
                 n.as_f64().unwrap_or(0.0).trunc() as i64
             }
         },
@@ -61,7 +63,9 @@ fn texture_combo(s: &SamplerParam, combo: &str, pass: &PassCombos) -> Option<i64
         // parity: both rules look inverted (open question 1); reproduced as observed.
         if s.require_any {
             req.iter().any(|(n, v)| {
-                !pass.material.contains_key(n) || pass.overrides.contains_key(n) || !require_entry_satisfied(pass, n, v)
+                !pass.material.contains_key(n)
+                    || pass.overrides.contains_key(n)
+                    || !require_entry_satisfied(pass, n, v)
             })
         } else {
             !req.iter().any(|(n, v)| require_entry_satisfied(pass, n, v))
@@ -86,7 +90,12 @@ fn texture_combo(s: &SamplerParam, combo: &str, pass: &PassCombos) -> Option<i64
 }
 
 /// Combos discovered in one unit (§5.2, §5.3), first declaration wins.
-pub fn discover(items: &[ScanItem], samplers: &[SamplerParam], pass: &PassCombos, warnings: &mut Vec<String>) -> Combos {
+pub fn discover(
+    items: &[ScanItem],
+    samplers: &[SamplerParam],
+    pass: &PassCombos,
+    warnings: &mut Vec<String>,
+) -> Combos {
     let mut found = Combos::new();
     let mut sampler_iter = samplers.iter();
     for item in items {
@@ -103,11 +112,15 @@ pub fn discover(items: &[ScanItem], samplers: &[SamplerParam], pass: &PassCombos
                 let v = combo_default(m.get("default"), warnings, name);
                 found.entry(name.to_string()).or_insert(v);
             }
-            ScanItem::Annotation(RawAnnotation { glsl_type, name, .. }) => {
+            ScanItem::Annotation(RawAnnotation {
+                glsl_type, name, ..
+            }) => {
                 if glsl_type != "sampler2D" && glsl_type != "sampler2DComparison" {
                     continue;
                 }
-                let Some(s) = sampler_iter.next() else { continue };
+                let Some(s) = sampler_iter.next() else {
+                    continue;
+                };
                 debug_assert_eq!(&s.uniform, name);
                 let Some(combo) = &s.combo else { continue };
                 if sampler_slot(name).is_none() {
@@ -191,7 +204,10 @@ mod tests {
         assert_eq!(found.get("FX"), Some(&2));
         assert_eq!(found.get("FY"), Some(&1));
         // A = 1 in the material: both not required.
-        let pass = PassCombos { material: [("A".to_string(), 1)].into(), ..Default::default() };
+        let pass = PassCombos {
+            material: [("A".to_string(), 1)].into(),
+            ..Default::default()
+        };
         let found = discover(&items, &samplers, &pass, &mut Vec::new());
         assert!(found.is_empty());
     }
@@ -200,12 +216,18 @@ mod tests {
     fn first_declaration_and_case_folding() {
         let src = "// [COMBO] {\"combo\":\"X\",\"default\":1}\n// [COMBO] {\"combo\":\"X\",\"default\":2}\n// [COMBO] {\"combo\":\"y\"}\nvoid main() {}\n";
         let (items, samplers) = unit(src);
-        let pass = PassCombos { overrides: [("Y".to_string(), 5)].into(), ..Default::default() };
+        let pass = PassCombos {
+            overrides: [("Y".to_string(), 5)].into(),
+            ..Default::default()
+        };
         let found = discover(&items, &samplers, &pass, &mut Vec::new());
         assert_eq!(found.get("X"), Some(&1));
         // "y" is not an exact match of "Y": discovered, but the override's Y is emitted first.
         assert_eq!(found.get("y"), Some(&0));
         let other: Combos = [("Z".to_string(), 7), ("X".to_string(), 9)].into();
-        assert_eq!(defines(&pass, &found, &other), "#define Y 5\n#define X 1\n#define Z 7\n");
+        assert_eq!(
+            defines(&pass, &found, &other),
+            "#define Y 5\n#define X 1\n#define Z 7\n"
+        );
     }
 }

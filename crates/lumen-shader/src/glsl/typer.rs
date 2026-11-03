@@ -118,10 +118,26 @@ struct Coerce {
     explicit: bool,
 }
 
-const ASSIGN: Coerce = Coerce { restricted: true, shape: true, explicit: false };
-const ARG: Coerce = Coerce { restricted: false, shape: true, explicit: false };
-const STD: Coerce = Coerce { restricted: false, shape: false, explicit: false };
-const EXPLICIT: Coerce = Coerce { restricted: true, shape: false, explicit: true };
+const ASSIGN: Coerce = Coerce {
+    restricted: true,
+    shape: true,
+    explicit: false,
+};
+const ARG: Coerce = Coerce {
+    restricted: false,
+    shape: true,
+    explicit: false,
+};
+const STD: Coerce = Coerce {
+    restricted: false,
+    shape: false,
+    explicit: false,
+};
+const EXPLICIT: Coerce = Coerce {
+    restricted: true,
+    shape: false,
+    explicit: true,
+};
 
 /// Standard implicit conversions of GLSL 3.30 plus R1 `bool → float`.
 fn std_conv(from: Scalar, to: Scalar) -> bool {
@@ -133,7 +149,9 @@ fn std_conv(from: Scalar, to: Scalar) -> bool {
 fn restricted_conv(from: Scalar, to: Scalar) -> bool {
     matches!(
         (from, to),
-        (Scalar::Float, Scalar::Int | Scalar::Uint) | (Scalar::Uint, Scalar::Int) | (Scalar::Int, Scalar::Uint)
+        (Scalar::Float, Scalar::Int | Scalar::Uint)
+            | (Scalar::Uint, Scalar::Int)
+            | (Scalar::Int, Scalar::Uint)
     )
 }
 
@@ -170,7 +188,10 @@ pub struct Typer<'a> {
 }
 
 fn terr<T>(line: u32, msg: impl Into<String>) -> TResult<T> {
-    Err(TypeError { line, msg: msg.into() })
+    Err(TypeError {
+        line,
+        msg: msg.into(),
+    })
 }
 
 pub fn type_unit(unit: Unit, int: &Interner, stage: Stage) -> TResult<TypedUnit> {
@@ -204,7 +225,11 @@ pub fn type_unit(unit: Unit, int: &Interner, stage: Stage) -> TResult<TypedUnit>
     let main_name = int.lookup("main");
     let main_fn = main_name
         .and_then(|n| t.fn_by_name.get(&n))
-        .and_then(|v| v.iter().copied().find(|&i| t.functions[i as usize].params.is_empty()))
+        .and_then(|v| {
+            v.iter()
+                .copied()
+                .find(|&i| t.functions[i as usize].params.is_empty())
+        })
         .filter(|&i| t.functions[i as usize].defined);
     let Some(main_fn) = main_fn else {
         return terr(0, "no definition of main()");
@@ -236,7 +261,10 @@ pub fn type_unit(unit: Unit, int: &Interner, stage: Stage) -> TResult<TypedUnit>
     }
     Ok(TypedUnit {
         stage,
-        unit: Unit { items, structs: t.ast_structs },
+        unit: Unit {
+            items,
+            structs: t.ast_structs,
+        },
         structs: t.structs,
         globals: t.globals,
         functions: t.functions,
@@ -284,14 +312,19 @@ impl<'a> Typer<'a> {
         self.expr(e)?;
         match self.const_eval(e) {
             Some(v) if v.as_i64() > 0 && v.as_i64() <= 65536 => Ok(v.as_i64() as u32),
-            _ => terr(e.line, "array size must be a positive constant integer expression"),
+            _ => terr(
+                e.line,
+                "array size must be a positive constant integer expression",
+            ),
         }
     }
 
     fn apply_array(&mut self, base: Type, arr: &mut ArraySpec, line: u32) -> TResult<Type> {
         match arr {
             None => Ok(base),
-            Some(_) if matches!(base, Type::Array(..)) => terr(line, "arrays of arrays are not supported"),
+            Some(_) if matches!(base, Type::Array(..)) => {
+                terr(line, "arrays of arrays are not supported")
+            }
             Some(Some(e)) => {
                 let n = self.array_size(e)?;
                 Ok(Type::Array(Box::new(base), n))
@@ -319,7 +352,9 @@ impl<'a> Typer<'a> {
                 fields.push((*n, t));
             }
         }
-        let name = def.name.unwrap_or_else(|| self.int.lookup("main").unwrap_or(0));
+        let name = def
+            .name
+            .unwrap_or_else(|| self.int.lookup("main").unwrap_or(0));
         if let Some(&prev) = def.name.and_then(|n| self.struct_by_name.get(&n)) {
             if self.structs[prev as usize].fields == fields {
                 self.warnings.push(format!(
@@ -359,7 +394,12 @@ impl<'a> Typer<'a> {
                     GStorage::In
                 }
             }
-            s => return terr(d.line, format!("unsupported storage qualifier {s:?} at global scope")),
+            s => {
+                return terr(
+                    d.line,
+                    format!("unsupported storage qualifier {s:?} at global scope"),
+                );
+            }
         };
         if base.is_sampler() && storage != GStorage::Uniform {
             return terr(d.line, "samplers must be uniforms");
@@ -471,14 +511,23 @@ impl<'a> Typer<'a> {
         let existing = self.fn_by_name.get(&f.name).and_then(|v| {
             v.iter().copied().find(|&i| {
                 let fi = &self.functions[i as usize];
-                fi.params.iter().map(|p| &p.1).eq(params.iter().map(|p| &p.1))
+                fi.params
+                    .iter()
+                    .map(|p| &p.1)
+                    .eq(params.iter().map(|p| &p.1))
             })
         });
         let idx = match existing {
             Some(i) => {
                 let fi = &self.functions[i as usize];
                 if fi.ret != ret {
-                    return terr(f.line, format!("'{}' redeclared with another return type", self.name(f.name)));
+                    return terr(
+                        f.line,
+                        format!(
+                            "'{}' redeclared with another return type",
+                            self.name(f.name)
+                        ),
+                    );
                 }
                 if f.body.is_some() && fi.defined {
                     self.warnings.push(format!(
@@ -514,7 +563,9 @@ impl<'a> Typer<'a> {
         self.cur_fn = Some(idx);
         self.cur_ret = ret;
         self.local_count = 0;
-        self.scopes.push(LocalScope { vars: HashMap::new() });
+        self.scopes.push(LocalScope {
+            vars: HashMap::new(),
+        });
         for p in f.params.iter_mut() {
             let id = self.local_count;
             self.local_count += 1;
@@ -540,7 +591,12 @@ impl<'a> Typer<'a> {
         let is_const = match d.quals.storage {
             Storage::Const => true,
             Storage::None => false,
-            s => return terr(d.line, format!("storage qualifier {s:?} not allowed on a local")),
+            s => {
+                return terr(
+                    d.line,
+                    format!("storage qualifier {s:?} not allowed on a local"),
+                );
+            }
         };
         if base.is_sampler() {
             return terr(d.line, "local sampler variables are not supported");
@@ -559,7 +615,11 @@ impl<'a> Typer<'a> {
             if matches!(&ty, Type::Array(_, 0)) {
                 return terr(v.line, "unsized array");
             }
-            let cv = if is_const { v.init.as_ref().and_then(|e| self.const_eval(e)) } else { None };
+            let cv = if is_const {
+                v.init.as_ref().and_then(|e| self.const_eval(e))
+            } else {
+                None
+            };
             let id = self.local_count;
             self.local_count += 1;
             self.scopes
@@ -576,7 +636,9 @@ impl<'a> Typer<'a> {
     // ---- statements ------------------------------------------------------
 
     fn scoped(&mut self, s: &mut Stmt) -> TResult<()> {
-        self.scopes.push(LocalScope { vars: HashMap::new() });
+        self.scopes.push(LocalScope {
+            vars: HashMap::new(),
+        });
         let r = self.stmt(s);
         self.scopes.pop();
         r
@@ -587,7 +649,9 @@ impl<'a> Typer<'a> {
             Stmt::Decl(d) => self.local_decl(d),
             Stmt::Expr(e) => self.expr(e),
             Stmt::Block(v) => {
-                self.scopes.push(LocalScope { vars: HashMap::new() });
+                self.scopes.push(LocalScope {
+                    vars: HashMap::new(),
+                });
                 for s in v.iter_mut() {
                     self.stmt(s)?;
                 }
@@ -612,7 +676,9 @@ impl<'a> Typer<'a> {
                     }
                 }
                 let sel = c.ty.clone();
-                self.scopes.push(LocalScope { vars: HashMap::new() });
+                self.scopes.push(LocalScope {
+                    vars: HashMap::new(),
+                });
                 for s in body.iter_mut() {
                     if let Stmt::Case(e) = s {
                         self.expr(e)?;
@@ -626,7 +692,9 @@ impl<'a> Typer<'a> {
                                 };
                                 e.ty = sel.clone();
                             }
-                            None => return terr(e.line, "case label must be a constant expression"),
+                            None => {
+                                return terr(e.line, "case label must be a constant expression");
+                            }
                         }
                     } else {
                         self.stmt(s)?;
@@ -637,7 +705,9 @@ impl<'a> Typer<'a> {
             }
             Stmt::Case(e) => terr(e.line, "case label outside of switch"),
             Stmt::While(c, b) => {
-                self.scopes.push(LocalScope { vars: HashMap::new() });
+                self.scopes.push(LocalScope {
+                    vars: HashMap::new(),
+                });
                 self.condition(c)?;
                 let r = self.stmt(b);
                 self.scopes.pop();
@@ -647,8 +717,15 @@ impl<'a> Typer<'a> {
                 self.scoped(b)?;
                 self.condition(c)
             }
-            Stmt::For { init, cond, step, body } => {
-                self.scopes.push(LocalScope { vars: HashMap::new() });
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                self.scopes.push(LocalScope {
+                    vars: HashMap::new(),
+                });
                 if let Some(i) = init {
                     self.stmt(i)?;
                 }
@@ -695,7 +772,10 @@ impl<'a> Typer<'a> {
                 self.compare_zero(c, s, BinOp::Ne);
                 Ok(())
             }
-            _ => terr(c.line, format!("condition must be a boolean, found {}", self.tname(&c.ty))),
+            _ => terr(
+                c.line,
+                format!("condition must be a boolean, found {}", self.tname(&c.ty)),
+            ),
         }
     }
 
@@ -707,8 +787,16 @@ impl<'a> Typer<'a> {
             ExprKind::IntLit(0)
         };
         let old = std::mem::replace(c, Expr::new(ExprKind::BoolLit(false), line));
-        let z = Expr { kind: zero, ty: Type::Scalar(s), line };
-        *c = Expr { kind: ExprKind::Binary(op, Box::new(old), Box::new(z)), ty: Type::BOOL, line };
+        let z = Expr {
+            kind: zero,
+            ty: Type::Scalar(s),
+            line,
+        };
+        *c = Expr {
+            kind: ExprKind::Binary(op, Box::new(old), Box::new(z)),
+            ty: Type::BOOL,
+            line,
+        };
     }
 
     // ---- conversions -----------------------------------------------------
@@ -721,9 +809,15 @@ impl<'a> Typer<'a> {
                 (ExprKind::UintLit(v), Scalar::Float) => Some(ExprKind::FloatLit(*v as f32)),
                 (ExprKind::BoolLit(b), Scalar::Float) => Some(ExprKind::FloatLit(*b as i32 as f32)),
                 (ExprKind::FloatLit(f), Scalar::Int) => Some(ExprKind::IntLit(f.trunc() as i64)),
-                (ExprKind::FloatLit(f), Scalar::Uint) => Some(ExprKind::UintLit(f.trunc().max(0.0) as u64)),
-                (ExprKind::UintLit(v), Scalar::Int) => Some(ExprKind::IntLit(*v as u32 as i32 as i64)),
-                (ExprKind::IntLit(v), Scalar::Uint) => Some(ExprKind::UintLit(*v as i32 as u32 as u64)),
+                (ExprKind::FloatLit(f), Scalar::Uint) => {
+                    Some(ExprKind::UintLit(f.trunc().max(0.0) as u64))
+                }
+                (ExprKind::UintLit(v), Scalar::Int) => {
+                    Some(ExprKind::IntLit(*v as u32 as i32 as i64))
+                }
+                (ExprKind::IntLit(v), Scalar::Uint) => {
+                    Some(ExprKind::UintLit(*v as i32 as u32 as u64))
+                }
                 _ => None,
             };
             if let Some(k) = folded {
@@ -734,7 +828,11 @@ impl<'a> Typer<'a> {
         }
         let line = e.line;
         let old = std::mem::replace(e, Expr::new(ExprKind::BoolLit(false), line));
-        *e = Expr { kind: ExprKind::Convert(Box::new(old)), ty: to, line };
+        *e = Expr {
+            kind: ExprKind::Convert(Box::new(old)),
+            ty: to,
+            line,
+        };
     }
 
     fn coerce(&mut self, e: &mut Expr, to: &Type, c: Coerce) -> TResult<()> {
@@ -742,7 +840,10 @@ impl<'a> Typer<'a> {
             return Ok(());
         }
         let fail = |s: &Self, e: &Expr| {
-            terr(e.line, format!("cannot convert {} to {}", s.tname(&e.ty), s.tname(to)))
+            terr(
+                e.line,
+                format!("cannot convert {} to {}", s.tname(&e.ty), s.tname(to)),
+            )
         };
         let (Some(fb), Some(n)) = (e.ty.scalar(), e.ty.vec_size()) else {
             return fail(self, e);
@@ -784,10 +885,16 @@ impl<'a> Typer<'a> {
         match &e.kind {
             ExprKind::Ident(n, Sym::Local(_)) => !self.lookup_local(*n).is_some_and(|l| l.2),
             ExprKind::Ident(_, Sym::Global(g)) => {
-                matches!(self.globals[*g as usize].storage, GStorage::Private | GStorage::Out)
+                matches!(
+                    self.globals[*g as usize].storage,
+                    GStorage::Private | GStorage::Out
+                )
             }
             ExprKind::Ident(_, Sym::Builtin(b)) => {
-                matches!(b, BuiltinVar::Position | BuiltinVar::PointSize | BuiltinVar::FragDepth)
+                matches!(
+                    b,
+                    BuiltinVar::Position | BuiltinVar::PointSize | BuiltinVar::FragDepth
+                )
             }
             ExprKind::Index(b, _) | ExprKind::Field(b, _) => self.is_lvalue(b),
             ExprKind::Swizzle(b, c) => {
@@ -850,14 +957,19 @@ impl<'a> Typer<'a> {
                     }
                     UnOp::Not => {
                         if x.ty.scalar() != Some(Scalar::Bool) || !x.ty.is_scalar_or_vector() {
-                            return terr(line, format!("'!' needs a boolean, found {}", self.tname(&x.ty)));
+                            return terr(
+                                line,
+                                format!("'!' needs a boolean, found {}", self.tname(&x.ty)),
+                            );
                         }
                         // R2: bvecN → bool (first component).
                         self.coerce(x, &Type::BOOL, ARG)?;
                         e.ty = Type::BOOL;
                     }
                     UnOp::BitNot => {
-                        if !matches!(x.ty.scalar(), Some(Scalar::Int | Scalar::Uint)) || !x.ty.is_scalar_or_vector() {
+                        if !matches!(x.ty.scalar(), Some(Scalar::Int | Scalar::Uint))
+                            || !x.ty.is_scalar_or_vector()
+                        {
                             return terr(line, "'~' needs an integer operand");
                         }
                         e.ty = x.ty.clone();
@@ -879,13 +991,20 @@ impl<'a> Typer<'a> {
                     Type::Scalar(Scalar::Bool) => {}
                     // R4: a value-producing ternary tests `cond > 0`.
                     // parity: negative integer conditions are false, as in the reference.
-                    Type::Scalar(s @ (Scalar::Int | Scalar::Uint)) => self.compare_zero(c, s, BinOp::Gt),
+                    Type::Scalar(s @ (Scalar::Int | Scalar::Uint)) => {
+                        self.compare_zero(c, s, BinOp::Gt)
+                    }
                     _ => return terr(line, "ternary condition must be a boolean"),
                 }
                 self.expr(a)?;
                 self.expr(b)?;
                 if a.ty != b.ty {
-                    match (a.ty.scalar(), b.ty.scalar(), a.ty.vec_size(), b.ty.vec_size()) {
+                    match (
+                        a.ty.scalar(),
+                        b.ty.scalar(),
+                        a.ty.vec_size(),
+                        b.ty.vec_size(),
+                    ) {
                         (Some(x), Some(y), Some(n), Some(m)) if n == m => {
                             let common = if std_conv(x, y) {
                                 y
@@ -937,7 +1056,10 @@ impl<'a> Typer<'a> {
                         match s.fields.iter().find(|f| f.0 == n) {
                             Some((_, t)) => e.ty = t.clone(),
                             None => {
-                                return terr(line, format!("no field '{}' in struct", self.name(n)));
+                                return terr(
+                                    line,
+                                    format!("no field '{}' in struct", self.name(n)),
+                                );
                             }
                         }
                     }
@@ -945,7 +1067,10 @@ impl<'a> Typer<'a> {
                         let size = b.ty.vec_size().unwrap_or(1);
                         let comps = self.swizzle(n, size, line)?;
                         let ty = Type::vec(s, comps.len() as u8);
-                        let inner = std::mem::replace(b, Box::new(Expr::new(ExprKind::BoolLit(false), line)));
+                        let inner = std::mem::replace(
+                            b,
+                            Box::new(Expr::new(ExprKind::BoolLit(false), line)),
+                        );
                         e.kind = ExprKind::Swizzle(inner, comps);
                         e.ty = ty;
                     }
@@ -984,7 +1109,10 @@ impl<'a> Typer<'a> {
         let set = sets
             .iter()
             .find(|set| s.chars().all(|c| set.contains(c)))
-            .ok_or_else(|| TypeError { line, msg: format!("invalid swizzle '{s}'") })?;
+            .ok_or_else(|| TypeError {
+                line,
+                msg: format!("invalid swizzle '{s}'"),
+            })?;
         let mut out = Vec::with_capacity(s.len());
         for c in s.chars() {
             let k = set.find(c).expect("checked") as u8;
@@ -1008,7 +1136,9 @@ impl<'a> Typer<'a> {
             (Stage::Vertex, "gl_InstanceID") => (BuiltinVar::InstanceId, Type::INT),
             (Stage::Fragment, "gl_FragCoord") => (BuiltinVar::FragCoord, v4),
             (Stage::Fragment, "gl_FrontFacing") => (BuiltinVar::FrontFacing, Type::BOOL),
-            (Stage::Fragment, "gl_PointCoord") => (BuiltinVar::PointCoord, Type::Vector(Scalar::Float, 2)),
+            (Stage::Fragment, "gl_PointCoord") => {
+                (BuiltinVar::PointCoord, Type::Vector(Scalar::Float, 2))
+            }
             (Stage::Fragment, "gl_FragDepth") => (BuiltinVar::FragDepth, Type::FLOAT),
             _ => return None,
         })
@@ -1016,7 +1146,9 @@ impl<'a> Typer<'a> {
 
     fn binary(&mut self, e: &mut Expr) -> TResult<()> {
         let line = e.line;
-        let ExprKind::Binary(op, l, r) = &mut e.kind else { unreachable!() };
+        let ExprKind::Binary(op, l, r) = &mut e.kind else {
+            unreachable!()
+        };
         let op = *op;
         self.expr(l)?;
         self.expr(r)?;
@@ -1033,7 +1165,11 @@ impl<'a> Typer<'a> {
                     if l.ty != r.ty {
                         return terr(
                             line,
-                            format!("cannot compare {} with {}", self.tname(&l.ty), self.tname(&r.ty)),
+                            format!(
+                                "cannot compare {} with {}",
+                                self.tname(&l.ty),
+                                self.tname(&r.ty)
+                            ),
                         );
                     }
                 }
@@ -1045,7 +1181,10 @@ impl<'a> Typer<'a> {
                 }
                 self.unify_scalar_bases(l, r, line, true)?;
                 if l.ty == Type::BOOL {
-                    let (a, b) = (l.ty.with_scalar(Scalar::Float), r.ty.with_scalar(Scalar::Float));
+                    let (a, b) = (
+                        l.ty.with_scalar(Scalar::Float),
+                        r.ty.with_scalar(Scalar::Float),
+                    );
                     self.wrap(l, a);
                     self.wrap(r, b);
                 }
@@ -1054,14 +1193,19 @@ impl<'a> Typer<'a> {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 let (ty, fmod) = self.arith(op, l, r, line)?;
                 if fmod {
-                    let ExprKind::Binary(o, ..) = &mut e.kind else { unreachable!() };
+                    let ExprKind::Binary(o, ..) = &mut e.kind else {
+                        unreachable!()
+                    };
                     *o = BinOp::FMod;
                 }
                 ty
             }
             BinOp::FMod => e.ty.clone(),
             BinOp::Shl | BinOp::Shr => {
-                let ok = |t: &Type| matches!(t.scalar(), Some(Scalar::Int | Scalar::Uint)) && t.is_scalar_or_vector();
+                let ok = |t: &Type| {
+                    matches!(t.scalar(), Some(Scalar::Int | Scalar::Uint))
+                        && t.is_scalar_or_vector()
+                };
                 if !ok(&l.ty) || !ok(&r.ty) {
                     return terr(line, "shift operators need integer operands");
                 }
@@ -1072,9 +1216,15 @@ impl<'a> Typer<'a> {
                 l.ty.clone()
             }
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                let ok = |t: &Type| matches!(t.scalar(), Some(Scalar::Int | Scalar::Uint)) && t.is_scalar_or_vector();
+                let ok = |t: &Type| {
+                    matches!(t.scalar(), Some(Scalar::Int | Scalar::Uint))
+                        && t.is_scalar_or_vector()
+                };
                 if !ok(&l.ty) || !ok(&r.ty) || l.ty.scalar() != r.ty.scalar() {
-                    return terr(line, format!("'{}' needs integer operands of the same type", op.text()));
+                    return terr(
+                        line,
+                        format!("'{}' needs integer operands of the same type", op.text()),
+                    );
                 }
                 let (n, m) = (l.ty.vec_size().unwrap_or(1), r.ty.vec_size().unwrap_or(1));
                 match (n, m) {
@@ -1091,7 +1241,13 @@ impl<'a> Typer<'a> {
 
     /// Converts two scalar/vector operands to a common base type
     /// (standard conversions plus R1 `bool → float`).
-    fn unify_scalar_bases(&mut self, l: &mut Expr, r: &mut Expr, line: u32, allow_bool: bool) -> TResult<()> {
+    fn unify_scalar_bases(
+        &mut self,
+        l: &mut Expr,
+        r: &mut Expr,
+        line: u32,
+        allow_bool: bool,
+    ) -> TResult<()> {
         let (Some(a), Some(b)) = (l.ty.scalar(), r.ty.scalar()) else {
             return Ok(());
         };
@@ -1102,7 +1258,10 @@ impl<'a> Typer<'a> {
             b
         } else if std_conv(b, a) {
             a
-        } else if matches!((a, b), (Scalar::Int, Scalar::Uint) | (Scalar::Uint, Scalar::Int)) {
+        } else if matches!(
+            (a, b),
+            (Scalar::Int, Scalar::Uint) | (Scalar::Uint, Scalar::Int)
+        ) {
             Scalar::Int
         } else {
             return terr(line, "operand types are incompatible");
@@ -1122,14 +1281,24 @@ impl<'a> Typer<'a> {
         if !numeric(&l.ty) || !numeric(&r.ty) {
             return terr(
                 line,
-                format!("invalid operands for '{}': {} and {}", op.text(), self.tname(&l.ty), self.tname(&r.ty)),
+                format!(
+                    "invalid operands for '{}': {} and {}",
+                    op.text(),
+                    self.tname(&l.ty),
+                    self.tname(&r.ty)
+                ),
             );
         }
-        let (lb, rb) = (l.ty.scalar().expect("numeric"), r.ty.scalar().expect("numeric"));
+        let (lb, rb) = (
+            l.ty.scalar().expect("numeric"),
+            r.ty.scalar().expect("numeric"),
+        );
         // R1: mixed int/float stays float; bool → float; uint → int for these operators.
         let common = if lb == rb && lb != Scalar::Bool {
             lb
-        } else if matches!(lb, Scalar::Float | Scalar::Bool) || matches!(rb, Scalar::Float | Scalar::Bool) {
+        } else if matches!(lb, Scalar::Float | Scalar::Bool)
+            || matches!(rb, Scalar::Float | Scalar::Bool)
+        {
             Scalar::Float
         } else {
             Scalar::Int
@@ -1150,7 +1319,12 @@ impl<'a> Typer<'a> {
         let mismatch = |s: &Self, l: &Expr, r: &Expr| {
             terr(
                 line,
-                format!("mismatched operands for '{}': {} and {}", op.text(), s.tname(&l.ty), s.tname(&r.ty)),
+                format!(
+                    "mismatched operands for '{}': {} and {}",
+                    op.text(),
+                    s.tname(&l.ty),
+                    s.tname(&r.ty)
+                ),
             )
         };
         let ty = match (&l.ty, &r.ty) {
@@ -1195,7 +1369,9 @@ impl<'a> Typer<'a> {
 
     fn assign(&mut self, e: &mut Expr) -> TResult<()> {
         let line = e.line;
-        let ExprKind::Assign(op, l, r) = &mut e.kind else { unreachable!() };
+        let ExprKind::Assign(op, l, r) = &mut e.kind else {
+            unreachable!()
+        };
         let op = *op;
         self.expr(l)?;
         self.expr(r)?;
@@ -1205,7 +1381,9 @@ impl<'a> Typer<'a> {
             None => self.coerce(r, &lt, ASSIGN)?,
             Some(BinOp::Mul) if matches!((&lt, &r.ty), (Type::Vector(Scalar::Float, n), Type::Matrix(c, rr)) if n == c && n == rr) =>
                 {}
-            Some(BinOp::Mul | BinOp::Add | BinOp::Sub | BinOp::Div) if matches!(lt, Type::Matrix(..)) => {
+            Some(BinOp::Mul | BinOp::Add | BinOp::Sub | BinOp::Div)
+                if matches!(lt, Type::Matrix(..)) =>
+            {
                 match &r.ty {
                     t if *t == lt => {}
                     Type::Scalar(_) => self.coerce(r, &Type::FLOAT, STD)?,
@@ -1226,18 +1404,36 @@ impl<'a> Typer<'a> {
                 if !base_ok {
                     return terr(
                         line,
-                        format!("cannot apply '{}=' to {} with {}", o.text(), self.tname(&lt), self.tname(&r.ty)),
+                        format!(
+                            "cannot apply '{}=' to {} with {}",
+                            o.text(),
+                            self.tname(&lt),
+                            self.tname(&r.ty)
+                        ),
                     );
                 }
-                let target = if rn == 1 || rn == ln { r.ty.with_scalar(lb) } else { lt.clone() };
-                self.coerce(r, &target, Coerce { restricted, shape: true, explicit: false })?;
+                let target = if rn == 1 || rn == ln {
+                    r.ty.with_scalar(lb)
+                } else {
+                    lt.clone()
+                };
+                self.coerce(
+                    r,
+                    &target,
+                    Coerce {
+                        restricted,
+                        shape: true,
+                        explicit: false,
+                    },
+                )?;
                 if o == BinOp::Mod && lb == Scalar::Float {
                     // R5: `a %= b` on floats is `a = mod(a, b)`.
                     if !side_effect_free(l) {
                         return terr(line, "'%=' on a float needs a simple left operand");
                     }
                     let lhs = (**l).clone();
-                    let rhs = std::mem::replace(r, Box::new(Expr::new(ExprKind::BoolLit(false), line)));
+                    let rhs =
+                        std::mem::replace(r, Box::new(Expr::new(ExprKind::BoolLit(false), line)));
                     let mut m = Expr {
                         kind: ExprKind::Binary(BinOp::FMod, Box::new(lhs), rhs),
                         ty: lt.clone(),
@@ -1251,18 +1447,26 @@ impl<'a> Typer<'a> {
                         self.wrap(a, t);
                     }
                     **r = m;
-                    let ExprKind::Assign(op, ..) = &mut e.kind else { unreachable!() };
+                    let ExprKind::Assign(op, ..) = &mut e.kind else {
+                        unreachable!()
+                    };
                     *op = None;
                 }
             }
             Some(o) => {
                 // Shifts and bitwise operators: integers (R5 same base type).
-                let int_ok = |t: &Type| matches!(t.scalar(), Some(Scalar::Int | Scalar::Uint)) && t.is_scalar_or_vector();
+                let int_ok = |t: &Type| {
+                    matches!(t.scalar(), Some(Scalar::Int | Scalar::Uint))
+                        && t.is_scalar_or_vector()
+                };
                 if !int_ok(&lt) || !int_ok(&r.ty) {
                     return terr(line, format!("'{}=' needs integer operands", o.text()));
                 }
                 if !matches!(o, BinOp::Shl | BinOp::Shr) && lt.scalar() != r.ty.scalar() {
-                    return terr(line, format!("'{}=' needs operands of the same type", o.text()));
+                    return terr(
+                        line,
+                        format!("'{}=' needs operands of the same type", o.text()),
+                    );
                 }
                 if r.ty.vec_size() != Some(1) && r.ty.vec_size() != lt.vec_size() {
                     let t = if matches!(o, BinOp::Shl | BinOp::Shr) {
@@ -1282,7 +1486,14 @@ impl<'a> Typer<'a> {
 
     fn call(&mut self, e: &mut Expr) -> TResult<()> {
         let line = e.line;
-        let ExprKind::Call { callee, args, target } = &mut e.kind else { unreachable!() };
+        let ExprKind::Call {
+            callee,
+            args,
+            target,
+        } = &mut e.kind
+        else {
+            unreachable!()
+        };
         for a in args.iter_mut() {
             self.expr(a)?;
             if a.ty == Type::Void {
@@ -1315,13 +1526,21 @@ impl<'a> Typer<'a> {
                 if let Some(v) = self.fn_by_name.get(&n) {
                     for &i in v {
                         let f = &self.functions[i as usize];
-                        cands.push(Cand { params: f.params.clone(), ret: f.ret.clone(), target: CallTarget::User(i) });
+                        cands.push(Cand {
+                            params: f.params.clone(),
+                            ret: f.ret.clone(),
+                            target: CallTarget::User(i),
+                        });
                     }
                 }
                 let bt = Builtins::get();
                 for &i in bt.overloads(self.name(n)) {
                     let b = &bt.list[i as usize];
-                    cands.push(Cand { params: b.params.clone(), ret: b.ret.clone(), target: CallTarget::Builtin(i) });
+                    cands.push(Cand {
+                        params: b.params.clone(),
+                        ret: b.ret.clone(),
+                        target: CallTarget::Builtin(i),
+                    });
                 }
                 if cands.is_empty() {
                     return terr(line, format!("no function named '{}'", self.name(n)));
@@ -1331,7 +1550,10 @@ impl<'a> Typer<'a> {
                     Ok(i) => cands[i].clone(),
                     Err(msg) => {
                         let sig: Vec<String> = arg_types.iter().map(|t| self.tname(t)).collect();
-                        return terr(line, format!("{msg} for call {}({})", self.name(n), sig.join(", ")));
+                        return terr(
+                            line,
+                            format!("{msg} for call {}({})", self.name(n), sig.join(", ")),
+                        );
                     }
                 };
                 for (a, (dir, pt)) in args.iter_mut().zip(chosen.params.iter()) {
@@ -1342,11 +1564,19 @@ impl<'a> Typer<'a> {
                             if a.ty != *pt {
                                 // Only a narrowing swizzle keeps an assignable argument.
                                 match (a.ty.scalar(), pt.scalar(), a.ty.vec_size(), pt.vec_size()) {
-                                    (Some(x), Some(y), Some(n), Some(m)) if x == y && n > m && m > 1 => {
+                                    (Some(x), Some(y), Some(n), Some(m))
+                                        if x == y && n > m && m > 1 =>
+                                    {
                                         let line = a.line;
-                                        let inner = std::mem::replace(a, Expr::new(ExprKind::BoolLit(false), line));
+                                        let inner = std::mem::replace(
+                                            a,
+                                            Expr::new(ExprKind::BoolLit(false), line),
+                                        );
                                         *a = Expr {
-                                            kind: ExprKind::Swizzle(Box::new(inner), (0..m).collect()),
+                                            kind: ExprKind::Swizzle(
+                                                Box::new(inner),
+                                                (0..m).collect(),
+                                            ),
                                             ty: pt.clone(),
                                             line,
                                         };
@@ -1374,8 +1604,13 @@ impl<'a> Typer<'a> {
                             self.init_calls.insert(i);
                         }
                     }
-                    CallTarget::Builtin(i) if bt.list[i as usize].fragment_only && self.stage != Stage::Fragment => {
-                        return terr(line, format!("'{}' is only available in fragment shaders", self.name(n)));
+                    CallTarget::Builtin(i)
+                        if bt.list[i as usize].fragment_only && self.stage != Stage::Fragment =>
+                    {
+                        return terr(
+                            line,
+                            format!("'{}' is only available in fragment shaders", self.name(n)),
+                        );
                     }
                     _ => {}
                 }
@@ -1395,13 +1630,23 @@ impl<'a> Typer<'a> {
                 }
                 let a = &mut args[0];
                 let Some(_) = a.ty.scalar() else {
-                    return terr(line, format!("cannot construct {} from {}", s.name(), self.tname(&a.ty)));
+                    return terr(
+                        line,
+                        format!("cannot construct {} from {}", s.name(), self.tname(&a.ty)),
+                    );
                 };
                 if let Type::Matrix(..) = a.ty {
                     let l = a.line;
                     let inner = std::mem::replace(a, Expr::new(ExprKind::BoolLit(false), l));
                     let col = Expr {
-                        kind: ExprKind::Index(Box::new(inner), Box::new(Expr { kind: ExprKind::IntLit(0), ty: Type::INT, line: l })),
+                        kind: ExprKind::Index(
+                            Box::new(inner),
+                            Box::new(Expr {
+                                kind: ExprKind::IntLit(0),
+                                ty: Type::INT,
+                                line: l,
+                            }),
+                        ),
                         ty: Type::Vector(Scalar::Float, 2),
                         line: l,
                     };
@@ -1450,19 +1695,26 @@ impl<'a> Typer<'a> {
                 if args.len() == 1 {
                     match args[0].ty {
                         Type::Matrix(..) => return Ok(()),
-                        Type::Scalar(_) => return self.coerce(&mut args[0], &Type::FLOAT, EXPLICIT),
+                        Type::Scalar(_) => {
+                            return self.coerce(&mut args[0], &Type::FLOAT, EXPLICIT);
+                        }
                         _ => {}
                     }
                 }
                 if args.iter().any(|a| !a.ty.is_scalar_or_vector()) {
-                    return terr(line, "matrix constructors take scalars, vectors or one matrix");
+                    return terr(
+                        line,
+                        "matrix constructors take scalars, vectors or one matrix",
+                    );
                 }
                 for a in args.iter_mut() {
                     let t = a.ty.with_scalar(Scalar::Float);
                     self.coerce(a, &t, EXPLICIT)?;
                 }
-                let columns_ok = args.len() == c as usize && args.iter().all(|a| a.ty.vec_size() == Some(r));
-                let scalars_ok = args.len() == (c as usize * r as usize) && args.iter().all(|a| a.ty.vec_size() == Some(1));
+                let columns_ok =
+                    args.len() == c as usize && args.iter().all(|a| a.ty.vec_size() == Some(r));
+                let scalars_ok = args.len() == (c as usize * r as usize)
+                    && args.iter().all(|a| a.ty.vec_size() == Some(1));
                 if columns_ok || scalars_ok {
                     return Ok(());
                 }
@@ -1474,7 +1726,10 @@ impl<'a> Typer<'a> {
                         comps.push(a.clone());
                     } else {
                         if !side_effect_free(a) {
-                            return terr(line, "matrix constructor argument with side effects cannot be split");
+                            return terr(
+                                line,
+                                "matrix constructor argument with side effects cannot be split",
+                            );
                         }
                         for k in 0..n {
                             comps.push(Expr {
@@ -1495,7 +1750,11 @@ impl<'a> Typer<'a> {
                 for chunk in comps.chunks(r as usize) {
                     cols.push(Expr {
                         kind: ExprKind::Call {
-                            callee: Callee::Type(FullType { spec: TypeSpec::Builtin(col_ty.clone()), array: None, line }),
+                            callee: Callee::Type(FullType {
+                                spec: TypeSpec::Builtin(col_ty.clone()),
+                                array: None,
+                                line,
+                            }),
                             args: chunk.to_vec(),
                             target: CallTarget::Ctor(col_ty.clone()),
                         },
@@ -1532,7 +1791,14 @@ impl<'a> Typer<'a> {
     /// Replaces a single-argument scalar/vector constructor that only converts
     /// by the conversion itself (keeps the output minimal).
     fn simplify_ctor(&mut self, e: &mut Expr) {
-        let ExprKind::Call { args, target: CallTarget::Ctor(t), .. } = &mut e.kind else { return };
+        let ExprKind::Call {
+            args,
+            target: CallTarget::Ctor(t),
+            ..
+        } = &mut e.kind
+        else {
+            return;
+        };
         if !t.is_scalar_or_vector() || args.len() != 1 {
             return;
         }
@@ -1551,7 +1817,12 @@ impl<'a> Typer<'a> {
             ExprKind::FloatLit(v) => ConstVal::Float(*v as f64),
             ExprKind::BoolLit(b) => ConstVal::Bool(*b),
             ExprKind::Ident(n, Sym::Local(_)) => {
-                return self.scopes.iter().rev().find_map(|s| s.vars.get(n)).and_then(|v| v.3);
+                return self
+                    .scopes
+                    .iter()
+                    .rev()
+                    .find_map(|s| s.vars.get(n))
+                    .and_then(|v| v.3);
             }
             ExprKind::Ident(_, Sym::Global(g)) => return self.globals[*g as usize].const_value,
             ExprKind::Convert(x) => {
@@ -1616,7 +1887,11 @@ impl<'a> Typer<'a> {
                     _ => return None,
                 }
             }
-            ExprKind::Call { target: CallTarget::Ctor(Type::Scalar(s)), args, .. } if args.len() == 1 => {
+            ExprKind::Call {
+                target: CallTarget::Ctor(Type::Scalar(s)),
+                args,
+                ..
+            } if args.len() == 1 => {
                 let v = self.const_eval(&args[0])?;
                 match s {
                     Scalar::Int => ConstVal::Int(v.as_f64().trunc() as i64),
@@ -1633,19 +1908,31 @@ impl<'a> Typer<'a> {
 /// True if evaluating `e` twice is harmless.
 pub fn side_effect_free(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Ident(..) | ExprKind::IntLit(_) | ExprKind::UintLit(_) | ExprKind::FloatLit(_) | ExprKind::BoolLit(_) => {
-            true
-        }
-        ExprKind::Field(b, _) | ExprKind::Swizzle(b, _) | ExprKind::Convert(b) | ExprKind::Length(b) => side_effect_free(b),
+        ExprKind::Ident(..)
+        | ExprKind::IntLit(_)
+        | ExprKind::UintLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::BoolLit(_) => true,
+        ExprKind::Field(b, _)
+        | ExprKind::Swizzle(b, _)
+        | ExprKind::Convert(b)
+        | ExprKind::Length(b) => side_effect_free(b),
         ExprKind::Index(b, i) => side_effect_free(b) && side_effect_free(i),
         ExprKind::Unary(op, x) => {
-            !matches!(op, UnOp::PreInc | UnOp::PreDec | UnOp::PostInc | UnOp::PostDec) && side_effect_free(x)
+            !matches!(
+                op,
+                UnOp::PreInc | UnOp::PreDec | UnOp::PostInc | UnOp::PostDec
+            ) && side_effect_free(x)
         }
         ExprKind::Binary(_, a, b) => side_effect_free(a) && side_effect_free(b),
-        ExprKind::Ternary(a, b, c) => side_effect_free(a) && side_effect_free(b) && side_effect_free(c),
-        ExprKind::Call { target: CallTarget::Builtin(_) | CallTarget::Ctor(_), args, .. } => {
-            args.iter().all(side_effect_free)
+        ExprKind::Ternary(a, b, c) => {
+            side_effect_free(a) && side_effect_free(b) && side_effect_free(c)
         }
+        ExprKind::Call {
+            target: CallTarget::Builtin(_) | CallTarget::Ctor(_),
+            args,
+            ..
+        } => args.iter().all(side_effect_free),
         _ => false,
     }
 }
@@ -1665,7 +1952,8 @@ fn resolve_overload(cands: &[Cand], args: &[Type]) -> Result<usize, String> {
                 continue;
             }
             conversions += 1;
-            let same_shape = a.is_scalar_or_vector() && p.is_scalar_or_vector() && a.vec_size() == p.vec_size();
+            let same_shape =
+                a.is_scalar_or_vector() && p.is_scalar_or_vector() && a.vec_size() == p.vec_size();
             let (Some(ab), Some(pb)) = (a.scalar(), p.scalar()) else {
                 ok = false;
                 break;

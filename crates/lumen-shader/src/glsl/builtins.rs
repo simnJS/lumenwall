@@ -88,11 +88,37 @@ impl Builder {
 }
 
 fn build() -> Builtins {
-    let mut b = Builder { list: Vec::with_capacity(900) };
+    let mut b = Builder {
+        list: Vec::with_capacity(900),
+    };
     for name in [
-        "radians", "degrees", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
-        "asinh", "acosh", "atanh", "exp", "log", "exp2", "log2", "sqrt", "inversesqrt", "floor",
-        "trunc", "round", "roundEven", "ceil", "fract", "normalize",
+        "radians",
+        "degrees",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "sinh",
+        "cosh",
+        "tanh",
+        "asinh",
+        "acosh",
+        "atanh",
+        "exp",
+        "log",
+        "exp2",
+        "log2",
+        "sqrt",
+        "inversesqrt",
+        "floor",
+        "trunc",
+        "round",
+        "roundEven",
+        "ceil",
+        "fract",
+        "normalize",
     ] {
         b.un(name, F);
     }
@@ -142,8 +168,16 @@ fn build() -> Builtins {
     }
     for n in 1..=4 {
         b.add("fma", v(F, n), &[v(F, n), v(F, n), v(F, n)]);
-        b.add_dirs("modf", v(F, n), &[(ParamDir::In, v(F, n)), (ParamDir::Out, v(F, n))]);
-        b.add_dirs("frexp", v(F, n), &[(ParamDir::In, v(F, n)), (ParamDir::Out, v(I, n))]);
+        b.add_dirs(
+            "modf",
+            v(F, n),
+            &[(ParamDir::In, v(F, n)), (ParamDir::Out, v(F, n))],
+        );
+        b.add_dirs(
+            "frexp",
+            v(F, n),
+            &[(ParamDir::In, v(F, n)), (ParamDir::Out, v(I, n))],
+        );
         b.add("ldexp", v(F, n), &[v(F, n), v(I, n)]);
         b.add("isnan", v(B, n), &[v(F, n)]);
         b.add("isinf", v(B, n), &[v(F, n)]);
@@ -166,7 +200,11 @@ fn build() -> Builtins {
             b.add("findMSB", v(I, n), &[v(s, n)]);
             b.add("bitfieldReverse", v(s, n), &[v(s, n)]);
             b.add("bitfieldExtract", v(s, n), &[v(s, n), Type::INT, Type::INT]);
-            b.add("bitfieldInsert", v(s, n), &[v(s, n), v(s, n), Type::INT, Type::INT]);
+            b.add(
+                "bitfieldInsert",
+                v(s, n),
+                &[v(s, n), v(s, n), Type::INT, Type::INT],
+            );
         }
     }
     // Packing.
@@ -192,7 +230,14 @@ fn build() -> Builtins {
         b.add("inverse", Type::Matrix(c, c), &[Type::Matrix(c, c)]);
     }
     // Vector relational.
-    for name in ["lessThan", "lessThanEqual", "greaterThan", "greaterThanEqual", "equal", "notEqual"] {
+    for name in [
+        "lessThan",
+        "lessThanEqual",
+        "greaterThan",
+        "greaterThanEqual",
+        "equal",
+        "notEqual",
+    ] {
         let with_bool = name == "equal" || name == "notEqual";
         for s in [F, I, U, B] {
             if s == B && !with_bool {
@@ -210,8 +255,15 @@ fn build() -> Builtins {
     }
     // Derivatives (fragment only).
     for name in [
-        "dFdx", "dFdy", "fwidth", "dFdxFine", "dFdyFine", "dFdxCoarse", "dFdyCoarse",
-        "fwidthFine", "fwidthCoarse",
+        "dFdx",
+        "dFdy",
+        "fwidth",
+        "dFdxFine",
+        "dFdyFine",
+        "dFdxCoarse",
+        "dFdyCoarse",
+        "fwidthFine",
+        "fwidthCoarse",
     ] {
         for n in 1..=4 {
             b.add(name, v(F, n), &[v(F, n)]).fragment_only = true;
@@ -223,7 +275,10 @@ fn build() -> Builtins {
     for (i, f) in b.list.iter().enumerate() {
         by_name.entry(f.name).or_default().push(i as u32);
     }
-    Builtins { list: b.list, by_name }
+    Builtins {
+        list: b.list,
+        by_name,
+    }
 }
 
 fn textures(b: &mut Builder) {
@@ -242,32 +297,76 @@ fn textures(b: &mut Builder) {
         let t = b.add("texture", res.clone(), &[s.clone(), coord.clone()]);
         t.implicit_lod = true;
         t.fragment_only = false;
-        b.add("texture", res.clone(), &[s.clone(), coord.clone(), Type::FLOAT]).implicit_lod = true;
-        b.add("textureLod", res.clone(), &[s.clone(), coord.clone(), Type::FLOAT]);
-        b.add("textureGrad", res.clone(), &[s.clone(), coord.clone(), deriv.clone(), deriv.clone()]);
+        b.add(
+            "texture",
+            res.clone(),
+            &[s.clone(), coord.clone(), Type::FLOAT],
+        )
+        .implicit_lod = true;
+        b.add(
+            "textureLod",
+            res.clone(),
+            &[s.clone(), coord.clone(), Type::FLOAT],
+        );
+        b.add(
+            "textureGrad",
+            res.clone(),
+            &[s.clone(), coord.clone(), deriv.clone(), deriv.clone()],
+        );
         if let Some(off) = off {
-            b.add("textureOffset", res.clone(), &[s.clone(), coord.clone(), off.clone()]).implicit_lod =
-                true;
-            b.add("textureOffset", res.clone(), &[s.clone(), coord.clone(), off.clone(), Type::FLOAT])
-                .implicit_lod = true;
-            b.add("textureLodOffset", res.clone(), &[s.clone(), coord.clone(), Type::FLOAT, off.clone()]);
+            b.add(
+                "textureOffset",
+                res.clone(),
+                &[s.clone(), coord.clone(), off.clone()],
+            )
+            .implicit_lod = true;
+            b.add(
+                "textureOffset",
+                res.clone(),
+                &[s.clone(), coord.clone(), off.clone(), Type::FLOAT],
+            )
+            .implicit_lod = true;
+            b.add(
+                "textureLodOffset",
+                res.clone(),
+                &[s.clone(), coord.clone(), Type::FLOAT, off.clone()],
+            );
             b.add(
                 "textureGradOffset",
                 res.clone(),
-                &[s.clone(), coord.clone(), deriv.clone(), deriv.clone(), off.clone()],
+                &[
+                    s.clone(),
+                    coord.clone(),
+                    deriv.clone(),
+                    deriv.clone(),
+                    off.clone(),
+                ],
             );
             if k != S2DShadow {
                 let icoord = coord.with_scalar(I);
-                b.add("texelFetch", res.clone(), &[s.clone(), icoord.clone(), Type::INT]);
-                b.add("texelFetchOffset", res.clone(), &[s.clone(), icoord, Type::INT, off]);
+                b.add(
+                    "texelFetch",
+                    res.clone(),
+                    &[s.clone(), icoord.clone(), Type::INT],
+                );
+                b.add(
+                    "texelFetchOffset",
+                    res.clone(),
+                    &[s.clone(), icoord, Type::INT, off],
+                );
             }
         }
         match k {
             S2D => {
                 for pc in [v(F, 3), v(F, 4)] {
-                    b.add("textureProj", res.clone(), &[s.clone(), pc.clone()]).implicit_lod = true;
-                    b.add("textureProj", res.clone(), &[s.clone(), pc.clone(), Type::FLOAT])
+                    b.add("textureProj", res.clone(), &[s.clone(), pc.clone()])
                         .implicit_lod = true;
+                    b.add(
+                        "textureProj",
+                        res.clone(),
+                        &[s.clone(), pc.clone(), Type::FLOAT],
+                    )
+                    .implicit_lod = true;
                     b.add("textureProjLod", res.clone(), &[s.clone(), pc, Type::FLOAT]);
                 }
                 b.add("textureGather", v(F, 4), &[s.clone(), v(F, 2)]);
@@ -279,18 +378,32 @@ fn textures(b: &mut Builder) {
                 let t = b.add("texture2D", res.clone(), &[s.clone(), v(F, 2), Type::FLOAT]);
                 t.emit = "texture";
                 t.implicit_lod = true;
-                b.add("texture2DLod", res.clone(), &[s.clone(), v(F, 2), Type::FLOAT]).emit = "textureLod";
+                b.add(
+                    "texture2DLod",
+                    res.clone(),
+                    &[s.clone(), v(F, 2), Type::FLOAT],
+                )
+                .emit = "textureLod";
             }
             S2DArray | Cube => {
                 b.add("textureGather", v(F, 4), &[s.clone(), coord.clone()]);
-                b.add("textureGather", v(F, 4), &[s.clone(), coord.clone(), Type::INT]);
+                b.add(
+                    "textureGather",
+                    v(F, 4),
+                    &[s.clone(), coord.clone(), Type::INT],
+                );
             }
             S2DShadow => {
                 b.add("textureGather", v(F, 4), &[s.clone(), v(F, 2), Type::FLOAT]);
             }
             S3D => {
-                b.add("textureProj", res.clone(), &[s.clone(), v(F, 4)]).implicit_lod = true;
-                b.add("textureProjLod", res.clone(), &[s.clone(), v(F, 4), Type::FLOAT]);
+                b.add("textureProj", res.clone(), &[s.clone(), v(F, 4)])
+                    .implicit_lod = true;
+                b.add(
+                    "textureProjLod",
+                    res.clone(),
+                    &[s.clone(), v(F, 4), Type::FLOAT],
+                );
             }
         }
     }

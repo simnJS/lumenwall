@@ -23,7 +23,13 @@ pub struct Parser<'a> {
 }
 
 pub fn parse(toks: &[Token], int: &Interner) -> PResult<Unit> {
-    let mut p = Parser { toks, pos: 0, int, struct_names: HashSet::new(), unit: Unit::default() };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        int,
+        struct_names: HashSet::new(),
+        unit: Unit::default(),
+    };
     while p.pos < p.toks.len() {
         if p.eat(P::Semicolon) {
             continue;
@@ -62,10 +68,16 @@ fn is_qualifier_kw(k: Kw) -> bool {
 
 impl<'a> Parser<'a> {
     fn line(&self) -> u32 {
-        self.toks.get(self.pos).or(self.toks.last()).map_or(0, |t| t.line)
+        self.toks
+            .get(self.pos)
+            .or(self.toks.last())
+            .map_or(0, |t| t.line)
     }
     fn err<T>(&self, msg: impl Into<String>) -> PResult<T> {
-        Err(ParseError { line: self.line(), msg: msg.into() })
+        Err(ParseError {
+            line: self.line(),
+            msg: msg.into(),
+        })
     }
     fn peek(&self) -> Option<TokKind> {
         self.toks.get(self.pos).map(|t| t.kind)
@@ -161,10 +173,18 @@ impl<'a> Parser<'a> {
                     q.is_const = true;
                 }
                 Kw::In => {
-                    q.storage = if q.storage == Storage::Out { Storage::InOut } else { Storage::In }
+                    q.storage = if q.storage == Storage::Out {
+                        Storage::InOut
+                    } else {
+                        Storage::In
+                    }
                 }
                 Kw::Out => {
-                    q.storage = if q.storage == Storage::In { Storage::InOut } else { Storage::Out }
+                    q.storage = if q.storage == Storage::In {
+                        Storage::InOut
+                    } else {
+                        Storage::Out
+                    }
                 }
                 Kw::Inout => q.storage = Storage::InOut,
                 Kw::Uniform => q.storage = Storage::Uniform,
@@ -227,7 +247,9 @@ impl<'a> Parser<'a> {
                         self.pos += 1;
                         TypeSpec::Builtin(t)
                     }
-                    None => return self.err(format!("expected a type, found '{}'", self.int.get(id))),
+                    None => {
+                        return self.err(format!("expected a type, found '{}'", self.int.get(id)));
+                    }
                 },
                 None if self.struct_names.contains(&id) => {
                     self.pos += 1;
@@ -245,7 +267,11 @@ impl<'a> Parser<'a> {
     }
 
     fn struct_def(&mut self, line: u32) -> PResult<u32> {
-        let name = if self.is(P::LBrace) { None } else { Some(self.ident()?) };
+        let name = if self.is(P::LBrace) {
+            None
+        } else {
+            Some(self.ident()?)
+        };
         if let Some(n) = name {
             self.struct_names.insert(n);
         }
@@ -266,7 +292,12 @@ impl<'a> Parser<'a> {
             self.expect(P::Semicolon)?;
             fields.push((ty, names));
         }
-        self.unit.structs.push(StructDefAst { name, fields, line, resolved: None });
+        self.unit.structs.push(StructDefAst {
+            name,
+            fields,
+            line,
+            resolved: None,
+        });
         Ok(self.unit.structs.len() as u32 - 1)
     }
 
@@ -309,14 +340,24 @@ impl<'a> Parser<'a> {
         }
         let ty = self.full_type()?;
         if self.eat(P::Semicolon) {
-            return Ok(Item::Decl(Decl { quals, ty, vars: Vec::new(), line }));
+            return Ok(Item::Decl(Decl {
+                quals,
+                ty,
+                vars: Vec::new(),
+                line,
+            }));
         }
         let name = self.ident()?;
         if self.is(P::LParen) {
             return self.function(ty, name, line).map(Item::Function);
         }
         let vars = self.declarators(name)?;
-        Ok(Item::Decl(Decl { quals, ty, vars, line }))
+        Ok(Item::Decl(Decl {
+            quals,
+            ty,
+            vars,
+            line,
+        }))
     }
 
     fn declarators(&mut self, first: Name) -> PResult<Vec<Declarator>> {
@@ -333,7 +374,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            vars.push(Declarator { name, array, init, line, ty: Type::Void, sym: Sym::Unresolved });
+            vars.push(Declarator {
+                name,
+                array,
+                init,
+                line,
+                ty: Type::Void,
+                sym: Sym::Unresolved,
+            });
             if self.eat(P::Comma) {
                 name = self.ident()?;
                 continue;
@@ -388,7 +436,15 @@ impl<'a> Parser<'a> {
             self.expect(P::LBrace)?;
             Some(self.block_body()?)
         };
-        Ok(FunctionDef { ret, name, params, body, line, fn_index: 0, skip: false })
+        Ok(FunctionDef {
+            ret,
+            name,
+            params,
+            body,
+            line,
+            fn_index: 0,
+            skip: false,
+        })
     }
 
     // ---- statements ------------------------------------------------------
@@ -454,11 +510,21 @@ impl<'a> Parser<'a> {
         let (quals, _) = self.qualifiers()?;
         let ty = self.full_type()?;
         if self.eat(P::Semicolon) {
-            return Ok(Stmt::Decl(Decl { quals, ty, vars: Vec::new(), line }));
+            return Ok(Stmt::Decl(Decl {
+                quals,
+                ty,
+                vars: Vec::new(),
+                line,
+            }));
         }
         let name = self.ident()?;
         let vars = self.declarators(name)?;
-        Ok(Stmt::Decl(Decl { quals, ty, vars, line }))
+        Ok(Stmt::Decl(Decl {
+            quals,
+            ty,
+            vars,
+            line,
+        }))
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
@@ -476,7 +542,11 @@ impl<'a> Parser<'a> {
                 let c = self.expr()?;
                 self.expect(P::RParen)?;
                 let t = self.stmt()?;
-                let e = if self.eat_kw(Kw::Else) { Some(Box::new(self.stmt()?)) } else { None };
+                let e = if self.eat_kw(Kw::Else) {
+                    Some(Box::new(self.stmt()?))
+                } else {
+                    None
+                };
                 return Ok(Stmt::If(c, Box::new(t), e));
             }
             Some(Kw::Switch) => {
@@ -531,12 +601,25 @@ impl<'a> Parser<'a> {
                     self.expect(P::Semicolon)?;
                     Some(Box::new(Stmt::Expr(e)))
                 };
-                let cond = if self.is(P::Semicolon) { None } else { Some(self.expr()?) };
+                let cond = if self.is(P::Semicolon) {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
                 self.expect(P::Semicolon)?;
-                let step = if self.is(P::RParen) { None } else { Some(self.expr()?) };
+                let step = if self.is(P::RParen) {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
                 self.expect(P::RParen)?;
                 let body = Box::new(self.stmt()?);
-                return Ok(Stmt::For { init, cond, step, body });
+                return Ok(Stmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                });
             }
             Some(Kw::Break) => {
                 self.pos += 1;
@@ -555,7 +638,11 @@ impl<'a> Parser<'a> {
             }
             Some(Kw::Return) => {
                 self.pos += 1;
-                let e = if self.is(P::Semicolon) { None } else { Some(self.expr()?) };
+                let e = if self.is(P::Semicolon) {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
                 self.expect(P::Semicolon)?;
                 return Ok(Stmt::Return(e, line));
             }
@@ -605,7 +692,10 @@ impl<'a> Parser<'a> {
             let line = self.line();
             self.pos += 1;
             let rhs = self.assign()?;
-            return Ok(Expr::new(ExprKind::Assign(op, Box::new(lhs), Box::new(rhs)), line));
+            return Ok(Expr::new(
+                ExprKind::Assign(op, Box::new(lhs), Box::new(rhs)),
+                line,
+            ));
         }
         Ok(lhs)
     }
@@ -618,7 +708,10 @@ impl<'a> Parser<'a> {
             let a = self.expr()?;
             self.expect(P::Colon)?;
             let b = self.assign()?;
-            return Ok(Expr::new(ExprKind::Ternary(Box::new(c), Box::new(a), Box::new(b)), line));
+            return Ok(Expr::new(
+                ExprKind::Ternary(Box::new(c), Box::new(a), Box::new(b)),
+                line,
+            ));
         }
         Ok(c)
     }
@@ -651,7 +744,9 @@ impl<'a> Parser<'a> {
     fn binary(&mut self, min: u8) -> PResult<Expr> {
         let mut lhs = self.unary()?;
         while let Some(TokKind::Punct(p)) = self.peek() {
-            let Some((prec, op)) = Self::binop_prec(p) else { break };
+            let Some((prec, op)) = Self::binop_prec(p) else {
+                break;
+            };
             if prec < min {
                 break;
             }
@@ -739,8 +834,10 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(TokKind::Number(n)) => {
                 self.pos += 1;
-                let kind = parse_number(self.int.get(n))
-                    .ok_or_else(|| ParseError { line, msg: format!("invalid number '{}'", self.int.get(n)) })?;
+                let kind = parse_number(self.int.get(n)).ok_or_else(|| ParseError {
+                    line,
+                    msg: format!("invalid number '{}'", self.int.get(n)),
+                })?;
                 Ok(Expr::new(kind, line))
             }
             Some(TokKind::Punct(P::LParen)) => {
@@ -762,7 +859,11 @@ impl<'a> Parser<'a> {
                     let ty = self.full_type()?;
                     let args = self.call_args()?;
                     return Ok(Expr::new(
-                        ExprKind::Call { callee: Callee::Type(ty), args, target: CallTarget::Unresolved },
+                        ExprKind::Call {
+                            callee: Callee::Type(ty),
+                            args,
+                            target: CallTarget::Unresolved,
+                        },
                         line,
                     ));
                 }
@@ -773,7 +874,11 @@ impl<'a> Parser<'a> {
                 if self.is(P::LParen) {
                     let args = self.call_args()?;
                     return Ok(Expr::new(
-                        ExprKind::Call { callee: Callee::Name(id), args, target: CallTarget::Unresolved },
+                        ExprKind::Call {
+                            callee: Callee::Name(id),
+                            args,
+                            target: CallTarget::Unresolved,
+                        },
                         line,
                     ));
                 }
@@ -792,7 +897,10 @@ pub fn parse_number(s: &str) -> Option<ExprKind> {
     let lower = s.to_ascii_lowercase();
     let is_hex = lower.starts_with("0x");
     if !is_hex && (lower.contains('.') || lower.contains('e') || lower.ends_with('f')) {
-        let t = lower.strip_suffix("lf").or_else(|| lower.strip_suffix('f')).unwrap_or(&lower);
+        let t = lower
+            .strip_suffix("lf")
+            .or_else(|| lower.strip_suffix('f'))
+            .unwrap_or(&lower);
         let v: f64 = t.parse().ok()?;
         return Some(ExprKind::FloatLit(v as f32));
     }

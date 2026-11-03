@@ -22,13 +22,20 @@ pub struct CompiledProgram {
 }
 
 fn stage_name(stage: ShaderStage) -> &'static str {
-    if stage == ShaderStage::Vertex { "vertex" } else { "fragment" }
+    if stage == ShaderStage::Vertex {
+        "vertex"
+    } else {
+        "fragment"
+    }
 }
 
 fn parse_stage(src: &str, stage: ShaderStage, entry: &str) -> Result<Module, ShaderError> {
     let mut module = Frontend::default()
         .parse(&Options::from(stage), src)
-        .map_err(|e| ShaderError::Backend { stage: stage_name(stage), message: e.emit_to_string(src) })?;
+        .map_err(|e| ShaderError::Backend {
+            stage: stage_name(stage),
+            message: e.emit_to_string(src),
+        })?;
     for ep in module.entry_points.iter_mut() {
         ep.name = entry.to_string();
     }
@@ -52,21 +59,29 @@ pub(crate) fn uniform_type(t: &Type) -> UniformType {
     match t {
         Type::Scalar(s) => UniformType::Scalar(scalar_kind(*s)),
         Type::Vector(s, n) => UniformType::Vector(scalar_kind(*s), *n),
-        Type::Matrix(c, r) => UniformType::Matrix { columns: *c, rows: *r },
+        Type::Matrix(c, r) => UniformType::Matrix {
+            columns: *c,
+            rows: *r,
+        },
         Type::Array(e, _) => uniform_type(e),
         _ => UniformType::Other,
     }
 }
 
 fn stages(v: Option<u32>, f: Option<u32>) -> Stages {
-    Stages { vertex: v.is_some(), fragment: f.is_some() }
+    Stages {
+        vertex: v.is_some(),
+        fragment: f.is_some(),
+    }
 }
 
 /// Member offsets (and array strides) of the pass block.
 fn block_layout(m: &Module) -> Option<(u32, Vec<(u32, u32)>)> {
     let gv = m.global_variables.iter().map(|(_, g)| g).find(|g| {
         g.space == AddressSpace::Uniform
-            && g.binding.as_ref().is_some_and(|b| b.group == BIND_GROUP && b.binding == UNIFORM_BLOCK_BINDING)
+            && g.binding
+                .as_ref()
+                .is_some_and(|b| b.group == BIND_GROUP && b.binding == UNIFORM_BLOCK_BINDING)
     })?;
     let TypeInner::Struct { members, span } = &m.types[gv.ty].inner else {
         return None;
@@ -103,16 +118,29 @@ fn member(u: &UniformSlot, offset: u32, naga_stride: u32) -> UniformMember {
 pub fn compile_translated(t: &Translated) -> Result<CompiledProgram, ShaderError> {
     let vertex = parse_stage(&t.vertex, ShaderStage::Vertex, VERTEX_ENTRY)?;
     let fragment = parse_stage(&t.fragment, ShaderStage::Fragment, FRAGMENT_ENTRY)?;
-    let merged = crate::merge::merge(vertex.clone(), fragment.clone())
-        .map_err(|message| ShaderError::Backend { stage: "merge", message })?;
+    let merged = crate::merge::merge(vertex.clone(), fragment.clone()).map_err(|message| {
+        ShaderError::Backend {
+            stage: "merge",
+            message,
+        }
+    })?;
     if let Err(e) = validator().validate(&merged) {
         // Locate the error in the stage sources when possible.
-        for (m, src, stage) in [(&vertex, &t.vertex, "vertex"), (&fragment, &t.fragment, "fragment")] {
+        for (m, src, stage) in [
+            (&vertex, &t.vertex, "vertex"),
+            (&fragment, &t.fragment, "fragment"),
+        ] {
             if let Err(e) = validator().validate(m) {
-                return Err(ShaderError::Backend { stage, message: e.emit_to_string(src) });
+                return Err(ShaderError::Backend {
+                    stage,
+                    message: e.emit_to_string(src),
+                });
             }
         }
-        return Err(ShaderError::Backend { stage: "merge", message: format!("{e:?}") });
+        return Err(ShaderError::Backend {
+            stage: "merge",
+            message: format!("{e:?}"),
+        });
     }
     let layout = &t.layout;
     let uniform_block = if layout.uniforms.is_empty() {
@@ -123,11 +151,23 @@ pub fn compile_translated(t: &Translated) -> Result<CompiledProgram, ShaderError
             message: "uniform block missing from the module".into(),
         })?;
         if offsets.len() != layout.uniforms.len() {
-            return Err(ShaderError::Backend { stage: "merge", message: "uniform block member count mismatch".into() });
+            return Err(ShaderError::Backend {
+                stage: "merge",
+                message: "uniform block member count mismatch".into(),
+            });
         }
-        let members =
-            layout.uniforms.iter().zip(offsets).map(|(u, (off, stride))| member(u, off, stride)).collect();
-        Some(UniformBlock { group: BIND_GROUP, binding: UNIFORM_BLOCK_BINDING, size, members })
+        let members = layout
+            .uniforms
+            .iter()
+            .zip(offsets)
+            .map(|(u, (off, stride))| member(u, off, stride))
+            .collect();
+        Some(UniformBlock {
+            group: BIND_GROUP,
+            binding: UNIFORM_BLOCK_BINDING,
+            size,
+            members,
+        })
     };
     let mut textures: Vec<TextureBinding> = Vec::new();
     for s in &layout.samplers {
@@ -151,9 +191,17 @@ pub fn compile_translated(t: &Translated) -> Result<CompiledProgram, ShaderError
     let attributes = layout
         .attributes
         .iter()
-        .map(|a| VertexAttribute { name: a.name.clone(), location: a.location, ty: uniform_type(&a.ty) })
+        .map(|a| VertexAttribute {
+            name: a.name.clone(),
+            location: a.location,
+            ty: uniform_type(&a.ty),
+        })
         .collect();
-    let frame = layout.frame_uniforms.iter().map(|u| u.name.clone()).collect();
+    let frame = layout
+        .frame_uniforms
+        .iter()
+        .map(|u| u.name.clone())
+        .collect();
     Ok(CompiledProgram {
         module: merged,
         reflection: ProgramReflection::new(uniform_block, textures, attributes, frame),

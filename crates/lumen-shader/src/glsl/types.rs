@@ -179,7 +179,11 @@ impl Type {
 
     /// Scalar (n == 1) or vector type.
     pub fn vec(s: Scalar, n: u8) -> Type {
-        if n == 1 { Type::Scalar(s) } else { Type::Vector(s, n) }
+        if n == 1 {
+            Type::Scalar(s)
+        } else {
+            Type::Vector(s, n)
+        }
     }
     /// Base scalar of a scalar, vector or matrix.
     pub fn scalar(&self) -> Option<Scalar> {
@@ -243,7 +247,15 @@ impl fmt::Display for TypeDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ty {
             Type::Array(t, n) => {
-                write!(f, "{}[{}]", TypeDisplay { ty: t, struct_names: self.struct_names }, n)
+                write!(
+                    f,
+                    "{}[{}]",
+                    TypeDisplay {
+                        ty: t,
+                        struct_names: self.struct_names
+                    },
+                    n
+                )
             }
             Type::Struct(id) => f.write_str(&(self.struct_names)(*id)),
             t => f.write_str(&basic_type_name(t)),
@@ -316,17 +328,96 @@ pub fn keyword_type(kw: Kw) -> Option<Type> {
 /// Words that are reserved in GLSL 4.50 / Vulkan GLSL but not in GLSL 3.30, so a
 /// 3.30 shader may use them as identifiers. They are renamed on emission.
 pub const RESERVED_450: &[&str] = &[
-    "sample", "patch", "subroutine", "precise", "coherent", "volatile", "restrict", "readonly",
-    "writeonly", "buffer", "shared", "double", "dvec2", "dvec3", "dvec4", "dmat2", "dmat3",
-    "dmat4", "atomic_uint", "texture1D", "texture2D", "texture3D", "textureCube",
-    "texture2DArray", "texture2DMS", "textureBuffer", "texture1DArray", "textureCubeArray",
-    "sampler", "samplerShadow", "subpassInput", "image1D", "image2D", "image3D", "imageCube",
-    "image2DArray", "image2DMS", "imageBuffer", "samplerCubeArray", "resource", "common",
-    "partition", "active", "filter", "superp", "input", "output", "hvec2", "hvec3", "hvec4",
-    "fvec2", "fvec3", "fvec4", "sizeof", "cast", "namespace", "using", "noinline", "inline",
-    "public", "static", "extern", "external", "interface", "long", "short", "half", "fixed",
-    "unsigned", "goto", "template", "this", "typedef", "union", "enum", "class", "asm",
-    "dmat2x2", "dmat2x3", "dmat2x4", "dmat3x2", "dmat3x3", "dmat3x4", "dmat4x2", "dmat4x3",
-    "dmat4x4", "isampler2D", "usampler2D", "attribute", "varying", "gl_VertexID",
+    "sample",
+    "patch",
+    "subroutine",
+    "precise",
+    "coherent",
+    "volatile",
+    "restrict",
+    "readonly",
+    "writeonly",
+    "buffer",
+    "shared",
+    "double",
+    "dvec2",
+    "dvec3",
+    "dvec4",
+    "dmat2",
+    "dmat3",
+    "dmat4",
+    "atomic_uint",
+    "texture1D",
+    "texture2D",
+    "texture3D",
+    "textureCube",
+    "texture2DArray",
+    "texture2DMS",
+    "textureBuffer",
+    "texture1DArray",
+    "textureCubeArray",
+    "sampler",
+    "samplerShadow",
+    "subpassInput",
+    "image1D",
+    "image2D",
+    "image3D",
+    "imageCube",
+    "image2DArray",
+    "image2DMS",
+    "imageBuffer",
+    "samplerCubeArray",
+    "resource",
+    "common",
+    "partition",
+    "active",
+    "filter",
+    "superp",
+    "input",
+    "output",
+    "hvec2",
+    "hvec3",
+    "hvec4",
+    "fvec2",
+    "fvec3",
+    "fvec4",
+    "sizeof",
+    "cast",
+    "namespace",
+    "using",
+    "noinline",
+    "inline",
+    "public",
+    "static",
+    "extern",
+    "external",
+    "interface",
+    "long",
+    "short",
+    "half",
+    "fixed",
+    "unsigned",
+    "goto",
+    "template",
+    "this",
+    "typedef",
+    "union",
+    "enum",
+    "class",
+    "asm",
+    "dmat2x2",
+    "dmat2x3",
+    "dmat2x4",
+    "dmat3x2",
+    "dmat3x3",
+    "dmat3x4",
+    "dmat4x2",
+    "dmat4x3",
+    "dmat4x4",
+    "isampler2D",
+    "usampler2D",
+    "attribute",
+    "varying",
+    "gl_VertexID",
     "gl_InstanceID",
 ];

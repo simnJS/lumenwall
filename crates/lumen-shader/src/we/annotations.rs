@@ -40,9 +40,18 @@ impl UniformValue {
         match (*self, member.ty) {
             (UniformValue::Float(f), UniformType::FLOAT) => put(buf, 0, f.to_le_bytes()),
             (UniformValue::Int(v), UniformType::INT) => put(buf, 0, v.to_le_bytes()),
-            (UniformValue::Vec2(v), UniformType::VEC2) => v.iter().enumerate().for_each(|(i, f)| put(buf, i, f.to_le_bytes())),
-            (UniformValue::Vec3(v), UniformType::VEC3) => v.iter().enumerate().for_each(|(i, f)| put(buf, i, f.to_le_bytes())),
-            (UniformValue::Vec4(v), UniformType::VEC4) => v.iter().enumerate().for_each(|(i, f)| put(buf, i, f.to_le_bytes())),
+            (UniformValue::Vec2(v), UniformType::VEC2) => v
+                .iter()
+                .enumerate()
+                .for_each(|(i, f)| put(buf, i, f.to_le_bytes())),
+            (UniformValue::Vec3(v), UniformType::VEC3) => v
+                .iter()
+                .enumerate()
+                .for_each(|(i, f)| put(buf, i, f.to_le_bytes())),
+            (UniformValue::Vec4(v), UniformType::VEC4) => v
+                .iter()
+                .enumerate()
+                .for_each(|(i, f)| put(buf, i, f.to_le_bytes())),
             _ => {}
         }
     }
@@ -180,10 +189,16 @@ fn parse_vector(v: &Value, n: usize, exact: bool, warn: &mut dyn FnMut(String)) 
     if (exact && parts.len() != n) || parts.len() < n {
         warn(format!("vector default '{s}' does not have {n} components"));
     }
-    (0..n).map(|i| parts.get(i).map_or(0.0, |p| lenient_float(p))).collect()
+    (0..n)
+        .map(|i| parts.get(i).map_or(0.0, |p| lenient_float(p)))
+        .collect()
 }
 
-fn numeric_default(ty: UniformType, v: Option<&Value>, warn: &mut dyn FnMut(String)) -> UniformValue {
+fn numeric_default(
+    ty: UniformType,
+    v: Option<&Value>,
+    warn: &mut dyn FnMut(String),
+) -> UniformValue {
     let Some(v) = v else {
         return UniformValue::zero(ty).expect("numeric type");
     };
@@ -234,11 +249,19 @@ pub fn interpret(raw: &[&RawAnnotation], warnings: &mut Vec<String>) -> UnitPara
     let mut p = UnitParams::default();
     for a in raw {
         let mut warn = |m: String| warnings.push(format!("annotation of '{}': {m}", a.name));
-        let material_key = a.json.get("material").and_then(Value::as_str).map(str::to_owned);
+        let material_key = a
+            .json
+            .get("material")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         match a.glsl_type.as_str() {
             "sampler2D" | "sampler2DComparison" => {
                 let comparison = a.glsl_type == "sampler2DComparison";
-                let default_texture = a.json.get("default").and_then(Value::as_str).map(str::to_owned);
+                let default_texture = a
+                    .json
+                    .get("default")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 if comparison && a.json.get("default").is_none() {
                     warn("sampler2DComparison without default".into());
                 }
@@ -246,9 +269,17 @@ pub fn interpret(raw: &[&RawAnnotation], warnings: &mut Vec<String>) -> UnitPara
                     uniform: a.name.clone(),
                     slot: sampler_slot(&a.name),
                     default_texture,
-                    combo: a.json.get("combo").and_then(Value::as_str).map(str::to_owned),
+                    combo: a
+                        .json
+                        .get("combo")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                     require: a.json.get("require").and_then(Value::as_object).cloned(),
-                    require_any: a.json.get("requireany").and_then(Value::as_bool).unwrap_or(false),
+                    require_any: a
+                        .json
+                        .get("requireany")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     raw_default: a.json.get("default").cloned(),
                     comparison,
                 });
@@ -260,7 +291,12 @@ pub fn interpret(raw: &[&RawAnnotation], warnings: &mut Vec<String>) -> UnitPara
                         warn("no default value; using zero".into());
                     }
                     let default = numeric_default(ty, dv, &mut warn);
-                    p.uniforms.push(UniformParam { uniform: a.name.clone(), ty, material_key, default });
+                    p.uniforms.push(UniformParam {
+                        uniform: a.name.clone(),
+                        ty,
+                        material_key,
+                        default,
+                    });
                 }
                 None => warn(format!("unsupported annotated type '{t}'")),
             },
@@ -291,7 +327,11 @@ mod tests {
             ann("vec3", "d", r#"{"material":"d","default":"1 0.5 abc"}"#),
             ann("vec4", "e", r#"{"material":"e","default":"1 2 3 4 5"}"#),
             ann("float", "f", r#"{"material":"f","default":true}"#),
-            ann("sampler2D", "g_Texture10", r#"{"default":"util/white","combo":"MASK"}"#),
+            ann(
+                "sampler2D",
+                "g_Texture10",
+                r#"{"default":"util/white","combo":"MASK"}"#,
+            ),
             ann("mat4", "m", r#"{"material":"m"}"#),
         ];
         let refs: Vec<&RawAnnotation> = a.iter().collect();
@@ -317,13 +357,34 @@ mod tests {
     #[test]
     fn constant_conversion_table() {
         use ConstantValue as C;
-        assert_eq!(C::Vec3([1.0, 2.0, 3.0]).to_uniform(UniformType::VEC4), Some(UniformValue::Vec4([1.0, 2.0, 3.0, 0.0])));
-        assert_eq!(C::Float(2.7).to_uniform(UniformType::INT), Some(UniformValue::Int(2)));
-        assert_eq!(C::Float(-2.7).to_uniform(UniformType::INT), Some(UniformValue::Int(-2)));
-        assert_eq!(C::Color([0.5, 0.0, 0.0, 1.0]).to_uniform(UniformType::INT), Some(UniformValue::Int(127)));
-        assert_eq!(C::Bool(true).to_uniform(UniformType::VEC2), Some(UniformValue::Vec2([1.0, 1.0])));
-        assert_eq!(C::Vec2([3.0, 4.0]).to_uniform(UniformType::FLOAT), Some(UniformValue::Float(3.0)));
-        assert_eq!(C::Null.to_uniform(UniformType::VEC3), Some(UniformValue::Vec3([0.0; 3])));
+        assert_eq!(
+            C::Vec3([1.0, 2.0, 3.0]).to_uniform(UniformType::VEC4),
+            Some(UniformValue::Vec4([1.0, 2.0, 3.0, 0.0]))
+        );
+        assert_eq!(
+            C::Float(2.7).to_uniform(UniformType::INT),
+            Some(UniformValue::Int(2))
+        );
+        assert_eq!(
+            C::Float(-2.7).to_uniform(UniformType::INT),
+            Some(UniformValue::Int(-2))
+        );
+        assert_eq!(
+            C::Color([0.5, 0.0, 0.0, 1.0]).to_uniform(UniformType::INT),
+            Some(UniformValue::Int(127))
+        );
+        assert_eq!(
+            C::Bool(true).to_uniform(UniformType::VEC2),
+            Some(UniformValue::Vec2([1.0, 1.0]))
+        );
+        assert_eq!(
+            C::Vec2([3.0, 4.0]).to_uniform(UniformType::FLOAT),
+            Some(UniformValue::Float(3.0))
+        );
+        assert_eq!(
+            C::Null.to_uniform(UniformType::VEC3),
+            Some(UniformValue::Vec3([0.0; 3]))
+        );
         let m = UniformMember {
             name: "x".into(),
             ty: UniformType::VEC2,

@@ -3,7 +3,8 @@
 //! Bound resources with the same `(group, binding)` become one global.
 
 use naga::{
-    Block, Expression, Function, GlobalVariable, Handle, Module, Statement, StructMember, Type, TypeInner,
+    Block, Expression, Function, GlobalVariable, Handle, Module, Statement, StructMember, Type,
+    TypeInner,
 };
 
 struct Maps {
@@ -16,7 +17,9 @@ struct Maps {
 
 fn remap_type(inner: &mut TypeInner, m: &[Handle<Type>]) -> Result<(), String> {
     match inner {
-        TypeInner::Pointer { base, .. } | TypeInner::BindingArray { base, .. } => *base = m[base.index()],
+        TypeInner::Pointer { base, .. } | TypeInner::BindingArray { base, .. } => {
+            *base = m[base.index()]
+        }
         TypeInner::Array { base, size, .. } => {
             if matches!(size, naga::ArraySize::Pending(_)) {
                 return Err("override-sized array".into());
@@ -69,13 +72,23 @@ fn remap_global_expr(e: &mut Expression, m: &Maps) -> Result<(), String> {
             g(left);
             g(right);
         }
-        Expression::Select { condition, accept, reject } => {
+        Expression::Select {
+            condition,
+            accept,
+            reject,
+        } => {
             g(condition);
             g(accept);
             g(reject);
         }
         Expression::Relational { argument, .. } => g(argument),
-        Expression::Math { arg, arg1, arg2, arg3, .. } => {
+        Expression::Math {
+            arg,
+            arg1,
+            arg2,
+            arg3,
+            ..
+        } => {
             g(arg);
             for a in [arg1, arg2, arg3].into_iter().flatten() {
                 g(a);
@@ -94,8 +107,12 @@ fn remap_block(b: &mut Block, m: &Maps) {
                 remap_block(accept, m);
                 remap_block(reject, m);
             }
-            Statement::Switch { cases, .. } => cases.iter_mut().for_each(|c| remap_block(&mut c.body, m)),
-            Statement::Loop { body, continuing, .. } => {
+            Statement::Switch { cases, .. } => {
+                cases.iter_mut().for_each(|c| remap_block(&mut c.body, m))
+            }
+            Statement::Loop {
+                body, continuing, ..
+            } => {
                 remap_block(body, m);
                 remap_block(continuing, m);
             }
@@ -138,39 +155,65 @@ pub fn merge(mut a: Module, b: Module) -> Result<Module, String> {
     }
     for (k, h) in b.special_types.predeclared_types.iter() {
         if !a.special_types.predeclared_types.contains_key(k) {
-            a.special_types.predeclared_types.insert(k.clone(), types[h.index()]);
+            a.special_types
+                .predeclared_types
+                .insert(k.clone(), types[h.index()]);
         }
     }
     // Reserve handles first (items reference each other), then fix them up.
-    let constants: Vec<_> = b.constants.iter().map(|(h, c)| a.constants.append(c.clone(), b.constants.get_span(h))).collect();
+    let constants: Vec<_> = b
+        .constants
+        .iter()
+        .map(|(h, c)| a.constants.append(c.clone(), b.constants.get_span(h)))
+        .collect();
     let gexprs: Vec<_> = b
         .global_expressions
         .iter()
-        .map(|(h, e)| a.global_expressions.append(e.clone(), b.global_expressions.get_span(h)))
+        .map(|(h, e)| {
+            a.global_expressions
+                .append(e.clone(), b.global_expressions.get_span(h))
+        })
         .collect();
     let mut globals = Vec::with_capacity(b.global_variables.len());
     let mut appended_globals = Vec::new();
     for (h, g) in b.global_variables.iter() {
         let shared = g.binding.as_ref().and_then(|rb| {
-            a.global_variables.iter().find(|(_, x)| x.binding.as_ref() == Some(rb)).map(|(ah, x)| (ah, x.ty))
+            a.global_variables
+                .iter()
+                .find(|(_, x)| x.binding.as_ref() == Some(rb))
+                .map(|(ah, x)| (ah, x.ty))
         });
         match shared {
             Some((ah, aty)) => {
                 if aty != types[g.ty.index()] {
-                    return Err(format!("binding {:?} has different types in the two stages", g.binding));
+                    return Err(format!(
+                        "binding {:?} has different types in the two stages",
+                        g.binding
+                    ));
                 }
                 globals.push(ah);
             }
             None => {
-                let nh = a.global_variables.append(g.clone(), b.global_variables.get_span(h));
+                let nh = a
+                    .global_variables
+                    .append(g.clone(), b.global_variables.get_span(h));
                 appended_globals.push(nh);
                 globals.push(nh);
             }
         }
     }
-    let functions: Vec<_> =
-        b.functions.iter().map(|(h, f)| a.functions.append(f.clone(), b.functions.get_span(h))).collect();
-    let m = Maps { types, constants, gexprs, globals, functions };
+    let functions: Vec<_> = b
+        .functions
+        .iter()
+        .map(|(h, f)| a.functions.append(f.clone(), b.functions.get_span(h)))
+        .collect();
+    let m = Maps {
+        types,
+        constants,
+        gexprs,
+        globals,
+        functions,
+    };
     for &h in &m.constants {
         let c = &mut a.constants[h];
         c.ty = m.types[c.ty.index()];
@@ -188,7 +231,10 @@ pub fn merge(mut a: Module, b: Module) -> Result<Module, String> {
         remap_function(&mut a.functions[h], &m)?;
     }
     for ep in b.entry_points {
-        if ep.workgroup_size_overrides.is_some() || ep.task_payload.is_some() || ep.mesh_info.is_some() {
+        if ep.workgroup_size_overrides.is_some()
+            || ep.task_payload.is_some()
+            || ep.mesh_info.is_some()
+        {
             return Err("unsupported entry point features".into());
         }
         let mut ep = ep;

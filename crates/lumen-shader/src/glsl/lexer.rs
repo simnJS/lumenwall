@@ -226,7 +226,12 @@ pub fn lex(src: &str, int: &mut Interner, first_line: u32, out: &mut Vec<Token>)
         }
         match c {
             b'\n' => {
-                out.push(Token { kind: TokKind::Newline, line, space, hs: 0 });
+                out.push(Token {
+                    kind: TokKind::Newline,
+                    line,
+                    space,
+                    hs: 0,
+                });
                 line += 1;
                 space = false;
                 i += 1;
@@ -265,7 +270,12 @@ pub fn lex(src: &str, int: &mut Interner, first_line: u32, out: &mut Vec<Token>)
                     i += 1;
                 }
                 let n = int.intern(&src[s..i]);
-                out.push(Token { kind: TokKind::Ident(n), line, space, hs: 0 });
+                out.push(Token {
+                    kind: TokKind::Ident(n),
+                    line,
+                    space,
+                    hs: 0,
+                });
                 space = false;
             }
             _ if c.is_ascii_digit()
@@ -289,23 +299,43 @@ pub fn lex(src: &str, int: &mut Interner, first_line: u32, out: &mut Vec<Token>)
                     }
                 }
                 let n = int.intern(&src[s..i]);
-                out.push(Token { kind: TokKind::Number(n), line, space, hs: 0 });
+                out.push(Token {
+                    kind: TokKind::Number(n),
+                    line,
+                    space,
+                    hs: 0,
+                });
                 space = false;
             }
             _ if c.is_ascii() => {
                 let rest = &src[i..];
                 if let Some(&(txt, p)) = PUNCTS.iter().find(|(t, _)| rest.starts_with(t)) {
-                    out.push(Token { kind: TokKind::Punct(p), line, space, hs: 0 });
+                    out.push(Token {
+                        kind: TokKind::Punct(p),
+                        line,
+                        space,
+                        hs: 0,
+                    });
                     i += txt.len();
                 } else {
-                    out.push(Token { kind: TokKind::Other(c as char), line, space, hs: 0 });
+                    out.push(Token {
+                        kind: TokKind::Other(c as char),
+                        line,
+                        space,
+                        hs: 0,
+                    });
                     i += 1;
                 }
                 space = false;
             }
             _ => {
                 let ch = src[i..].chars().next().unwrap_or('?');
-                out.push(Token { kind: TokKind::Other(ch), line, space, hs: 0 });
+                out.push(Token {
+                    kind: TokKind::Other(ch),
+                    line,
+                    space,
+                    hs: 0,
+                });
                 i += ch.len_utf8();
                 space = false;
             }

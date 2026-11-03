@@ -25,7 +25,10 @@ const FRAME_FIELDS: &[(&str, u32)] = &[
 ];
 const FRAME_SIZE: u32 = 944;
 
-fn struct_members(m: &Module, ty: naga::Handle<naga::Type>) -> Option<(&[naga::StructMember], u32)> {
+fn struct_members(
+    m: &Module,
+    ty: naga::Handle<naga::Type>,
+) -> Option<(&[naga::StructMember], u32)> {
     match &m.types[ty].inner {
         TypeInner::Struct { members, span } => Some((members, *span)),
         _ => None,
@@ -36,16 +39,25 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
     let m = &shader.program.module;
     let r = shader.reflection();
     // Entry points.
-    let vep = m.entry_points.iter().find(|e| e.name == VERTEX_ENTRY && e.stage == ShaderStage::Vertex);
-    let fep = m.entry_points.iter().find(|e| e.name == FRAGMENT_ENTRY && e.stage == ShaderStage::Fragment);
-    let (Some(vep), Some(fep)) = (vep, fep) else { return Err("missing vs_main / fs_main".into()) };
+    let vep = m
+        .entry_points
+        .iter()
+        .find(|e| e.name == VERTEX_ENTRY && e.stage == ShaderStage::Vertex);
+    let fep = m
+        .entry_points
+        .iter()
+        .find(|e| e.name == FRAGMENT_ENTRY && e.stage == ShaderStage::Fragment);
+    let (Some(vep), Some(fep)) = (vep, fep) else {
+        return Err("missing vs_main / fs_main".into());
+    };
     // Bound resources.
     let mut slots = 0u8;
     for (_, g) in m.global_variables.iter() {
         let Some(rb) = g.binding else { continue };
         match (rb.group, rb.binding, g.space) {
             (0, 0, AddressSpace::Uniform) => {
-                let (members, span) = struct_members(m, g.ty).ok_or("pass block is not a struct")?;
+                let (members, span) =
+                    struct_members(m, g.ty).ok_or("pass block is not a struct")?;
                 let b = r.uniform_block.as_ref().ok_or("pass block not reflected")?;
                 if b.size != span || b.members.len() != members.len() {
                     return Err("pass block reflection differs from the module".into());
@@ -57,7 +69,8 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
                 }
             }
             (0, 1, AddressSpace::Uniform) => {
-                let (members, span) = struct_members(m, g.ty).ok_or("frame block is not a struct")?;
+                let (members, span) =
+                    struct_members(m, g.ty).ok_or("frame block is not a struct")?;
                 if span != FRAME_SIZE {
                     return Err(format!("frame block size {span}"));
                 }
@@ -66,7 +79,10 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
                     if let Some(f) = FRAME_FIELDS.iter().find(|f| f.0 == name)
                         && f.1 != mm.offset
                     {
-                        return Err(format!("frame member {name} at {} instead of {}", mm.offset, f.1));
+                        return Err(format!(
+                            "frame member {name} at {} instead of {}",
+                            mm.offset, f.1
+                        ));
                     }
                 }
                 for u in &r.frame_uniforms {
@@ -82,11 +98,17 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
                         TypeInner::Image {
                             dim: ImageDimension::D2 | ImageDimension::D3,
                             arrayed: false,
-                            class: ImageClass::Sampled { kind: naga::ScalarKind::Float, multi: false }
+                            class: ImageClass::Sampled {
+                                kind: naga::ScalarKind::Float,
+                                multi: false
+                            }
                         }
                     )
                 } else {
-                    matches!(m.types[g.ty].inner, TypeInner::Sampler { comparison: false })
+                    matches!(
+                        m.types[g.ty].inner,
+                        TypeInner::Sampler { comparison: false }
+                    )
                 };
                 if !ok {
                     return Err(format!("@group(1) @binding({b}) has the wrong type"));
@@ -101,7 +123,11 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
         return Err(format!("slots {slots:#b} vs reflection {reflected:#b}"));
     }
     if r.uses_frame_block()
-        != m.global_variables.iter().any(|(_, g)| g.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 1))
+        != m.global_variables.iter().any(|(_, g)| {
+            g.binding
+                .as_ref()
+                .is_some_and(|b| b.group == 0 && b.binding == 1)
+        })
     {
         return Err("frame block presence differs".into());
     }
@@ -110,13 +136,19 @@ pub fn check_render_contract(shader: &PassShader, label: &str) -> Result<(), Str
         if let Some(Binding::Location { location, .. }) = a.binding {
             // Names match except for GLSL 4.50 keywords renamed on emission.
             let name = a.name.as_deref().unwrap_or("");
-            if !r.attributes.iter().any(|x| x.location == location && (x.name == name || format!("{}_l", x.name) == name)) {
+            if !r.attributes.iter().any(|x| {
+                x.location == location && (x.name == name || format!("{}_l", x.name) == name)
+            }) {
                 return Err(format!("vertex input {name} at {location} not reflected"));
             }
         }
     }
     // One fragment output at location 0.
-    let res = fep.function.result.as_ref().ok_or("fragment entry point without output")?;
+    let res = fep
+        .function
+        .result
+        .as_ref()
+        .ok_or("fragment entry point without output")?;
     let locations: Vec<u32> = match &res.binding {
         Some(Binding::Location { location, .. }) => vec![*location],
         _ => struct_members(m, res.ty)
@@ -154,23 +186,28 @@ mod renderer {
 
     fn gpu() -> Option<&'static GpuContext> {
         static CTX: OnceLock<Option<GpuContext>> = OnceLock::new();
-        CTX.get_or_init(|| match GpuContext::new_headless(&ContextOptions::default()) {
-            Ok(c) => {
-                eprintln!("render contract: wgpu modules are created on a real device");
-                Some(c)
-            }
-            Err(e) => {
-                eprintln!("render contract: no GPU adapter ({e}); wgpu module creation skipped");
-                None
-            }
-        })
+        CTX.get_or_init(
+            || match GpuContext::new_headless(&ContextOptions::default()) {
+                Ok(c) => {
+                    eprintln!("render contract: wgpu modules are created on a real device");
+                    Some(c)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "render contract: no GPU adapter ({e}); wgpu module creation skipped"
+                    );
+                    None
+                }
+            },
+        )
         .as_ref()
     }
 
     pub fn check(shader: &PassShader, label: &str) -> Result<(), String> {
         let m = &shader.program.module;
         let r = shader.reflection();
-        let iface = reflect(m, VERTEX_ENTRY, label).map_err(|e| format!("renderer reflection: {e}"))?;
+        let iface =
+            reflect(m, VERTEX_ENTRY, label).map_err(|e| format!("renderer reflection: {e}"))?;
         if iface.uniform_size != r.uniform_block.as_ref().map(|b| b.size) {
             return Err("renderer sees another pass block size".into());
         }

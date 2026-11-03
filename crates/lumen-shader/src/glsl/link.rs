@@ -88,7 +88,9 @@ pub const TEXTURE_GROUP: u32 = 1;
 /// Texture unit of a sampler name (spec 03 §8.1).
 pub fn texture_unit(name: &str) -> u32 {
     match name.strip_prefix("g_Texture") {
-        Some(d) if d.len() == 1 && matches!(d.as_bytes()[0], b'0'..=b'7') => (d.as_bytes()[0] - b'0') as u32,
+        Some(d) if d.len() == 1 && matches!(d.as_bytes()[0], b'0'..=b'7') => {
+            (d.as_bytes()[0] - b'0') as u32
+        }
         _ => 0,
     }
 }
@@ -100,9 +102,15 @@ fn frame_candidate(u: &UniformSlot) -> bool {
         "g_PointerPosition" | "g_PointerPositionLast" | "g_TexelSize" | "g_TexelSizeHalf" => {
             u.storage == UStorage::Plain && u.ty == Type::Vector(Scalar::Float, 2)
         }
-        "g_AudioSpectrum16Left" | "g_AudioSpectrum16Right" => u.storage == UStorage::Packed(Scalar::Float, 16),
-        "g_AudioSpectrum32Left" | "g_AudioSpectrum32Right" => u.storage == UStorage::Packed(Scalar::Float, 32),
-        "g_AudioSpectrum64Left" | "g_AudioSpectrum64Right" => u.storage == UStorage::Packed(Scalar::Float, 64),
+        "g_AudioSpectrum16Left" | "g_AudioSpectrum16Right" => {
+            u.storage == UStorage::Packed(Scalar::Float, 16)
+        }
+        "g_AudioSpectrum32Left" | "g_AudioSpectrum32Right" => {
+            u.storage == UStorage::Packed(Scalar::Float, 32)
+        }
+        "g_AudioSpectrum64Left" | "g_AudioSpectrum64Right" => {
+            u.storage == UStorage::Packed(Scalar::Float, 64)
+        }
         _ => false,
     }
 }
@@ -147,7 +155,11 @@ fn scan_globals(tu: &TypedUnit, f: &mut dyn FnMut(u32, bool)) {
     }
     fn stmt(s: &Stmt, f: &mut dyn FnMut(u32, bool)) {
         match s {
-            Stmt::Decl(d) => d.vars.iter().filter_map(|v| v.init.as_ref()).for_each(|e| expr(e, false, f)),
+            Stmt::Decl(d) => d
+                .vars
+                .iter()
+                .filter_map(|v| v.init.as_ref())
+                .for_each(|e| expr(e, false, f)),
             Stmt::Expr(e) | Stmt::Case(e) => expr(e, false, f),
             Stmt::Block(v) | Stmt::Switch(_, v) => {
                 if let Stmt::Switch(c, _) = s {
@@ -166,7 +178,12 @@ fn scan_globals(tu: &TypedUnit, f: &mut dyn FnMut(u32, bool)) {
                 expr(c, false, f);
                 stmt(b, f);
             }
-            Stmt::For { init, cond, step, body } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 if let Some(i) = init {
                     stmt(i, f);
                 }
@@ -184,7 +201,11 @@ fn scan_globals(tu: &TypedUnit, f: &mut dyn FnMut(u32, bool)) {
     }
     for item in &tu.unit.items {
         match item {
-            Item::Decl(d) => d.vars.iter().filter_map(|v| v.init.as_ref()).for_each(|e| expr(e, false, f)),
+            Item::Decl(d) => d
+                .vars
+                .iter()
+                .filter_map(|v| v.init.as_ref())
+                .for_each(|e| expr(e, false, f)),
             Item::Function(fd) if !fd.skip && tu.reachable[fd.fn_index as usize] => {
                 if let Some(b) = &fd.body {
                     b.iter().for_each(|s| stmt(s, f));
@@ -195,7 +216,12 @@ fn scan_globals(tu: &TypedUnit, f: &mut dyn FnMut(u32, bool)) {
     }
 }
 
-pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool) -> Result<ProgramLayout, LinkError> {
+pub fn link(
+    vs: &TypedUnit,
+    fs: &TypedUnit,
+    int: &Interner,
+    frame_globals: bool,
+) -> Result<ProgramLayout, LinkError> {
     let mut layout = ProgramLayout::default();
     let tn = |t: &Type| basic_type_name(t);
 
@@ -248,7 +274,11 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
         });
         loc += ty.location_count();
     }
-    let mut missing: Vec<(&str, u32)> = fs_inputs.iter().filter(|(_, g)| !matched.contains(g)).map(|(n, g)| (*n, *g)).collect();
+    let mut missing: Vec<(&str, u32)> = fs_inputs
+        .iter()
+        .filter(|(_, g)| !matched.contains(g))
+        .map(|(n, g)| (*n, *g))
+        .collect();
     missing.sort_by_key(|m| m.1);
     for (name, g) in missing {
         let gi = &fs.globals[g as usize];
@@ -282,15 +312,22 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
     }
 
     // Fragment outputs: `out_FragColor` first.
-    let mut outs: Vec<u32> =
-        (0..fs.globals.len() as u32).filter(|&g| fs.globals[g as usize].storage == GStorage::Out).collect();
+    let mut outs: Vec<u32> = (0..fs.globals.len() as u32)
+        .filter(|&g| fs.globals[g as usize].storage == GStorage::Out)
+        .collect();
     outs.sort_by_key(|&g| int.get(fs.globals[g as usize].name) != "out_FragColor");
     if outs.len() > 1 {
-        return Err(LinkError("only one fragment output (`gl_FragColor`) is supported".into()));
+        return Err(LinkError(
+            "only one fragment output (`gl_FragColor`) is supported".into(),
+        ));
     }
     for g in outs {
         let t = fs.globals[g as usize].ty.clone();
-        layout.frag_outputs.push(OutputSlot { ty: t, location: 0, global: g });
+        layout.frag_outputs.push(OutputSlot {
+            ty: t,
+            location: 0,
+            global: g,
+        });
     }
 
     // Uniforms and samplers, shared by both stages.
@@ -315,9 +352,15 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
                     Some(&i) => {
                         let s = &mut layout.samplers[i];
                         if s.ty != gi.ty {
-                            return Err(LinkError(format!("sampler '{name}' has different types between stages")));
+                            return Err(LinkError(format!(
+                                "sampler '{name}' has different types between stages"
+                            )));
                         }
-                        if stage == Stage::Vertex { set(&mut s.vertex) } else { set(&mut s.fragment) }
+                        if stage == Stage::Vertex {
+                            set(&mut s.vertex)
+                        } else {
+                            set(&mut s.fragment)
+                        }
                     }
                     None => {
                         samp_index.insert(name.clone(), layout.samplers.len());
@@ -334,14 +377,22 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
                             vertex: None,
                             fragment: None,
                         };
-                        if stage == Stage::Vertex { set(&mut s.vertex) } else { set(&mut s.fragment) }
+                        if stage == Stage::Vertex {
+                            set(&mut s.vertex)
+                        } else {
+                            set(&mut s.fragment)
+                        }
                         layout.samplers.push(s);
                     }
                 }
                 continue;
             }
-            if matches!(gi.ty, Type::Struct(_)) || matches!(&gi.ty, Type::Array(e, _) if matches!(**e, Type::Struct(_) | Type::Array(..))) {
-                return Err(LinkError(format!("uniform '{name}' of struct type is not supported")));
+            if matches!(gi.ty, Type::Struct(_))
+                || matches!(&gi.ty, Type::Array(e, _) if matches!(**e, Type::Struct(_) | Type::Array(..)))
+            {
+                return Err(LinkError(format!(
+                    "uniform '{name}' of struct type is not supported"
+                )));
             }
             *whole_use.entry(name.clone()).or_default() |= whole[g];
             match uni_index.get(&name) {
@@ -355,12 +406,26 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
                             tn(&gi.ty)
                         ))
                     })?;
-                    if stage == Stage::Vertex { set(&mut u.vertex) } else { set(&mut u.fragment) }
+                    if stage == Stage::Vertex {
+                        set(&mut u.vertex)
+                    } else {
+                        set(&mut u.fragment)
+                    }
                 }
                 None => {
                     uni_index.insert(name.clone(), layout.uniforms.len());
-                    let mut u = UniformSlot { name, ty: gi.ty.clone(), storage: UStorage::Plain, vertex: None, fragment: None };
-                    if stage == Stage::Vertex { set(&mut u.vertex) } else { set(&mut u.fragment) }
+                    let mut u = UniformSlot {
+                        name,
+                        ty: gi.ty.clone(),
+                        storage: UStorage::Plain,
+                        vertex: None,
+                        fragment: None,
+                    };
+                    if stage == Stage::Vertex {
+                        set(&mut u.vertex)
+                    } else {
+                        set(&mut u.fragment)
+                    }
                     layout.uniforms.push(u);
                 }
             }
@@ -368,21 +433,31 @@ pub fn link(vs: &TypedUnit, fs: &TypedUnit, int: &Interner, frame_globals: bool)
     }
     for u in layout.uniforms.iter_mut() {
         u.storage = match &u.ty {
-            t if t.scalar() == Some(Scalar::Bool) && t.is_scalar_or_vector() => UStorage::BoolAsUint,
+            t if t.scalar() == Some(Scalar::Bool) && t.is_scalar_or_vector() => {
+                UStorage::BoolAsUint
+            }
             Type::Matrix(c, 2) => UStorage::Mat2Rows(*c),
             Type::Array(e, n) if !whole_use.get(&u.name).copied().unwrap_or(true) => match **e {
-                Type::Scalar(s @ (Scalar::Float | Scalar::Int | Scalar::Uint)) => UStorage::Packed(s, *n),
-                Type::Scalar(Scalar::Bool) => return Err(LinkError(format!("bool array uniform '{}'", u.name))),
+                Type::Scalar(s @ (Scalar::Float | Scalar::Int | Scalar::Uint)) => {
+                    UStorage::Packed(s, *n)
+                }
+                Type::Scalar(Scalar::Bool) => {
+                    return Err(LinkError(format!("bool array uniform '{}'", u.name)));
+                }
                 _ => UStorage::Plain,
             },
-            Type::Array(e, _) if matches!(**e, Type::Matrix(_, 2)) || e.scalar() == Some(Scalar::Bool) => {
+            Type::Array(e, _)
+                if matches!(**e, Type::Matrix(_, 2)) || e.scalar() == Some(Scalar::Bool) =>
+            {
                 return Err(LinkError(format!("unsupported array uniform '{}'", u.name)));
             }
             _ => UStorage::Plain,
         };
     }
     if frame_globals {
-        let (frame, pass): (Vec<_>, Vec<_>) = std::mem::take(&mut layout.uniforms).into_iter().partition(frame_candidate);
+        let (frame, pass): (Vec<_>, Vec<_>) = std::mem::take(&mut layout.uniforms)
+            .into_iter()
+            .partition(frame_candidate);
         layout.uniforms = pass;
         layout.frame_uniforms = frame;
     }

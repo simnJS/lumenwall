@@ -49,13 +49,19 @@ impl DiskCache {
     }
 
     pub fn store(&self, key: &blake3::Hash, program: &CompiledProgram) -> io::Result<()> {
-        let payload = postcard::to_allocvec(program).map_err(|e| io::Error::other(e.to_string()))?;
+        let payload =
+            postcard::to_allocvec(program).map_err(|e| io::Error::other(e.to_string()))?;
         let mut data = Vec::with_capacity(payload.len() + 40);
         data.extend_from_slice(MAGIC);
         data.extend_from_slice(blake3::hash(&payload).as_bytes());
         data.extend_from_slice(&payload);
         let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = self.dir.join(format!(".{}.{}.{}.tmp", key.to_hex(), std::process::id(), n));
+        let tmp = self.dir.join(format!(
+            ".{}.{}.{}.tmp",
+            key.to_hex(),
+            std::process::id(),
+            n
+        ));
         fs::write(&tmp, &data)?;
         let r = fs::rename(&tmp, self.path(key));
         if r.is_err() {

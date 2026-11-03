@@ -17,7 +17,10 @@ pub struct PpError {
 }
 
 fn err<T>(line: u32, msg: impl Into<String>) -> Result<T, PpError> {
-    Err(PpError { line, msg: msg.into() })
+    Err(PpError {
+        line,
+        msg: msg.into(),
+    })
 }
 
 struct Macro {
@@ -72,11 +75,19 @@ impl<'i> Preprocessor<'i> {
         if let Some(t) = toks.first_mut() {
             t.space = false;
         }
-        self.macros.insert(n, Rc::new(Macro { params: None, body: toks }));
+        self.macros.insert(
+            n,
+            Rc::new(Macro {
+                params: None,
+                body: toks,
+            }),
+        );
     }
 
     pub fn is_defined(&self, name: &str) -> bool {
-        self.int.lookup(name).is_some_and(|n| self.macros.contains_key(&n))
+        self.int
+            .lookup(name)
+            .is_some_and(|n| self.macros.contains_key(&n))
     }
 
     /// Runs the preprocessor over `src`; returns the token stream without newlines.
@@ -184,7 +195,11 @@ impl<'i> Preprocessor<'i> {
                     return err(lno, "#elif after #else");
                 }
                 let (parent, taken) = (c.parent_active, c.taken);
-                let value = if parent && !taken { self.eval_if(rest, lno)? != 0 } else { false };
+                let value = if parent && !taken {
+                    self.eval_if(rest, lno)? != 0
+                } else {
+                    false
+                };
                 let c = conds.last_mut().expect("checked");
                 c.active = parent && !taken && value;
                 c.taken |= value;
@@ -231,7 +246,10 @@ impl<'i> Preprocessor<'i> {
         };
         let mut i = 1;
         let mut params = None;
-        if rest.get(1).is_some_and(|t| t.is_punct(P::LParen) && !t.space) {
+        if rest
+            .get(1)
+            .is_some_and(|t| t.is_punct(P::LParen) && !t.space)
+        {
             let mut ps = Vec::new();
             i = 2;
             loop {
@@ -302,8 +320,11 @@ impl<'i> Preprocessor<'i> {
             return a;
         }
         let bb = self.hidesets[b as usize].clone();
-        let v: Vec<Name> =
-            self.hidesets[a as usize].iter().copied().filter(|n| bb.binary_search(n).is_ok()).collect();
+        let v: Vec<Name> = self.hidesets[a as usize]
+            .iter()
+            .copied()
+            .filter(|n| bb.binary_search(n).is_ok())
+            .collect();
         self.hs_intern(v)
     }
 
@@ -322,7 +343,10 @@ impl<'i> Preprocessor<'i> {
             };
             if name == self.name_line {
                 let n = self.int.intern(&t.line.to_string());
-                out.push(Token { kind: TokKind::Number(n), ..t });
+                out.push(Token {
+                    kind: TokKind::Number(n),
+                    ..t
+                });
                 continue;
             }
             let Some(m) = self.macros.get(&name).cloned() else {
@@ -427,7 +451,11 @@ impl<'i> Preprocessor<'i> {
             }
             if let Some(p) = param_index(&t) {
                 let next_paste = body.get(i + 1).is_some_and(|n| n.is_punct(P::HashHash));
-                let mut a = if next_paste { args[p].clone() } else { self.expand(args[p].clone())? };
+                let mut a = if next_paste {
+                    args[p].clone()
+                } else {
+                    self.expand(args[p].clone())?
+                };
                 if let Some(f) = a.first_mut() {
                     f.space = t.space;
                 }
@@ -455,7 +483,11 @@ impl<'i> Preprocessor<'i> {
         if toks.len() != 1 {
             return err(line, format!("'##' produced an invalid token '{s}'"));
         }
-        Ok(Token { space: a.space, hs: 0, ..toks[0] })
+        Ok(Token {
+            space: a.space,
+            hs: 0,
+            ..toks[0]
+        })
     }
 
     // ---- #if evaluation --------------------------------------------------
@@ -482,7 +514,10 @@ impl<'i> Preprocessor<'i> {
                     return err(lno, "'defined' expects an identifier");
                 };
                 let d = self.macros.contains_key(&n) || n == self.name_line;
-                pre.push(Token { kind: TokKind::Number(if d { one } else { zero }), ..t });
+                pre.push(Token {
+                    kind: TokKind::Number(if d { one } else { zero }),
+                    ..t
+                });
                 i += adv;
                 continue;
             }
@@ -490,7 +525,12 @@ impl<'i> Preprocessor<'i> {
             i += 1;
         }
         let expanded = self.expand(pre)?;
-        let mut ev = IfEval { toks: &expanded, pos: 0, int: self.int, line: lno };
+        let mut ev = IfEval {
+            toks: &expanded,
+            pos: 0,
+            int: self.int,
+            line: lno,
+        };
         let v = ev.ternary()?;
         if ev.pos != expanded.len() {
             return err(lno, "unexpected tokens in #if expression");
@@ -572,7 +612,11 @@ impl IfEval<'_> {
                     if rhs == 0 {
                         return err(self.line, "division by zero in #if expression");
                     }
-                    if p == P::Slash { lhs.wrapping_div(rhs) } else { lhs.wrapping_rem(rhs) }
+                    if p == P::Slash {
+                        lhs.wrapping_div(rhs)
+                    } else {
+                        lhs.wrapping_rem(rhs)
+                    }
                 }
                 _ => unreachable!(),
             };
@@ -607,8 +651,10 @@ impl IfEval<'_> {
             }
             Some(TokKind::Number(n)) => {
                 self.pos += 1;
-                parse_pp_int(self.int.get(n))
-                    .ok_or_else(|| PpError { line: self.line, msg: "invalid number in #if".into() })
+                parse_pp_int(self.int.get(n)).ok_or_else(|| PpError {
+                    line: self.line,
+                    msg: "invalid number in #if".into(),
+                })
             }
             Some(TokKind::Ident(_)) => {
                 // Undefined identifiers evaluate to 0 (spec 03 §5.3: `#if MASK` is 0).

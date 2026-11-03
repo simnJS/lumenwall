@@ -30,7 +30,11 @@ pub type TextureStacks = BTreeMap<u32, Vec<TextureCandidate>>;
 
 /// Builds the stacks. Unresolvable names are the caller's to drop (§8.2: a
 /// missing texture is not stacked, a missing `bind` target is an error).
-pub fn texture_stacks(vertex: &[SamplerParam], fragment: &[SamplerParam], src: &TextureSources) -> TextureStacks {
+pub fn texture_stacks(
+    vertex: &[SamplerParam],
+    fragment: &[SamplerParam],
+    src: &TextureSources,
+) -> TextureStacks {
     let mut stacks = TextureStacks::new();
     // 1. Vertex defaults replace the stack.
     for s in vertex {
@@ -41,20 +45,35 @@ pub fn texture_stacks(vertex: &[SamplerParam], fragment: &[SamplerParam], src: &
     // 2. Fragment defaults.
     for s in fragment {
         if let (Some(slot), Some(d)) = (s.slot, &s.default_texture) {
-            stacks.entry(slot).or_default().push(TextureCandidate::Named(d.clone()));
+            stacks
+                .entry(slot)
+                .or_default()
+                .push(TextureCandidate::Named(d.clone()));
         }
     }
     // 3–6. Material and override maps.
-    for list in [&src.material_textures, &src.material_usertextures, &src.override_textures, &src.override_usertextures] {
+    for list in [
+        &src.material_textures,
+        &src.material_usertextures,
+        &src.override_textures,
+        &src.override_usertextures,
+    ] {
         for (slot, name) in list.iter().enumerate() {
             if let Some(n) = name.as_ref().filter(|n| !n.is_empty()) {
-                stacks.entry(slot as u32).or_default().push(TextureCandidate::Named(n.clone()));
+                stacks
+                    .entry(slot as u32)
+                    .or_default()
+                    .push(TextureCandidate::Named(n.clone()));
             }
         }
     }
     // 7. Binds.
     for (slot, name) in &src.binds {
-        let c = if name == "previous" { TextureCandidate::Previous } else { TextureCandidate::Named(name.clone()) };
+        let c = if name == "previous" {
+            TextureCandidate::Previous
+        } else {
+            TextureCandidate::Named(name.clone())
+        };
         stacks.entry(*slot).or_default().push(c);
     }
     stacks
@@ -62,11 +81,19 @@ pub fn texture_stacks(vertex: &[SamplerParam], fragment: &[SamplerParam], src: &
 
 /// §7.3: the uniform bound to a constant key — the first vertex annotation with
 /// that material key, else the first fragment one.
-pub fn find_constant<'a>(vertex: &'a [UniformParam], fragment: &'a [UniformParam], key: &str) -> Option<&'a UniformParam> {
+pub fn find_constant<'a>(
+    vertex: &'a [UniformParam],
+    fragment: &'a [UniformParam],
+    key: &str,
+) -> Option<&'a UniformParam> {
     vertex
         .iter()
         .find(|p| p.material_key.as_deref() == Some(key))
-        .or_else(|| fragment.iter().find(|p| p.material_key.as_deref() == Some(key)))
+        .or_else(|| {
+            fragment
+                .iter()
+                .find(|p| p.material_key.as_deref() == Some(key))
+        })
 }
 
 #[cfg(test)]
@@ -94,7 +121,11 @@ mod tests {
             binds: vec![(0, "previous".into()), (2, "_rt_x".into())],
             ..Default::default()
         };
-        let s = texture_stacks(&[sp("g_Texture1", 1, "vdef")], &[sp("g_Texture1", 1, "fdef")], &src);
+        let s = texture_stacks(
+            &[sp("g_Texture1", 1, "vdef")],
+            &[sp("g_Texture1", 1, "fdef")],
+            &src,
+        );
         let n = |s: &str| TextureCandidate::Named(s.into());
         assert_eq!(s[&1], vec![n("vdef"), n("fdef"), n("mat1"), n("ovr1")]);
         assert_eq!(s[&0], vec![TextureCandidate::Previous]);

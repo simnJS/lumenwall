@@ -34,7 +34,10 @@ pub enum UniformType {
     Scalar(ScalarKind),
     Vector(ScalarKind, u8),
     /// Column-major float matrix; every column starts on a 16-byte boundary.
-    Matrix { columns: u8, rows: u8 },
+    Matrix {
+        columns: u8,
+        rows: u8,
+    },
     /// Aggregate the renderer does not interpret.
     Other,
 }
@@ -45,8 +48,14 @@ impl UniformType {
     pub const VEC2: UniformType = UniformType::Vector(ScalarKind::Float, 2);
     pub const VEC3: UniformType = UniformType::Vector(ScalarKind::Float, 3);
     pub const VEC4: UniformType = UniformType::Vector(ScalarKind::Float, 4);
-    pub const MAT3: UniformType = UniformType::Matrix { columns: 3, rows: 3 };
-    pub const MAT4: UniformType = UniformType::Matrix { columns: 4, rows: 4 };
+    pub const MAT3: UniformType = UniformType::Matrix {
+        columns: 3,
+        rows: 3,
+    };
+    pub const MAT4: UniformType = UniformType::Matrix {
+        columns: 4,
+        rows: 4,
+    };
 
     /// Byte distance between matrix columns.
     pub const MATRIX_COLUMN_STRIDE: u32 = 16;
@@ -248,12 +257,18 @@ impl ProgramReflection {
 
     /// Uniform by name (load time only).
     pub fn uniform(&self, name: &str) -> Option<&UniformMember> {
-        self.uniform_block.as_ref()?.members.iter().find(|m| m.name == name)
+        self.uniform_block
+            .as_ref()?
+            .members
+            .iter()
+            .find(|m| m.name == name)
     }
 
     /// Slot read by a sampler uniform.
     pub fn texture(&self, name: &str) -> Option<&TextureBinding> {
-        self.textures.iter().find(|t| t.names.iter().any(|n| n == name))
+        self.textures
+            .iter()
+            .find(|t| t.names.iter().any(|n| n == name))
     }
 
     pub fn uses_frame_block(&self) -> bool {

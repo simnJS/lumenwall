@@ -66,16 +66,22 @@ fn include_block(
         return Ok(format!("// [lumen] include not found: {name}\n"));
     };
     if stack.contains(&path) {
-        return Err(ShaderError::Preprocess(format!("include cycle through '{path}'")));
+        return Err(ShaderError::Preprocess(format!(
+            "include cycle through '{path}'"
+        )));
     }
     if stack.len() >= MAX_INCLUDE_DEPTH {
-        return Err(ShaderError::Preprocess(format!("includes nested too deeply at '{path}'")));
+        return Err(ShaderError::Preprocess(format!(
+            "includes nested too deeply at '{path}'"
+        )));
     }
     stack.push(path);
     let inner = expand_nested(fs, &content, stack, warnings)?;
     stack.pop();
     let nl = if inner.ends_with('\n') { "" } else { "\n" };
-    Ok(format!("// [lumen] begin include {name}\n{inner}{nl}// [lumen] end include {name}\n"))
+    Ok(format!(
+        "// [lumen] begin include {name}\n{inner}{nl}// [lumen] end include {name}\n"
+    ))
 }
 
 /// §4.1.2: every line containing `#include` is replaced from the directive to
@@ -109,7 +115,9 @@ fn insertion_point(text: &str) -> Result<usize, ShaderError> {
     let mut from = 0;
     let main_pos = loop {
         let Some(i) = text[from..].find(" main") else {
-            return Err(ShaderError::Preprocess("no recognisable main() function".into()));
+            return Err(ShaderError::Preprocess(
+                "no recognisable main() function".into(),
+            ));
         };
         let p = from + i;
         match b.get(p + 5) {
@@ -119,7 +127,10 @@ fn insertion_point(text: &str) -> Result<usize, ShaderError> {
     };
     let main_line = line_start(text, main_pos);
     let before = &text[..main_pos];
-    let k = ["attribute", "varying", "uniform"].iter().filter_map(|w| before.rfind(w)).max();
+    let k = ["attribute", "varying", "uniform"]
+        .iter()
+        .filter_map(|w| before.rfind(w))
+        .max();
     let mut p = match k {
         Some(k) => next_line_start(text, k),
         None => main_line,
@@ -181,7 +192,9 @@ fn apply_requires(text: &mut String, warnings: &mut Vec<String>) {
 fn scan_lines(text: &str, warnings: &mut Vec<String>) -> Vec<ScanItem> {
     let mut items = Vec::new();
     for line in text.split_inclusive('\n') {
-        let Some(l) = line.strip_suffix('\n') else { continue };
+        let Some(l) = line.strip_suffix('\n') else {
+            continue;
+        };
         if let Some(p) = l.find("// [COMBO] ") {
             match serde_json::from_str::<Value>(&l[p + 11..]) {
                 Ok(Value::Object(m)) => items.push(ScanItem::Combo(m)),
@@ -198,13 +211,19 @@ fn scan_lines(text: &str, warnings: &mut Vec<String>) -> Vec<ScanItem> {
             continue;
         }
         let before = &l[..semi];
-        let Some(last_sp) = before.rfind(' ') else { continue };
+        let Some(last_sp) = before.rfind(' ') else {
+            continue;
+        };
         let prev = before[..last_sp].rfind(' ').map_or(0, |i| i + 1);
         let name = before[last_sp + 1..].to_string();
         let glsl_type = before[prev..last_sp].to_string();
         let json_txt = &l[l.find("//").expect("contains //") + 2..];
         match serde_json::from_str::<Value>(json_txt) {
-            Ok(Value::Object(json)) => items.push(ScanItem::Annotation(RawAnnotation { glsl_type, name, json })),
+            Ok(Value::Object(json)) => items.push(ScanItem::Annotation(RawAnnotation {
+                glsl_type,
+                name,
+                json,
+            })),
             _ => warnings.push(format!("invalid uniform annotation: {}", l.trim())),
         }
     }
@@ -233,7 +252,11 @@ pub fn preprocess_unit(fs: &dyn ShaderFs, source: &str) -> Result<ScannedUnit, S
     apply_requires(&mut text, &mut warnings);
     let items = scan_lines(&text, &mut warnings);
     let body = text.replace("gl_FragColor", "out_FragColor");
-    Ok(ScannedUnit { body, items, warnings })
+    Ok(ScannedUnit {
+        body,
+        items,
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -286,7 +309,8 @@ mod tests {
     #[test]
     fn require_lighting() {
         let fs = MemFs::default();
-        let u = preprocess_unit(&fs, "#require LightingV1\n#require Other\nvoid main() {}\n").unwrap();
+        let u =
+            preprocess_unit(&fs, "#require LightingV1\n#require Other\nvoid main() {}\n").unwrap();
         assert!(u.body.contains("vec3 PerformLighting_V1("));
         assert!(u.body.contains("//equire LightingV1"));
         assert!(u.body.contains("//equire Other"));

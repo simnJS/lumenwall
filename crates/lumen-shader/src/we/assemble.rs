@@ -15,7 +15,9 @@ fn header(stage: Stage, negate_ddy: bool) -> String {
     h.push_str("#define max(a, b) max(b, a)\n");
     h.push_str("#define lerp mix\n#define frac fract\n");
     h.push_str("#define saturate(x) clamp(x, 0.0, 1.0)\n");
-    h.push_str("#define CAST2(x) (vec2(x))\n#define CAST3(x) (vec3(x))\n#define CAST4(x) (vec4(x))\n");
+    h.push_str(
+        "#define CAST2(x) (vec2(x))\n#define CAST3(x) (vec3(x))\n#define CAST4(x) (vec4(x))\n",
+    );
     h.push_str("#define CAST3X3(x) (mat3(x))\n");
     h.push_str("#define float2 vec2\n#define float3 vec3\n#define float4 vec4\n");
     h.push_str("#define int2 ivec2\n#define int3 ivec3\n#define int4 ivec4\n");
@@ -97,11 +99,17 @@ fn varying_decls(text: &str) -> Vec<(String, String, usize, usize)> {
 
 /// §9.1: vertex `varying vec2 X` read as `vec4 X` by the fragment unit.
 pub fn widen_vertex_varyings(vertex: &str, fragment: &str) -> String {
-    let wide: Vec<String> =
-        varying_decls(fragment).into_iter().filter(|d| d.0 == "vec4").map(|d| d.1).collect();
+    let wide: Vec<String> = varying_decls(fragment)
+        .into_iter()
+        .filter(|d| d.0 == "vec4")
+        .map(|d| d.1)
+        .collect();
     let mut out = vertex.to_string();
     for name in wide {
-        let decls: Vec<_> = varying_decls(&out).into_iter().filter(|d| d.0 == "vec2" && d.1 == name).collect();
+        let decls: Vec<_> = varying_decls(&out)
+            .into_iter()
+            .filter(|d| d.0 == "vec2" && d.1 == name)
+            .collect();
         if decls.is_empty() {
             continue;
         }
@@ -135,12 +143,18 @@ fn rewrite_assignment(line: &str, name: &str) -> Option<String> {
     }
     let expr = expr_part[..semi].trim();
     let tail = &expr_part[semi + 1..];
-    Some(format!("{}{name} = vec4({expr}, 0.0, 1.0);{tail}", &line[..indent]))
+    Some(format!(
+        "{}{name} = vec4({expr}, 0.0, 1.0);{tail}",
+        &line[..indent]
+    ))
 }
 
 /// §9.2: `v_TexCoord` (vec3/vec4) combined with `CAST2(…)` becomes `v_TexCoord.xy`.
 pub fn adapt_texcoord(fragment: &str) -> String {
-    if !varying_decls(fragment).iter().any(|d| d.1 == "v_TexCoord" && (d.0 == "vec3" || d.0 == "vec4")) {
+    if !varying_decls(fragment)
+        .iter()
+        .any(|d| d.1 == "v_TexCoord" && (d.0 == "vec3" || d.0 == "vec4"))
+    {
         return fragment.to_string();
     }
     let b = fragment.as_bytes();
@@ -158,13 +172,17 @@ pub fn adapt_texcoord(fragment: &str) -> String {
         let right = fragment[end..].trim_start_matches([' ', '\t']);
         let right_ok = right.starts_with(['+', '-', '*', '/'])
             && !right[1..].starts_with('=')
-            && right[1..].trim_start_matches([' ', '\t']).starts_with("CAST2(");
+            && right[1..]
+                .trim_start_matches([' ', '\t'])
+                .starts_with("CAST2(");
         // CAST2(...) op v_TexCoord, without ')' inside the argument.
         let left = fragment[..pos].trim_end_matches([' ', '\t']);
         let left_ok = left.ends_with(['+', '-', '*', '/']) && {
             let l2 = left[..left.len() - 1].trim_end_matches([' ', '\t']);
             l2.ends_with(')')
-                && l2[..l2.len() - 1].rfind("CAST2(").is_some_and(|c| !l2[c + 6..l2.len() - 1].contains(')'))
+                && l2[..l2.len() - 1]
+                    .rfind("CAST2(")
+                    .is_some_and(|c| !l2[c + 6..l2.len() - 1].contains(')'))
         };
         if right_ok || left_ok {
             hits.push(end);

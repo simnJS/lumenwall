@@ -36,9 +36,10 @@ fn view_of(u: &super::link::UniformSlot, local_ty: &Type) -> UView {
     match &u.storage {
         UStorage::Plain if *local_ty == u.ty => UView::Direct,
         UStorage::Plain => UView::Truncate(local_ty.vec_size().unwrap_or(1)),
-        UStorage::BoolAsUint => {
-            UView::BoolAsUint { stored: u.ty.vec_size().unwrap_or(1), used: local_ty.vec_size().unwrap_or(1) }
-        }
+        UStorage::BoolAsUint => UView::BoolAsUint {
+            stored: u.ty.vec_size().unwrap_or(1),
+            used: local_ty.vec_size().unwrap_or(1),
+        },
         UStorage::Mat2Rows(c) => UView::Mat2Rows(*c),
         UStorage::Packed(s, _) => UView::Packed(*s),
     }
@@ -99,10 +100,20 @@ pub struct Emitter<'a> {
 
 fn fmt_float(f: f32) -> String {
     if !f.is_finite() {
-        return if f.is_nan() { "(0.0 / 0.0)".into() } else if f > 0.0 { "3.4028235e38".into() } else { "(-3.4028235e38)".into() };
+        return if f.is_nan() {
+            "(0.0 / 0.0)".into()
+        } else if f > 0.0 {
+            "3.4028235e38".into()
+        } else {
+            "(-3.4028235e38)".into()
+        };
     }
     let s = format!("{f:?}");
-    if s.contains('.') || s.contains('e') || s.contains("inf") { s } else { format!("{s}.0") }
+    if s.contains('.') || s.contains('e') || s.contains("inf") {
+        s
+    } else {
+        format!("{s}.0")
+    }
 }
 
 fn fmt_int(v: i64) -> String {
@@ -145,7 +156,11 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
         let n = int.get(f.name);
         let name = if i as u32 == tu.main_fn {
             "main".to_string()
-        } else if counts[&f.name] > 1 || !bt.overloads(n).is_empty() || reserved().contains(n) || n.starts_with("lumen_") {
+        } else if counts[&f.name] > 1
+            || !bt.overloads(n).is_empty()
+            || reserved().contains(n)
+            || n.starts_with("lumen_")
+        {
             format!("{n}_lf{i}")
         } else {
             n.to_string()
@@ -156,21 +171,36 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
     // Pass block.
     let mine = |v: &Option<u32>, f: &Option<u32>| if stage == Stage::Vertex { *v } else { *f };
     if !layout.uniforms.is_empty() {
-        let _ = writeln!(e.out, "layout(std140, set = 0, binding = {UNIFORM_BINDING}) uniform {UNIFORM_BLOCK_NAME} {{");
+        let _ = writeln!(
+            e.out,
+            "layout(std140, set = 0, binding = {UNIFORM_BINDING}) uniform {UNIFORM_BLOCK_NAME} {{"
+        );
         for u in &layout.uniforms {
             let member = safe_ident(&u.name);
             let decl = match (&u.storage, &u.ty) {
-                (UStorage::Plain, Type::Array(t, n)) => format!("{} {}[{}]", e.type_name(t), member, n),
+                (UStorage::Plain, Type::Array(t, n)) => {
+                    format!("{} {}[{}]", e.type_name(t), member, n)
+                }
                 (UStorage::Plain, t) => format!("{} {}", e.type_name(t), member),
-                (UStorage::BoolAsUint, t) => format!("{} {}", basic_type_name(&t.with_scalar(Scalar::Uint)), member),
+                (UStorage::BoolAsUint, t) => format!(
+                    "{} {}",
+                    basic_type_name(&t.with_scalar(Scalar::Uint)),
+                    member
+                ),
                 (UStorage::Mat2Rows(c), _) => format!("vec4 {member}[{c}]"),
                 (UStorage::Packed(s, n), _) => {
-                    format!("{} {}[{}]", basic_type_name(&Type::Vector(*s, 4)), member, n.div_ceil(4))
+                    format!(
+                        "{} {}[{}]",
+                        basic_type_name(&Type::Vector(*s, 4)),
+                        member,
+                        n.div_ceil(4)
+                    )
                 }
             };
             let _ = writeln!(e.out, "    {decl};");
             if let Some(g) = mine(&u.vertex, &u.fragment) {
-                e.uniform_view.insert(g, (member, view_of(u, &tu.globals[g as usize].ty)));
+                e.uniform_view
+                    .insert(g, (member, view_of(u, &tu.globals[g as usize].ty)));
             }
         }
         e.out.push_str("};\n");
@@ -178,16 +208,26 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
     // Frame block: the full renderer layout; members the shader does not use
     // get private names so they cannot clash with pass-block members.
     if !layout.frame_uniforms.is_empty() {
-        let _ = writeln!(e.out, "layout(std140, set = 0, binding = {FRAME_BINDING}) uniform {FRAME_BLOCK_NAME} {{");
+        let _ = writeln!(
+            e.out,
+            "layout(std140, set = 0, binding = {FRAME_BINDING}) uniform {FRAME_BLOCK_NAME} {{"
+        );
         for (name, decl) in FRAME_FIELDS {
             let used = layout.frame_uniforms.iter().find(|u| u.name == *name);
-            let member = if used.is_some() { safe_ident(name) } else { format!("lumen_f_{name}") };
-            let (ty, arr) = decl.split_once('[').map_or((*decl, String::new()), |(t, a)| (t, format!("[{a}")));
+            let member = if used.is_some() {
+                safe_ident(name)
+            } else {
+                format!("lumen_f_{name}")
+            };
+            let (ty, arr) = decl
+                .split_once('[')
+                .map_or((*decl, String::new()), |(t, a)| (t, format!("[{a}")));
             let _ = writeln!(e.out, "    {ty} {member}{arr};");
             if let Some(u) = used
                 && let Some(g) = mine(&u.vertex, &u.fragment)
             {
-                e.uniform_view.insert(g, (member, view_of(u, &tu.globals[g as usize].ty)));
+                e.uniform_view
+                    .insert(g, (member, view_of(u, &tu.globals[g as usize].ty)));
             }
         }
         e.out.push_str("};\n");
@@ -201,8 +241,16 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
         if !units_done.contains(&s.unit) {
             units_done.push(s.unit);
             let (tb, sb) = (2 * s.unit, 2 * s.unit + 1);
-            let _ = writeln!(e.out, "layout(set = {TEXTURE_GROUP}, binding = {tb}) uniform {} {tex};", k.texture_name());
-            let _ = writeln!(e.out, "layout(set = {TEXTURE_GROUP}, binding = {sb}) uniform {} {smp};", k.sampler_name());
+            let _ = writeln!(
+                e.out,
+                "layout(set = {TEXTURE_GROUP}, binding = {tb}) uniform {} {tex};",
+                k.texture_name()
+            );
+            let _ = writeln!(
+                e.out,
+                "layout(set = {TEXTURE_GROUP}, binding = {sb}) uniform {} {smp};",
+                k.sampler_name()
+            );
         }
         if let Some(g) = mine(&s.vertex, &s.fragment) {
             e.samplers.insert(g, (tex, smp));
@@ -214,15 +262,24 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
     match stage {
         Stage::Vertex => {
             for a in &layout.attributes {
-                let _ = writeln!(e.out, "layout(location = {}) in {};", a.location, e.decl(&a.ty, &safe_ident(&a.name)));
+                let _ = writeln!(
+                    e.out,
+                    "layout(location = {}) in {};",
+                    a.location,
+                    e.decl(&a.ty, &safe_ident(&a.name))
+                );
             }
             for v in &layout.varyings {
                 let user = v.vertex.map(|g| &tu.globals[g as usize]);
                 let name = safe_ident(&v.name);
                 match user {
-                    Some(gi) if gi.ty == v.ty => {
-                        ios.push(VaryingIo { io: name, io_ty: v.ty.clone(), private: None, location: v.location, interp: v.interp })
-                    }
+                    Some(gi) if gi.ty == v.ty => ios.push(VaryingIo {
+                        io: name,
+                        io_ty: v.ty.clone(),
+                        private: None,
+                        location: v.location,
+                        interp: v.interp,
+                    }),
                     Some(gi) => ios.push(VaryingIo {
                         io: format!("lumen_io_{}", v.name),
                         io_ty: v.ty.clone(),
@@ -233,7 +290,13 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
                     None => {
                         let io = format!("lumen_io_{}", v.name);
                         e.post_main.push(format!("{io} = {};", e.zero(&v.ty)));
-                        ios.push(VaryingIo { io, io_ty: v.ty.clone(), private: None, location: v.location, interp: v.interp });
+                        ios.push(VaryingIo {
+                            io,
+                            io_ty: v.ty.clone(),
+                            private: None,
+                            location: v.location,
+                            interp: v.interp,
+                        });
                     }
                 }
             }
@@ -244,7 +307,13 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
                 let gi = &tu.globals[g as usize];
                 let name = safe_ident(&v.name);
                 if gi.ty == v.ty {
-                    ios.push(VaryingIo { io: name, io_ty: v.ty.clone(), private: None, location: v.location, interp: v.interp });
+                    ios.push(VaryingIo {
+                        io: name,
+                        io_ty: v.ty.clone(),
+                        private: None,
+                        location: v.location,
+                        interp: v.interp,
+                    });
                 } else {
                     ios.push(VaryingIo {
                         io: format!("lumen_io_{}", v.name),
@@ -257,7 +326,12 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
             }
             for o in &layout.frag_outputs {
                 let name = safe_ident(e.int.get(tu.globals[o.global as usize].name));
-                let _ = writeln!(e.out, "layout(location = {}) out {};", o.location, e.decl(&o.ty, &name));
+                let _ = writeln!(
+                    e.out,
+                    "layout(location = {}) out {};",
+                    o.location,
+                    e.decl(&o.ty, &name)
+                );
             }
         }
     }
@@ -268,13 +342,22 @@ pub fn emit_stage(tu: &TypedUnit, layout: &ProgramLayout, int: &Interner) -> Str
             Interp::NoPerspective => "noperspective ",
             _ => "",
         };
-        let _ = writeln!(e.out, "layout(location = {}) {}{} {};", io.location, interp, dir, e.decl(&io.io_ty, &io.io));
+        let _ = writeln!(
+            e.out,
+            "layout(location = {}) {}{} {};",
+            io.location,
+            interp,
+            dir,
+            e.decl(&io.io_ty, &io.io)
+        );
         if let Some((pname, pty)) = &io.private {
             let _ = writeln!(e.out, "{};", e.decl(pty, pname));
             if stage == Stage::Vertex {
-                e.post_main.push(format!("{} = {};", io.io, pad(pname, pty, &io.io_ty)));
+                e.post_main
+                    .push(format!("{} = {};", io.io, pad(pname, pty, &io.io_ty)));
             } else {
-                e.pre_main.push(format!("{} = {};", pname, truncate(&io.io, &io.io_ty, pty)));
+                e.pre_main
+                    .push(format!("{} = {};", pname, truncate(&io.io, &io.io_ty, pty)));
             }
         }
     }
@@ -369,14 +452,25 @@ impl Emitter<'_> {
             Type::Scalar(Scalar::Int) => "0".into(),
             Type::Scalar(Scalar::Uint) => "0u".into(),
             Type::Scalar(Scalar::Bool) => "false".into(),
-            Type::Vector(s, _) => format!("{}({})", basic_type_name(t), self.zero(&Type::Scalar(*s))),
+            Type::Vector(s, _) => {
+                format!("{}({})", basic_type_name(t), self.zero(&Type::Scalar(*s)))
+            }
             Type::Matrix(..) => format!("{}(0.0)", basic_type_name(t)),
             Type::Array(e, n) => {
                 let z = self.zero(e);
-                format!("{}[{}]({})", self.type_name(e), n, vec![z; *n as usize].join(", "))
+                format!(
+                    "{}[{}]({})",
+                    self.type_name(e),
+                    n,
+                    vec![z; *n as usize].join(", ")
+                )
             }
             Type::Struct(id) => {
-                let fields: Vec<String> = self.tu.structs[*id as usize].fields.iter().map(|f| self.zero(&f.1)).collect();
+                let fields: Vec<String> = self.tu.structs[*id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| self.zero(&f.1))
+                    .collect();
                 format!("{}({})", self.type_name(t), fields.join(", "))
             }
             _ => "0".into(),
@@ -384,8 +478,12 @@ impl Emitter<'_> {
     }
 
     fn struct_def(&mut self, d: &FullType) {
-        let TypeSpec::StructDef(i) = d.spec else { return };
-        let Some(id) = self.tu.unit.structs[i as usize].resolved else { return };
+        let TypeSpec::StructDef(i) = d.spec else {
+            return;
+        };
+        let Some(id) = self.tu.unit.structs[i as usize].resolved else {
+            return;
+        };
         if !self.emitted_structs.insert(id) {
             return;
         }
@@ -413,7 +511,11 @@ impl Emitter<'_> {
                     let init = v.init.as_ref().expect("const has init");
                     if is_const_expr(init, &self.const_globals) {
                         self.const_globals.insert(g);
-                        let txt = format!("const {} = {};\n", self.decl(&gi.ty, &name), self.expr(init));
+                        let txt = format!(
+                            "const {} = {};\n",
+                            self.decl(&gi.ty, &name),
+                            self.expr(init)
+                        );
                         self.out.push_str(&txt);
                     } else {
                         let txt = format!("{};\n", self.decl(&gi.ty, &name));
@@ -437,7 +539,10 @@ impl Emitter<'_> {
     fn params(&self, f: &FunctionDef) -> String {
         let mut ps = Vec::new();
         for p in &f.params {
-            let pname = p.name.map(|n| self.name(n)).unwrap_or_else(|| format!("lumen_unnamed{}", p.local));
+            let pname = p
+                .name
+                .map(|n| self.name(n))
+                .unwrap_or_else(|| format!("lumen_unnamed{}", p.local));
             if let Type::Sampler(k) = p.rty {
                 ps.push(format!("{} {}_lt", k.texture_name(), pname));
                 ps.push(format!("{} {}_ls", k.sampler_name(), pname));
@@ -460,7 +565,11 @@ impl Emitter<'_> {
         self.struct_def(&f.ret);
         let fi = &self.tu.functions[f.fn_index as usize];
         let is_main = f.fn_index == self.tu.main_fn;
-        let name = if is_main { "main/*lumen_main*/".to_string() } else { self.fn_names[f.fn_index as usize].clone() };
+        let name = if is_main {
+            "main/*lumen_main*/".to_string()
+        } else {
+            self.fn_names[f.fn_index as usize].clone()
+        };
         let head = format!("{} {}({})", self.type_name(&fi.ret), name, self.params(f));
         match &f.body {
             None => {
@@ -486,7 +595,11 @@ impl Emitter<'_> {
         for var in &d.vars {
             let name = self.name(var.name);
             match &var.init {
-                Some(init) => v.push(format!("{} = {}", self.decl(&var.ty, &name), self.expr(init))),
+                Some(init) => v.push(format!(
+                    "{} = {}",
+                    self.decl(&var.ty, &name),
+                    self.expr(init)
+                )),
                 None => v.push(self.decl(&var.ty, &name)),
             }
         }
@@ -550,7 +663,12 @@ impl Emitter<'_> {
                 self.stmt(b, depth + 1, out);
                 let _ = writeln!(out, "{ind}}} while ({});", self.expr_top(c));
             }
-            Stmt::For { init, cond, step, body } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 let init_txt = match init.as_deref() {
                     None => String::new(),
                     Some(Stmt::Decl(d)) => {
@@ -609,20 +727,31 @@ impl Emitter<'_> {
     fn sampler_pair(&self, e: &Expr) -> (String, String) {
         match &e.kind {
             ExprKind::Ident(_, Sym::Global(g)) => {
-                self.samplers.get(g).cloned().unwrap_or_else(|| ("lumen_missing_texture".into(), "lumen_missing_sampler".into()))
+                self.samplers.get(g).cloned().unwrap_or_else(|| {
+                    (
+                        "lumen_missing_texture".into(),
+                        "lumen_missing_sampler".into(),
+                    )
+                })
             }
             ExprKind::Ident(n, Sym::Local(_)) => {
                 let p = self.name(*n);
                 (format!("{p}_lt"), format!("{p}_ls"))
             }
-            _ => ("lumen_invalid_texture".into(), "lumen_invalid_sampler".into()),
+            _ => (
+                "lumen_invalid_texture".into(),
+                "lumen_invalid_sampler".into(),
+            ),
         }
     }
 
     fn postfix_base(&self, b: &Expr) -> String {
         let s = self.expr(b);
         match b.kind {
-            ExprKind::Ident(..) | ExprKind::Index(..) | ExprKind::Field(..) | ExprKind::Call { .. } => s,
+            ExprKind::Ident(..)
+            | ExprKind::Index(..)
+            | ExprKind::Field(..)
+            | ExprKind::Call { .. } => s,
             ExprKind::Swizzle(ref inner, _) if inner.ty.vec_size() != Some(1) => s,
             _ if s.starts_with('(') && s.ends_with(')') && balanced_outer(&s) => s,
             _ => format!("({s})"),
@@ -657,8 +786,13 @@ impl Emitter<'_> {
                             }
                         }
                         UView::Mat2Rows(c) => {
-                            let cols: Vec<String> = (0..*c).map(|k| format!("{m}[{k}].xy")).collect();
-                            let t = if *c == 2 { "mat2".to_string() } else { format!("mat{c}x2") };
+                            let cols: Vec<String> =
+                                (0..*c).map(|k| format!("{m}[{k}].xy")).collect();
+                            let t = if *c == 2 {
+                                "mat2".to_string()
+                            } else {
+                                format!("mat{c}x2")
+                            };
                             format!("{t}({})", cols.join(", "))
                         }
                     },
@@ -668,7 +802,9 @@ impl Emitter<'_> {
                     BuiltinVar::Position => "gl_Position".into(),
                     BuiltinVar::PointSize => "gl_PointSize".into(),
                     BuiltinVar::VertexId => format!("{}(gl_VertexIndex)", basic_type_name(&e.ty)),
-                    BuiltinVar::InstanceId => format!("{}(gl_InstanceIndex)", basic_type_name(&e.ty)),
+                    BuiltinVar::InstanceId => {
+                        format!("{}(gl_InstanceIndex)", basic_type_name(&e.ty))
+                    }
                     BuiltinVar::FragCoord => "gl_FragCoord".into(),
                     BuiltinVar::FrontFacing => "gl_FrontFacing".into(),
                     BuiltinVar::PointCoord => "gl_PointCoord".into(),
@@ -679,7 +815,11 @@ impl Emitter<'_> {
             ExprKind::IntLit(v) => fmt_int(*v),
             ExprKind::UintLit(v) => format!("{}u", *v as u32),
             ExprKind::FloatLit(f) => {
-                if *f < 0.0 { format!("({})", fmt_float(*f)) } else { fmt_float(*f) }
+                if *f < 0.0 {
+                    format!("({})", fmt_float(*f))
+                } else {
+                    fmt_float(*f)
+                }
             }
             ExprKind::BoolLit(b) => b.to_string(),
             ExprKind::Unary(op, x) => {
@@ -711,7 +851,9 @@ impl Emitter<'_> {
                     Some(o) => format!("({l} {}= {})", o.text(), strip(&r)),
                 }
             }
-            ExprKind::Ternary(c, a, b) => format!("({} ? {} : {})", self.expr(c), self.expr(a), self.expr(b)),
+            ExprKind::Ternary(c, a, b) => {
+                format!("({} ? {} : {})", self.expr(c), self.expr(a), self.expr(b))
+            }
             ExprKind::Index(b, i) => {
                 if let ExprKind::Ident(_, Sym::Global(g)) = &b.kind
                     && let Some((m, UView::Packed(s))) = self.uniform_view.get(g)
@@ -719,7 +861,11 @@ impl Emitter<'_> {
                     let unsigned = i.ty == Type::UINT;
                     debug_assert!(matches!(s, Scalar::Float | Scalar::Int | Scalar::Uint));
                     if let ExprKind::IntLit(k) = i.kind {
-                        return format!("{m}[{}].{}", k / 4, &"xyzw"[(k % 4) as usize..(k % 4) as usize + 1]);
+                        return format!(
+                            "{m}[{}].{}",
+                            k / 4,
+                            &"xyzw"[(k % 4) as usize..(k % 4) as usize + 1]
+                        );
                     }
                     let idx = strip(&self.expr(i)).to_string();
                     let (two, three) = if unsigned { ("2u", "3u") } else { ("2", "3") };
@@ -751,13 +897,22 @@ impl Emitter<'_> {
     fn convert(&self, x: &Expr, to: &Type) -> String {
         let s = self.expr(x);
         let from = &x.ty;
-        let (Some(fb), Some(n), Some(tb), Some(m)) = (from.scalar(), from.vec_size(), to.scalar(), to.vec_size()) else {
+        let (Some(fb), Some(n), Some(tb), Some(m)) =
+            (from.scalar(), from.vec_size(), to.scalar(), to.vec_size())
+        else {
             return format!("{}({})", self.type_name(to), strip(&s));
         };
         // Shape first (reduce), then base type.
         let shaped = if n > m {
             let sel = &"xyzw"[..m as usize];
-            let base = if s.starts_with('(') || matches!(x.kind, ExprKind::Ident(..) | ExprKind::Call { .. } | ExprKind::Index(..) | ExprKind::Field(..)) {
+            let base = if s.starts_with('(')
+                || matches!(
+                    x.kind,
+                    ExprKind::Ident(..)
+                        | ExprKind::Call { .. }
+                        | ExprKind::Index(..)
+                        | ExprKind::Field(..)
+                ) {
                 s.clone()
             } else {
                 format!("({s})")
@@ -777,7 +932,11 @@ impl Emitter<'_> {
                 format!("notEqual({}, {z})", strip(&shaped))
             }
         } else {
-            format!("{}({})", basic_type_name(&shaped_ty.with_scalar(tb)), strip(&shaped))
+            format!(
+                "{}({})",
+                basic_type_name(&shaped_ty.with_scalar(tb)),
+                strip(&shaped)
+            )
         };
         if n == 1 && m > 1 {
             format!("{}({})", basic_type_name(to), strip(&based))
@@ -789,7 +948,10 @@ impl Emitter<'_> {
     fn call(&self, args: &[Expr], target: &CallTarget) -> String {
         match target {
             CallTarget::Ctor(t) => {
-                let a: Vec<String> = args.iter().map(|a| strip(&self.expr(a)).to_string()).collect();
+                let a: Vec<String> = args
+                    .iter()
+                    .map(|a| strip(&self.expr(a)).to_string())
+                    .collect();
                 format!("{}({})", self.type_name(t), a.join(", "))
             }
             CallTarget::Builtin(i) => {
@@ -841,7 +1003,11 @@ impl Emitter<'_> {
                         a.push(strip(&self.expr(arg)).to_string());
                     }
                 }
-                let name = if *f == self.tu.main_fn { "main" } else { &self.fn_names[*f as usize] };
+                let name = if *f == self.tu.main_fn {
+                    "main"
+                } else {
+                    &self.fn_names[*f as usize]
+                };
                 format!("{name}({})", a.join(", "))
             }
             CallTarget::Unresolved => "/*unresolved*/0".into(),
@@ -868,20 +1034,34 @@ fn balanced_outer(s: &str) -> bool {
 }
 
 fn strip(s: &str) -> &str {
-    if s.starts_with('(') && s.ends_with(')') && balanced_outer(s) { &s[1..s.len() - 1] } else { s }
+    if s.starts_with('(') && s.ends_with(')') && balanced_outer(s) {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
 }
 
 /// True if `e` can initialise a `const` global in naga (no calls besides constructors).
 fn is_const_expr(e: &Expr, consts: &HashSet<u32>) -> bool {
     match &e.kind {
-        ExprKind::IntLit(_) | ExprKind::UintLit(_) | ExprKind::FloatLit(_) | ExprKind::BoolLit(_) => true,
+        ExprKind::IntLit(_)
+        | ExprKind::UintLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::BoolLit(_) => true,
         ExprKind::Ident(_, Sym::Global(g)) => consts.contains(g),
         ExprKind::Unary(op, x) => {
-            matches!(op, UnOp::Neg | UnOp::Plus | UnOp::Not | UnOp::BitNot) && is_const_expr(x, consts)
+            matches!(op, UnOp::Neg | UnOp::Plus | UnOp::Not | UnOp::BitNot)
+                && is_const_expr(x, consts)
         }
-        ExprKind::Binary(op, a, b) => *op != BinOp::FMod && is_const_expr(a, consts) && is_const_expr(b, consts),
+        ExprKind::Binary(op, a, b) => {
+            *op != BinOp::FMod && is_const_expr(a, consts) && is_const_expr(b, consts)
+        }
         ExprKind::Convert(x) | ExprKind::Swizzle(x, _) => is_const_expr(x, consts),
-        ExprKind::Call { target: CallTarget::Ctor(_), args, .. } => args.iter().all(|a| is_const_expr(a, consts)),
+        ExprKind::Call {
+            target: CallTarget::Ctor(_),
+            args,
+            ..
+        } => args.iter().all(|a| is_const_expr(a, consts)),
         _ => false,
     }
 }
@@ -910,8 +1090,14 @@ impl Helper {
             Helper::Inverse(_) => INVERSE4.to_string(),
             Helper::Outer(c, r) => {
                 let m = basic_type_name(&Type::Matrix(c, r));
-                let cols: Vec<String> = (0..c).map(|k| format!("c * r.{}", &"xyzw"[k as usize..k as usize + 1])).collect();
-                format!("{m} {}(vec{r} c, vec{c} r) {{ return {m}({}); }}\n", self.name(), cols.join(", "))
+                let cols: Vec<String> = (0..c)
+                    .map(|k| format!("c * r.{}", &"xyzw"[k as usize..k as usize + 1]))
+                    .collect();
+                format!(
+                    "{m} {}(vec{r} c, vec{c} r) {{ return {m}({}); }}\n",
+                    self.name(),
+                    cols.join(", ")
+                )
             }
         }
     }
@@ -1009,8 +1195,12 @@ mod tests {
     #[test]
     fn inverse4_formula() {
         // Column-major test matrix with a known inverse check: M · M⁻¹ = I.
-        let m: [[f64; 4]; 4] =
-            [[2.0, 0.5, 0.0, 1.0], [0.0, 3.0, 1.0, 0.0], [1.0, 0.0, 4.0, 0.25], [0.0, 2.0, 0.0, 1.5]];
+        let m: [[f64; 4]; 4] = [
+            [2.0, 0.5, 0.0, 1.0],
+            [0.0, 3.0, 1.0, 0.0],
+            [1.0, 0.0, 4.0, 0.25],
+            [0.0, 2.0, 0.0, 1.5],
+        ];
         let mut vars = HashMap::new();
         for (c, col) in m.iter().enumerate() {
             for (r, v) in col.iter().enumerate() {
@@ -1018,21 +1208,40 @@ mod tests {
             }
         }
         let body: Vec<&str> = INVERSE4.lines().collect();
-        for l in body.iter().filter(|l| l.trim_start().starts_with("float b") || l.trim_start().starts_with("float det")) {
-            let (lhs, rhs) = l.trim().trim_start_matches("float ").trim_end_matches(';').split_once(" = ").unwrap();
+        for l in body.iter().filter(|l| {
+            l.trim_start().starts_with("float b") || l.trim_start().starts_with("float det")
+        }) {
+            let (lhs, rhs) = l
+                .trim()
+                .trim_start_matches("float ")
+                .trim_end_matches(';')
+                .split_once(" = ")
+                .unwrap();
             let v = eval(rhs, &vars);
             vars.insert(lhs.to_string(), v);
         }
-        let start = body.iter().position(|l| l.contains("return mat4(")).unwrap();
+        let start = body
+            .iter()
+            .position(|l| l.contains("return mat4("))
+            .unwrap();
         let exprs: Vec<f64> = body[start + 1..start + 17]
             .iter()
-            .map(|l| eval(l.trim().trim_end_matches(") / det;").trim_end_matches(','), &vars) / vars["det"])
+            .map(|l| {
+                eval(
+                    l.trim().trim_end_matches(") / det;").trim_end_matches(','),
+                    &vars,
+                ) / vars["det"]
+            })
             .collect();
         let inv = |c: usize, r: usize| exprs[c * 4 + r];
         for (i, j) in (0..4).flat_map(|i| (0..4).map(move |j| (i, j))) {
             {
                 // (M · N)[col j][row i] = Σ_k M[col k][row i] · N[col j][row k]
-                let v: f64 = m.iter().enumerate().map(|(k, col)| col[i] * inv(j, k)).sum();
+                let v: f64 = m
+                    .iter()
+                    .enumerate()
+                    .map(|(k, col)| col[i] * inv(j, k))
+                    .sum();
                 let want = if i == j { 1.0 } else { 0.0 };
                 assert!((v - want).abs() < 1e-9, "({i},{j}) = {v}");
             }

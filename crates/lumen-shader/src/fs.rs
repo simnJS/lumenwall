@@ -81,7 +81,8 @@ pub fn read_shader_file(fs: &dyn ShaderFs, rel: &str) -> Option<String> {
             return Some(String::from_utf8_lossy(&b).into_owned());
         }
     }
-    fs.read(&format!("shaders/{rel}")).map(|b| String::from_utf8_lossy(&b).into_owned())
+    fs.read(&format!("shaders/{rel}"))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 #[cfg(test)]
@@ -103,9 +104,15 @@ mod tests {
         fs.insert("zcompat/scene/shaders/123/foo.frag", "A");
         fs.insert("shaders/workshop/123/effects/foo.frag", "B");
         fs.insert("shaders/workshop/123/foo.frag", "C");
-        assert_eq!(read_shader_file(&fs, "workshop/123/effects/foo.frag").as_deref(), Some("A"));
+        assert_eq!(
+            read_shader_file(&fs, "workshop/123/effects/foo.frag").as_deref(),
+            Some("A")
+        );
         // Three components: no substitution.
-        assert_eq!(read_shader_file(&fs, "workshop/123/foo.frag").as_deref(), Some("C"));
+        assert_eq!(
+            read_shader_file(&fs, "workshop/123/foo.frag").as_deref(),
+            Some("C")
+        );
         assert!(read_shader_file(&fs, "commands/copy.vert").is_some());
     }
 }

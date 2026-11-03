@@ -145,7 +145,11 @@ pub enum ExprKind {
     Field(Box<Expr>, Name),
     /// Vector swizzle (component indices), created by the typer.
     Swizzle(Box<Expr>, Vec<u8>),
-    Call { callee: Callee, args: Vec<Expr>, target: CallTarget },
+    Call {
+        callee: Callee,
+        args: Vec<Expr>,
+        target: CallTarget,
+    },
     /// `expr.length()` (replaced by a literal when typed).
     Length(Box<Expr>),
     Comma(Box<Expr>, Box<Expr>),
@@ -155,7 +159,11 @@ pub enum ExprKind {
 
 impl Expr {
     pub fn new(kind: ExprKind, line: u32) -> Expr {
-        Expr { kind, ty: Type::Void, line }
+        Expr {
+            kind,
+            ty: Type::Void,
+            line,
+        }
     }
 }
 
@@ -241,7 +249,12 @@ pub enum Stmt {
     Default,
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
-    For { init: Option<Box<Stmt>>, cond: Option<Expr>, step: Option<Expr>, body: Box<Stmt> },
+    For {
+        init: Option<Box<Stmt>>,
+        cond: Option<Expr>,
+        step: Option<Expr>,
+        body: Box<Stmt>,
+    },
     Break,
     Continue,
     Discard,

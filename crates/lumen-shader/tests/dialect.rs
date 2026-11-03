@@ -5,8 +5,8 @@
 mod common;
 
 use lumen_shader::{
-    CompileOptions, EngineUniform, MemFs, PassCombos, PassRequest, PassShader, ShaderCompiler, ShaderError, UniformType,
-    UniformValue, translate_to_glsl,
+    CompileOptions, EngineUniform, MemFs, PassCombos, PassRequest, PassShader, ShaderCompiler,
+    ShaderError, UniformType, UniformValue, translate_to_glsl,
 };
 
 const VS: &str = "attribute vec3 a_Position;
@@ -29,31 +29,58 @@ struct Out {
 /// naga back-ends used by wgpu (Vulkan, DX12) and the renderer's own contract checks.
 fn backend_check(shader: &PassShader) {
     let m = &shader.program.module;
-    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
-        .validate(m)
-        .expect("revalidate");
-    naga::back::spv::write_vec(m, &info, &naga::back::spv::Options::default(), None).expect("SPIR-V output");
-    let (opts, popts) = (naga::back::hlsl::Options::default(), naga::back::hlsl::PipelineOptions::default());
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(m)
+    .expect("revalidate");
+    naga::back::spv::write_vec(m, &info, &naga::back::spv::Options::default(), None)
+        .expect("SPIR-V output");
+    let (opts, popts) = (
+        naga::back::hlsl::Options::default(),
+        naga::back::hlsl::PipelineOptions::default(),
+    );
     let mut out = String::new();
-    naga::back::hlsl::Writer::new(&mut out, &opts, &popts).write(m, &info, None).expect("HLSL output");
+    naga::back::hlsl::Writer::new(&mut out, &opts, &popts)
+        .write(m, &info, None)
+        .expect("HLSL output");
     common::check_render_contract(shader, "test").unwrap();
 }
 
-fn build_with(files: &[(&str, &str)], combos: &PassCombos, opts: CompileOptions) -> Result<Out, ShaderError> {
+fn build_with(
+    files: &[(&str, &str)],
+    combos: &PassCombos,
+    opts: CompileOptions,
+) -> Result<Out, ShaderError> {
     let mut fs = MemFs::default();
     for (p, c) in files {
         fs.insert(*p, c.as_bytes());
     }
     let c = ShaderCompiler::new(opts, None);
-    let p = c.prepare(&fs, &PassRequest { shader: "t", combos })?;
+    let p = c.prepare(
+        &fs,
+        &PassRequest {
+            shader: "t",
+            combos,
+        },
+    )?;
     let (vs, fsrc) = translate_to_glsl(&p.vertex_source, &p.fragment_source, c.options())?;
     let shader = c.compile(p)?;
     backend_check(&shader);
-    Ok(Out { shader, vs, fs: fsrc })
+    Ok(Out {
+        shader,
+        vs,
+        fs: fsrc,
+    })
 }
 
 fn build(vs: &str, fs: &str) -> Result<Out, ShaderError> {
-    build_with(&[("shaders/t.vert", vs), ("shaders/t.frag", fs)], &PassCombos::default(), CompileOptions::default())
+    build_with(
+        &[("shaders/t.vert", vs), ("shaders/t.frag", fs)],
+        &PassCombos::default(),
+        CompileOptions::default(),
+    )
 }
 
 /// Fragment shader with `decls` before main and `body` inside.
@@ -81,13 +108,19 @@ fn fails(decls: &str, body: &str) -> String {
 
 #[test]
 fn r1_bool_promotes_to_float() {
-    let o = ok("", "    bool b = g_Time > 1.0;\n    float f = b * 2.0 + true;\n    color.r += f;");
+    let o = ok(
+        "",
+        "    bool b = g_Time > 1.0;\n    float f = b * 2.0 + true;\n    color.r += f;",
+    );
     assert!(o.fs.contains("float(b) * 2.0"), "{}", o.fs);
 }
 
 #[test]
 fn r1_float_to_int_in_assignment_and_mul_assign() {
-    let o = ok("", "    int i = g_Time * 3.0;\n    i *= 0.5;\n    int j = 7;\n    j = j / 2.0;\n    color.r += float(i + j);");
+    let o = ok(
+        "",
+        "    int i = g_Time * 3.0;\n    i *= 0.5;\n    int j = 7;\n    j = j / 2.0;\n    color.r += float(i + j);",
+    );
     assert!(o.fs.contains("int i = int(g_Time * 3.0)"), "{}", o.fs);
     // parity: `i *= 0.5` multiplies by 0 (the constant is converted first).
     assert!(o.fs.contains("i *= 0;"), "{}", o.fs);
@@ -97,13 +130,22 @@ fn r1_float_to_int_in_assignment_and_mul_assign() {
 #[test]
 fn r1_restrictions() {
     fails("", "    int i = 1;\n    i += 0.5;");
-    fails("int f(int x) { return x; }", "    color.r += float(f(1.5));");
-    fails("int f(float x) { return x; }", "    color.r += float(f(1.5));");
+    fails(
+        "int f(int x) { return x; }",
+        "    color.r += float(f(1.5));",
+    );
+    fails(
+        "int f(float x) { return x; }",
+        "    color.r += float(f(1.5));",
+    );
 }
 
 #[test]
 fn r1_uint_int_mix() {
-    let o = ok("uniform int g_I;", "    uint u = 3u;\n    int k = g_I + u;\n    uint w = k;\n    color.r += float(w);");
+    let o = ok(
+        "uniform int g_I;",
+        "    uint u = 3u;\n    int k = g_I + u;\n    uint w = k;\n    color.r += float(w);",
+    );
     assert!(o.fs.contains("g_I + int(u)"), "{}", o.fs);
 }
 
@@ -121,7 +163,11 @@ fn r2_shape_adaptations() {
     assert!(o.fs.contains("v += color.xyz"), "{}", o.fs);
     assert!(o.fs.contains("S(vec3(1.0), w.x)"), "{}", o.fs);
     assert!(o.fs.contains("(!bb.x)"), "{}", o.fs);
-    assert!(o.fs.contains("return vec4(1.0, 2.0, 3.0, 4.0).xyz"), "{}", o.fs);
+    assert!(
+        o.fs.contains("return vec4(1.0, 2.0, 3.0, 4.0).xyz"),
+        "{}",
+        o.fs
+    );
 }
 
 #[test]
@@ -132,9 +178,16 @@ fn r2_widening_is_an_error() {
 
 #[test]
 fn r2_builtin_arguments() {
-    let o = ok("", "    float d = dot(color.rgb, color);\n    vec3 m = mix(color.rgb, vec3(1.0), color);\n    vec3 p = pow(color.rgb, 2.0);\n    float l = length(color.rgb);\n    color.rgb = m * d + p + clamp(color.rgb, 0, 1) + l;");
+    let o = ok(
+        "",
+        "    float d = dot(color.rgb, color);\n    vec3 m = mix(color.rgb, vec3(1.0), color);\n    vec3 p = pow(color.rgb, 2.0);\n    float l = length(color.rgb);\n    color.rgb = m * d + p + clamp(color.rgb, 0, 1) + l;",
+    );
     assert!(o.fs.contains("dot(color.xyz, color.xyz)"), "{}", o.fs);
-    assert!(o.fs.contains("mix(color.xyz, vec3(1.0), color.xyz)"), "{}", o.fs);
+    assert!(
+        o.fs.contains("mix(color.xyz, vec3(1.0), color.xyz)"),
+        "{}",
+        o.fs
+    );
     assert!(o.fs.contains("pow(color.xyz, vec3(2.0))"), "{}", o.fs);
     assert!(o.fs.contains("clamp(color.xyz, 0.0, 1.0)"), "{}", o.fs);
 }
@@ -143,7 +196,11 @@ fn r2_builtin_arguments() {
 fn r2_q8_int_to_float_vector() {
     // Open question 8: type and shape change in one step are accepted.
     let o = ok("", "    vec3 v = 1;\n    color.rgb = v;");
-    assert!(o.fs.contains("vec3(1.0)") || o.fs.contains("vec3(float(1))"), "{}", o.fs);
+    assert!(
+        o.fs.contains("vec3(1.0)") || o.fs.contains("vec3(float(1))"),
+        "{}",
+        o.fs
+    );
 }
 
 // ---- R3 ----------------------------------------------------------------------
@@ -155,7 +212,11 @@ fn r3_loose_overload_picks_fewest_adaptations() {
         "    color.r = pick(color.rgb);",
     );
     // vec3 → vec2 reduction (1 adaptation); vec3 → float is not allowed in phase 2.
-    assert!(o.fs.contains("color.xyz.xy") || o.fs.contains("(color.xyz).xy"), "{}", o.fs);
+    assert!(
+        o.fs.contains("color.xyz.xy") || o.fs.contains("(color.xyz).xy"),
+        "{}",
+        o.fs
+    );
 }
 
 #[test]
@@ -165,7 +226,11 @@ fn r3_ambiguity_needs_three_candidates() {
         "float two(vec2 x) { return 2.0; }\nfloat two(vec3 x) { return 3.0; }",
         "    color.r = two(1.0);",
     );
-    assert!(o.fs.contains("two_lf0(vec2(1.0))") || o.fs.contains("vec2(1.0)"), "{}", o.fs);
+    assert!(
+        o.fs.contains("two_lf0(vec2(1.0))") || o.fs.contains("vec2(1.0)"),
+        "{}",
+        o.fs
+    );
     let e = fails(
         "float three(vec2 x) { return 2.0; }\nfloat three(vec3 x) { return 3.0; }\nfloat three(vec4 x) { return 4.0; }",
         "    color.r = three(1.0);",
@@ -175,7 +240,10 @@ fn r3_ambiguity_needs_three_candidates() {
 
 #[test]
 fn r3_strict_phase_prefers_exact() {
-    let o = ok("float q(float x) { return x; }\nfloat q(int x) { return 0.0; }", "    color.r = q(2);");
+    let o = ok(
+        "float q(float x) { return x; }\nfloat q(int x) { return 0.0; }",
+        "    color.r = q(2);",
+    );
     assert!(o.fs.contains("q_lf1(2)"), "{}", o.fs);
 }
 
@@ -198,7 +266,10 @@ fn r4_integer_conditions() {
 
 #[test]
 fn r5_float_modulo() {
-    let o = ok("", "    float a = g_Time % 2.0;\n    vec2 b = v_TexCoord % 0.5;\n    vec2 c = 3.0 % v_TexCoord;\n    a %= 0.25;\n    int k = 7 % 3;\n    color.rg = b + c + a + float(k);");
+    let o = ok(
+        "",
+        "    float a = g_Time % 2.0;\n    vec2 b = v_TexCoord % 0.5;\n    vec2 c = 3.0 % v_TexCoord;\n    a %= 0.25;\n    int k = 7 % 3;\n    color.rg = b + c + a + float(k);",
+    );
     assert!(o.fs.contains("mod(g_Time, 2.0)"), "{}", o.fs);
     assert!(o.fs.contains("mod(v_TexCoord, 0.5)"), "{}", o.fs);
     assert!(o.fs.contains("mod(vec2(3.0), v_TexCoord)"), "{}", o.fs);
@@ -210,7 +281,10 @@ fn r5_float_modulo() {
 
 #[test]
 fn r6_float_indices() {
-    let o = ok("const float K[3] = float[3](1.0, 2.0, 3.0);", "    float f = g_Time;\n    color.r = K[f] + color[1.7] + K[1.2];");
+    let o = ok(
+        "const float K[3] = float[3](1.0, 2.0, 3.0);",
+        "    float f = g_Time;\n    color.r = K[f] + color[1.7] + K[1.2];",
+    );
     assert!(o.fs.contains("K[int(f)]"), "{}", o.fs);
     assert!(o.fs.contains("color[1]"), "{}", o.fs);
 }
@@ -219,7 +293,10 @@ fn r6_float_indices() {
 
 #[test]
 fn r7_swizzle_wraps() {
-    let o = ok("", "    vec2 a = v_TexCoord.zw;\n    float b = color.rgb.a;\n    vec2 s = g_Time.xx;\n    color.rg = a + b + s;");
+    let o = ok(
+        "",
+        "    vec2 a = v_TexCoord.zw;\n    float b = color.rgb.a;\n    vec2 s = g_Time.xx;\n    color.rg = a + b + s;",
+    );
     assert!(o.fs.contains("v_TexCoord.xy"), "{}", o.fs);
     assert!(o.fs.contains("color.xyz.x"), "{}", o.fs);
     assert!(o.fs.contains("vec2(g_Time)"), "{}", o.fs);
@@ -236,7 +313,11 @@ fn r8_varyings_of_different_sizes() {
     // Vertex: v_A widened to vec4 with w = 1, v_C padded with zeros.
     assert!(o.vs.contains("out vec4 lumen_io_v_A"), "{}", o.vs);
     assert!(o.vs.contains("lumen_io_v_A = vec4(v_A, 1.0)"), "{}", o.vs);
-    assert!(o.vs.contains("lumen_io_v_C = vec3(v_C, 0.0, 0.0)"), "{}", o.vs);
+    assert!(
+        o.vs.contains("lumen_io_v_C = vec3(v_C, 0.0, 0.0)"),
+        "{}",
+        o.vs
+    );
     assert!(o.vs.contains("lumen_io_v_Missing = vec2(0.0)"), "{}", o.vs);
     // Fragment: v_B read through a truncating copy.
     assert!(o.fs.contains("v_B = lumen_io_v_B.xy"), "{}", o.fs);
@@ -258,7 +339,11 @@ fn section_9_1_vec2_to_vec4() {
     let vs = "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n    gl_Position = vec4(a_Position, 1.0);\n    v_TexCoord = a_TexCoord;\n}\n";
     let fs = "varying vec4 v_TexCoord;\nvoid main() { gl_FragColor = v_TexCoord; }\n";
     let o = build(vs, fs).unwrap();
-    assert!(o.vs.contains("v_TexCoord = vec4(a_TexCoord, 0.0, 1.0)"), "{}", o.vs);
+    assert!(
+        o.vs.contains("v_TexCoord = vec4(a_TexCoord, 0.0, 1.0)"),
+        "{}",
+        o.vs
+    );
 }
 
 #[test]
@@ -282,13 +367,19 @@ fn compat_macros() {
     // Arguments swapped: max(vec3, float) is a GLSL overload.
     assert!(f.contains("max(b, 0.0)"), "{f}");
     assert!(f.contains("min(1.0, g_Time)"), "{f}");
-    assert!(f.contains("mix(b, e, vec3(0.5))") || f.contains("mix(b, e, 0.5)"), "{f}");
+    assert!(
+        f.contains("mix(b, e, vec3(0.5))") || f.contains("mix(b, e, 0.5)"),
+        "{f}"
+    );
     assert!(f.contains("fract(g_Time)"), "{f}");
     assert!(f.contains("clamp(g_Time, 0.0, 1.0)"), "{f}");
     assert!(f.contains("log2(g_Time) * 0.30103"), "{f}");
     assert!(f.contains("atan(1.0, g_Time)"), "{f}");
     assert!(f.contains("trunc("), "{f}");
-    assert!(f.contains("textureLod(sampler2D(lumen_tex0, lumen_smp0), a, 0.0)"), "{f}");
+    assert!(
+        f.contains("textureLod(sampler2D(lumen_tex0, lumen_smp0), a, 0.0)"),
+        "{f}"
+    );
     assert!(f.contains("dFdx(g_Time) + dFdy(g_Time)"), "{f}");
     assert!(f.contains("ivec2(1, 2)"), "{f}");
 }
@@ -299,10 +390,17 @@ fn ddy_can_follow_the_opengl_reference() {
     let o = build_with(
         &[("shaders/t.vert", VS), ("shaders/t.frag", &fs)],
         &PassCombos::default(),
-        CompileOptions { negate_ddy: true, ..Default::default() },
+        CompileOptions {
+            negate_ddy: true,
+            ..Default::default()
+        },
     )
     .unwrap();
-    assert!(o.fs.contains("dFdy(-g_Time)") || o.fs.contains("dFdy((-g_Time))"), "{}", o.fs);
+    assert!(
+        o.fs.contains("dFdy(-g_Time)") || o.fs.contains("dFdy((-g_Time))"),
+        "{}",
+        o.fs
+    );
 }
 
 #[test]
@@ -310,8 +408,19 @@ fn vertex_texture_lookups_use_level_zero() {
     let vs = "attribute vec3 a_Position;\nuniform sampler2D g_Texture1;\nvarying vec4 v_C;\nvoid main() { v_C = texSample2D(g_Texture1, a_Position.xy); gl_Position = vec4(a_Position, 1.0); }\n";
     let fs = "varying vec4 v_C;\nvoid main() { gl_FragColor = v_C; }\n";
     let o = build(vs, fs).unwrap();
-    assert!(o.vs.contains("textureLod(sampler2D(lumen_tex1, lumen_smp1), a_Position.xy, 0.0)"), "{}", o.vs);
-    assert!(o.shader.reflection().texture("g_Texture1").unwrap().stages.vertex);
+    assert!(
+        o.vs.contains("textureLod(sampler2D(lumen_tex1, lumen_smp1), a_Position.xy, 0.0)"),
+        "{}",
+        o.vs
+    );
+    assert!(
+        o.shader
+            .reflection()
+            .texture("g_Texture1")
+            .unwrap()
+            .stages
+            .vertex
+    );
     assert_eq!(o.shader.program.reflection.vertex_entry, "vs_main");
 }
 
@@ -323,10 +432,17 @@ fn samplers_passed_to_functions() {
         "uniform sampler2D g_Texture3;\nvec4 blur(sampler2D tex, vec2 uv) { return texSample2D(tex, uv) + texSample2D(tex, uv + 0.01); }\nvec4 twice(sampler2D t) { return blur(t, v_TexCoord) * 2.0; }",
         "    color += twice(g_Texture3) + blur(g_Texture0, v_TexCoord);\n    ivec2 size = textureSize(g_Texture3, 0);\n    color.r += float(size.x);",
     );
-    assert!(o.fs.contains("vec4 blur(texture2D tex_lt, sampler tex_ls, vec2 uv)"), "{}", o.fs);
+    assert!(
+        o.fs.contains("vec4 blur(texture2D tex_lt, sampler tex_ls, vec2 uv)"),
+        "{}",
+        o.fs
+    );
     assert!(o.fs.contains("twice(lumen_tex3, lumen_smp3)"), "{}", o.fs);
     let t = o.shader.reflection().texture("g_Texture3").unwrap();
-    assert_eq!((t.unit, t.group, t.texture_binding, t.sampler_binding), (3, 1, 6, 7));
+    assert_eq!(
+        (t.unit, t.group, t.texture_binding, t.sampler_binding),
+        (3, 1, 6, 7)
+    );
 }
 
 #[test]
@@ -337,7 +453,11 @@ fn volume_samplers_bind_3d_textures() {
         "    vec3 graded = texSample3D(g_Texture1, color.rgb);\n    color.rgb = mix(color.rgb, graded, g_LutParams);",
     );
     assert!(o.fs.contains("uniform texture3D lumen_tex1;"), "{}", o.fs);
-    assert!(o.fs.contains("texture(sampler3D(lumen_tex1, lumen_smp1), "), "{}", o.fs);
+    assert!(
+        o.fs.contains("texture(sampler3D(lumen_tex1, lumen_smp1), "),
+        "{}",
+        o.fs
+    );
     let t = o.shader.reflection().texture("g_Texture1").unwrap();
     assert_eq!((t.unit, t.texture_binding, t.sampler_binding), (1, 2, 3));
     let m = &o.shader.program.module;
@@ -349,18 +469,31 @@ fn volume_samplers_bind_3d_textures() {
             _ => None,
         })
         .collect();
-    assert!(dims.contains(&(0, naga::ImageDimension::D2)) && dims.contains(&(2, naga::ImageDimension::D3)), "{dims:?}");
+    assert!(
+        dims.contains(&(0, naga::ImageDimension::D2))
+            && dims.contains(&(2, naga::ImageDimension::D3)),
+        "{dims:?}"
+    );
     // One binding per unit: a 2D and a 3D sampler cannot share unit 0.
-    let e = fails("uniform sampler3D lutTex;", "    color.rgb += texSample3D(lutTex, color.rgb).rgb;");
+    let e = fails(
+        "uniform sampler3D lutTex;",
+        "    color.rgb += texSample3D(lutTex, color.rgb).rgb;",
+    );
     assert!(e.contains("different texture types"), "{e}");
     // Other dimensions stay unsupported.
-    let e = fails("uniform samplerCube g_Texture2;", "    color += texture(g_Texture2, vec3(v_TexCoord, 1.0));");
+    let e = fails(
+        "uniform samplerCube g_Texture2;",
+        "    color += texture(g_Texture2, vec3(v_TexCoord, 1.0));",
+    );
     assert!(e.contains("only 2D and 3D textures"), "{e}");
 }
 
 #[test]
 fn reserved_glsl450_names_are_renamed() {
-    let o = ok("float filter(float sample) { return sample * 2.0; }", "    float sample = 1.0;\n    float texture2D = 2.0;\n    color.r = filter(sample) + texture2D;");
+    let o = ok(
+        "float filter(float sample) { return sample * 2.0; }",
+        "    float sample = 1.0;\n    float texture2D = 2.0;\n    color.r = filter(sample) + texture2D;",
+    );
     assert!(o.fs.contains("sample_l"), "{}", o.fs);
     assert!(o.fs.contains("texture2D_l"), "{}", o.fs);
 }
@@ -380,7 +513,10 @@ fn structs_loops_switch_and_prototypes() {
 
 #[test]
 fn global_initializers_run_before_main() {
-    let o = ok("float g_Scaled = g_Time * 2.0;\nconst vec3 C = vec3(1.0, 0.5, 0.25);\nconst float D = C.x * 2.0;", "    color.rgb *= C * g_Scaled * D;");
+    let o = ok(
+        "float g_Scaled = g_Time * 2.0;\nconst vec3 C = vec3(1.0, 0.5, 0.25);\nconst float D = C.x * 2.0;",
+        "    color.rgb *= C * g_Scaled * D;",
+    );
     assert!(o.fs.contains("g_Scaled = g_Time * 2.0;"), "{}", o.fs);
     assert!(o.fs.contains("lumen_user_main();"), "{}", o.fs);
     assert!(o.fs.contains("const vec3 C"), "{}", o.fs);
@@ -401,7 +537,10 @@ fn errors_are_reported_with_lines() {
     assert!(e.contains("fragment shader, line"), "{e}");
     let e = build(VS, "void notmain() {}\n").err().unwrap().to_string();
     assert!(e.contains("main"), "{e}");
-    let e = build(VS, "#version 330\nvoid main() {}\n").err().unwrap().to_string();
+    let e = build(VS, "#version 330\nvoid main() {}\n")
+        .err()
+        .unwrap()
+        .to_string();
     assert!(e.contains("#version"), "{e}");
 }
 
@@ -411,9 +550,16 @@ fn errors_are_reported_with_lines() {
 fn includes_combos_and_annotations() {
     let common = "#ifndef COMMON_H\n#define COMMON_H\nuniform float g_Time;\nvec3 Tint(vec3 c, vec3 t) { return c * t; }\n#define PI 3.14159265\n#define SQ(x) ((x) * (x))\n#endif\n";
     let fs = "// [COMBO] {\"material\":\"mode\",\"combo\":\"MODE\",\"type\":\"options\",\"default\":2}\n#include \"common.h\"\n#include \"common.h\"\nvarying vec2 v_TexCoord;\nuniform sampler2D g_Texture0; // {\"hidden\":true}\nuniform sampler2D g_Texture1; // {\"combo\":\"MASK\",\"default\":\"util/white\"}\nuniform vec3 g_Tint; // {\"material\":\"tint\",\"default\":\"1 0.5 0.25\",\"type\":\"color\"}\nuniform float g_Strength; // {\"material\":\"strength\",\"default\":0.75}\nuniform float g_NoKey; // {\"default\":5}\nvoid main() {\n    vec4 c = texSample2D(g_Texture0, v_TexCoord);\n#if MASK\n    c.a *= texSample2D(g_Texture1, v_TexCoord).r;\n#endif\n#if MODE == 2\n    c.rgb = Tint(c.rgb, g_Tint) * SQ(g_Strength) * PI + g_NoKey;\n#endif\n    gl_FragColor = c;\n}\n";
-    let files = [("shaders/t.vert", VS), ("shaders/t.frag", fs), ("shaders/common.h", common)];
+    let files = [
+        ("shaders/t.vert", VS),
+        ("shaders/t.frag", fs),
+        ("shaders/common.h", common),
+    ];
     // Slot 1 used by the override: MASK is required (V = 1).
-    let combos = PassCombos { used_slots: [0, 1].into(), ..Default::default() };
+    let combos = PassCombos {
+        used_slots: [0, 1].into(),
+        ..Default::default()
+    };
     let o = build_with(&files, &combos, CompileOptions::default()).unwrap();
     assert!(o.fs.contains("lumen_tex1"), "{}", o.fs);
     assert_eq!(o.shader.fragment_combos.get("MASK"), Some(&1));
@@ -423,7 +569,8 @@ fn includes_combos_and_annotations() {
     assert_eq!(p.uniform, "g_Tint");
     assert_eq!(m.ty, UniformType::VEC3);
     let init = o.shader.initial_uniforms();
-    let rd = |off: u32| f32::from_le_bytes(init[off as usize..off as usize + 4].try_into().unwrap());
+    let rd =
+        |off: u32| f32::from_le_bytes(init[off as usize..off as usize + 4].try_into().unwrap());
     assert_eq!(rd(m.offset + 4), 0.5);
     let s = o.shader.reflection().uniform("g_Strength").unwrap();
     assert_eq!(rd(s.offset), 0.75);
@@ -434,12 +581,18 @@ fn includes_combos_and_annotations() {
     let o = build_with(&files, &PassCombos::default(), CompileOptions::default()).unwrap();
     assert!(!o.fs.contains("lumen_tex1"), "{}", o.fs);
     // An explicit material combo wins over the discovered one.
-    let combos = PassCombos { material: [("MODE".to_string(), 0)].into(), ..Default::default() };
+    let combos = PassCombos {
+        material: [("MODE".to_string(), 0)].into(),
+        ..Default::default()
+    };
     let o = build_with(&files, &combos, CompileOptions::default()).unwrap();
     assert!(!o.fs.contains("Tint("), "{}", o.fs);
     // Texture stacks.
     let stacks = o.shader.texture_stacks(&Default::default());
-    assert_eq!(stacks[&1], vec![lumen_shader::TextureCandidate::Named("util/white".into())]);
+    assert_eq!(
+        stacks[&1],
+        vec![lumen_shader::TextureCandidate::Named("util/white".into())]
+    );
 }
 
 #[test]
@@ -451,7 +604,15 @@ fn require_lighting_module() {
 #[test]
 fn copy_command_shader() {
     let c = ShaderCompiler::new(CompileOptions::default(), None);
-    let s = c.load_pass(&MemFs::default(), &PassRequest { shader: "commands/copy", combos: &PassCombos::default() }).unwrap();
+    let s = c
+        .load_pass(
+            &MemFs::default(),
+            &PassRequest {
+                shader: "commands/copy",
+                combos: &PassCombos::default(),
+            },
+        )
+        .unwrap();
     let r = s.reflection();
     assert!(r.uniform_block.is_none());
     assert_eq!(r.attributes.len(), 2);
@@ -472,7 +633,15 @@ fn engine_uniforms_frame_block_and_packed_arrays() {
     let r = o.shader.reflection();
     let mut frame = r.frame_uniforms.clone();
     frame.sort();
-    assert_eq!(frame, ["g_AudioSpectrum16Left", "g_Daytime", "g_PointerPosition", "g_Time"]);
+    assert_eq!(
+        frame,
+        [
+            "g_AudioSpectrum16Left",
+            "g_Daytime",
+            "g_PointerPosition",
+            "g_Time"
+        ]
+    );
     assert!(r.engine(EngineUniform::Time).is_none());
     assert!(o.fs.contains("g_AudioSpectrum16Left[1].y"), "{}", o.fs);
     assert!(o.fs.contains("lumen_f_g_TexelSize"), "{}", o.fs);
@@ -481,13 +650,20 @@ fn engine_uniforms_frame_block_and_packed_arrays() {
     assert!(mvp.stages.vertex && !mvp.stages.fragment);
     assert!(r.engine(EngineUniform::Color).is_some());
     assert!(r.engine(EngineUniform::Brightness).is_none());
-    let attrs: Vec<_> = r.attributes.iter().map(|a| (a.name.as_str(), a.location)).collect();
+    let attrs: Vec<_> = r
+        .attributes
+        .iter()
+        .map(|a| (a.name.as_str(), a.location))
+        .collect();
     assert_eq!(attrs, vec![("a_Position", 0), ("a_TexCoord", 1)]);
     // Without the frame block, everything lives in the pass block; scalar arrays are packed.
     let o = build_with(
         &[("shaders/t.vert", VS), ("shaders/t.frag", &fs)],
         &PassCombos::default(),
-        CompileOptions { frame_globals: false, ..Default::default() },
+        CompileOptions {
+            frame_globals: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let r = o.shader.reflection();
@@ -505,7 +681,10 @@ fn engine_uniforms_frame_block_and_packed_arrays() {
 
 #[test]
 fn other_sampler_names_read_unit_zero() {
-    let o = ok("uniform sampler2D noiseTex;\nuniform sampler2D g_Texture9;", "    color += texSample2D(noiseTex, v_TexCoord) + texSample2D(g_Texture9, v_TexCoord);");
+    let o = ok(
+        "uniform sampler2D noiseTex;\nuniform sampler2D g_Texture9;",
+        "    color += texSample2D(noiseTex, v_TexCoord) + texSample2D(g_Texture9, v_TexCoord);",
+    );
     let r = o.shader.reflection();
     assert_eq!(r.textures.len(), 1);
     let t = &r.textures[0];
@@ -517,19 +696,32 @@ fn other_sampler_names_read_unit_zero() {
 #[test]
 fn engine_uniform_with_another_type_is_not_mapped() {
     let o = ok("uniform vec4 g_Daytime;", "    color += g_Daytime;");
-    assert!(o.shader.reflection().engine(EngineUniform::Daytime).is_none());
+    assert!(
+        o.shader
+            .reflection()
+            .engine(EngineUniform::Daytime)
+            .is_none()
+    );
     assert!(o.shader.reflection().uniform("g_Daytime").is_some());
 }
 
 #[test]
 fn uniform_value_writes_by_offset() {
-    let o = ok("uniform vec2 g_Offset; // {\"material\":\"offset\",\"default\":\"0 0\"}", "    color.rg += g_Offset;");
+    let o = ok(
+        "uniform vec2 g_Offset; // {\"material\":\"offset\",\"default\":\"0 0\"}",
+        "    color.rg += g_Offset;",
+    );
     let (_, m) = o.shader.constant("offset").unwrap();
     let mut buf = o.shader.initial_uniforms();
-    let v = lumen_shader::ConstantValue::Vec3([1.0, 2.0, 3.0]).to_uniform(m.ty).unwrap();
+    let v = lumen_shader::ConstantValue::Vec3([1.0, 2.0, 3.0])
+        .to_uniform(m.ty)
+        .unwrap();
     assert_eq!(v, UniformValue::Vec2([1.0, 2.0]));
     v.write(m, &mut buf);
-    assert_eq!(&buf[m.offset as usize..m.offset as usize + 4], &1.0f32.to_le_bytes());
+    assert_eq!(
+        &buf[m.offset as usize..m.offset as usize + 4],
+        &1.0f32.to_le_bytes()
+    );
 }
 
 // ---- cache and parallel compilation ---------------------------------------------------------
@@ -543,17 +735,30 @@ fn disk_cache_round_trip() {
     fs.insert("shaders/t.vert", VS);
     fs.insert("shaders/t.frag", fs_src.as_bytes());
     let combos = PassCombos::default();
-    let req = PassRequest { shader: "t", combos: &combos };
-    let first = ShaderCompiler::new(CompileOptions::default(), Some(dir.clone())).load_pass(&fs, &req).unwrap();
+    let req = PassRequest {
+        shader: "t",
+        combos: &combos,
+    };
+    let first = ShaderCompiler::new(CompileOptions::default(), Some(dir.clone()))
+        .load_pass(&fs, &req)
+        .unwrap();
     let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
     assert_eq!(entries.len(), 1);
     let t = std::time::Instant::now();
-    let second = ShaderCompiler::new(CompileOptions::default(), Some(dir.clone())).load_pass(&fs, &req).unwrap();
+    let second = ShaderCompiler::new(CompileOptions::default(), Some(dir.clone()))
+        .load_pass(&fs, &req)
+        .unwrap();
     let elapsed = t.elapsed();
     assert_eq!(first.program.reflection, second.program.reflection);
     // Spans are not serialized; the IR itself must be identical.
-    assert_eq!(format!("{:?}", first.program.module.types), format!("{:?}", second.program.module.types));
-    assert_eq!(first.program.module.functions.len(), second.program.module.functions.len());
+    assert_eq!(
+        format!("{:?}", first.program.module.types),
+        format!("{:?}", second.program.module.types)
+    );
+    assert_eq!(
+        first.program.module.functions.len(),
+        second.program.module.functions.len()
+    );
     assert_eq!(first.program.module.entry_points.len(), 2);
     assert_eq!(first.key, second.key);
     println!("cached load: {elapsed:?}");
@@ -563,7 +768,9 @@ fn disk_cache_round_trip() {
     let n = data.len();
     data[n - 1] ^= 0xff;
     std::fs::write(&path, &data).unwrap();
-    let third = ShaderCompiler::new(CompileOptions::default(), Some(dir.clone())).load_pass(&fs, &req).unwrap();
+    let third = ShaderCompiler::new(CompileOptions::default(), Some(dir.clone()))
+        .load_pass(&fs, &req)
+        .unwrap();
     assert_eq!(first.program.reflection, third.program.reflection);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -572,16 +779,33 @@ fn disk_cache_round_trip() {
 fn parallel_loading_deduplicates() {
     let mut fs = MemFs::default();
     fs.insert("shaders/t.vert", VS);
-    fs.insert("shaders/t.frag", frag("// [COMBO] {\"combo\":\"A\",\"default\":0}", "#if A\n    color.r = 1.0;\n#endif").as_bytes());
+    fs.insert(
+        "shaders/t.frag",
+        frag(
+            "// [COMBO] {\"combo\":\"A\",\"default\":0}",
+            "#if A\n    color.r = 1.0;\n#endif",
+        )
+        .as_bytes(),
+    );
     let c0 = PassCombos::default();
-    let c1 = PassCombos { material: [("A".to_string(), 1)].into(), ..Default::default() };
-    let reqs: Vec<PassRequest> =
-        (0..32).map(|i| PassRequest { shader: "t", combos: if i % 2 == 0 { &c0 } else { &c1 } }).collect();
+    let c1 = PassCombos {
+        material: [("A".to_string(), 1)].into(),
+        ..Default::default()
+    };
+    let reqs: Vec<PassRequest> = (0..32)
+        .map(|i| PassRequest {
+            shader: "t",
+            combos: if i % 2 == 0 { &c0 } else { &c1 },
+        })
+        .collect();
     let c = ShaderCompiler::new(CompileOptions::default(), None);
     let res = c.load_passes(&fs, &reqs);
     let a = res[0].as_ref().unwrap();
     let b = res[1].as_ref().unwrap();
-    assert!(std::sync::Arc::ptr_eq(&a.program, &res[2].as_ref().unwrap().program));
+    assert!(std::sync::Arc::ptr_eq(
+        &a.program,
+        &res[2].as_ref().unwrap().program
+    ));
     assert!(!std::sync::Arc::ptr_eq(&a.program, &b.program));
     assert_eq!(a.key, res[2].as_ref().unwrap().key);
     assert_ne!(a.key, b.key);
