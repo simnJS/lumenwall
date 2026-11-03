@@ -19,6 +19,8 @@ use lumenwall::settings::{Clamp, HwDecode, Layer, Scaling, WallpaperSource};
 use lumenwall_engine::{EngineControl, EnginePlan, Stopped};
 
 fn main() -> ExitCode {
+    // First, while the process has a single thread: it may set a Vulkan loader variable.
+    lumenwall_engine::restrict_vulkan_loader();
     let attached = lumenwall::console::prepare();
     let resolver = lumenwall_engine::WallpaperResolver::new();
     let install = resolver.clone();

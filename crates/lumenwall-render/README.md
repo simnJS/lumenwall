@@ -63,6 +63,11 @@ keeps the instance, to create another device with other options without enumerat
 again: lumenwall-engine recreates the device with video decode queues
 (`ContextOptions::video_decode`, `ctx.video_decode_requested()`) when a video replaces a scene.
 
+`loader::adapter_manifest_glob(adapter)` names the Vulkan driver of an adapter as a
+`VK_LOADER_DRIVERS_SELECT` glob of its Linux manifest (`*nvidia*`, `*radeon*`, `*intel*`, …,
+from `VkPhysicalDeviceDriverProperties::driverID`); lumenwall-engine remembers it to restrict
+the loader at the next start.
+
 ### Textures (`lumenwall-formats` → `TextureUpload`)
 
 | `.tex` format | `TexelFormat` |

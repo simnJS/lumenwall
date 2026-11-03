@@ -40,7 +40,7 @@ use crate::shaders::default_provider;
 use crate::video::{VideoSlot, notify_from};
 use crate::wallpaper::Wallpaper;
 use crate::web::WebSlot;
-use crate::{WallpaperResolver, cache_dir};
+use crate::{WallpaperResolver, cache_dir, vulkan_driver};
 
 /// Wakes the engine loop from any thread; usable before the platform exists and while the
 /// engine is idle (no surfaces).
@@ -476,43 +476,61 @@ impl Engine {
     }
 
     /// Instance (`instance`, or a new one), device and the GPU surface of `first`, whose
-    /// adapter must present it.
+    /// adapter must present it. When the Vulkan loader is restricted to the remembered driver
+    /// and that finds no adapter or another one, the instance is created again with every
+    /// driver (`vulkan_driver`).
     fn open_gpu(
         &self,
         surfaces: &dyn WallpaperSurface,
         first: OutputId,
         instance: Option<GpuInstance>,
     ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
-        let t0 = Instant::now();
-        let instance = instance.unwrap_or_else(|| GpuInstance::new(None));
-        let t1 = Instant::now();
-        let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
-        let t2 = Instant::now();
-        let ctx = instance
-            .into_context(
-                &ContextOptions {
-                    pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
-                    // Timestamp queries are allowed so that statistics can time the GPU on
-                    // demand; nothing is measured until someone asks.
-                    profiling: true,
-                    // Video wallpapers: decode queues on the render device (zero copy).
-                    video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
-                        && self
-                            .wallpapers
-                            .iter()
-                            .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
-                    ..ContextOptions::default()
-                },
-                &[&first_surface],
-            )
-            .map_err(|e| e.to_string())?;
-        let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
-        tracing::debug!(
-            "GPU opened: instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
-            ms(t0, t1),
-            ms(t1, t2),
-            ms(t2, Instant::now())
-        );
+        let options = ContextOptions {
+            pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
+            // Timestamp queries are allowed so that statistics can time the GPU on demand;
+            // nothing is measured until someone asks.
+            profiling: true,
+            // Video wallpapers: decode queues on the render device (zero copy).
+            video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
+                && self
+                    .wallpapers
+                    .iter()
+                    .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
+            ..ContextOptions::default()
+        };
+        let open = |instance: Option<GpuInstance>| {
+            let t0 = Instant::now();
+            let instance = instance.unwrap_or_else(|| GpuInstance::new(None));
+            let t1 = Instant::now();
+            let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
+            let t2 = Instant::now();
+            let ctx = instance
+                .into_context(&options, &[&first_surface])
+                .map_err(|e| e.to_string())?;
+            let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+            tracing::debug!(
+                "GPU opened (Vulkan drivers: {}): instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
+                vulkan_driver::describe(),
+                ms(t0, t1),
+                ms(t1, t2),
+                ms(t2, Instant::now())
+            );
+            Ok::<_, String>((first_surface, ctx))
+        };
+        let opened = match open(instance) {
+            Ok((_, ctx)) if vulkan_driver::wrong_adapter(&ctx) => {
+                Err("the remembered GPU is not there".to_owned())
+            }
+            other => other,
+        };
+        let (first_surface, ctx) = match opened {
+            Err(e) if vulkan_driver::lift() => {
+                tracing::info!("remembered Vulkan driver: {e}; trying every driver");
+                open(None)?
+            }
+            other => other?,
+        };
+        vulkan_driver::remember(&ctx);
         Ok((first_surface, ctx))
     }
 

@@ -27,6 +27,7 @@ pub mod shaders;
 pub mod text;
 mod texture;
 mod video;
+mod vulkan_driver;
 mod wallpaper;
 mod web;
 
@@ -46,6 +47,7 @@ pub use scene::{
 pub use script::TextSink;
 pub use shaders::{ShaderProvider, default_provider};
 pub use texture::{LoadedTexture, TextureCache};
+pub use vulkan_driver::restrict_vulkan_loader;
 pub use wallpaper::Wallpaper;
 
 /// Script types used by [`SceneRuntime::media_changed`] and [`SceneRuntime::script_stats`].

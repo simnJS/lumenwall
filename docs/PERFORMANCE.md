@@ -67,7 +67,8 @@ adapter + device 84–93 ms, scene rebuild 64–74 ms from the shader and pipeli
 Keeping the Vulkan instance alive across the release was measured and rejected: −55 ms on the
 restore, but +100 MiB RSS (driver libraries stay mapped) and 0.5 wake-ups/s while released.
 Restricting the Vulkan loader to the NVIDIA driver (`VK_LOADER_DRIVERS_SELECT=*nvidia*`, user
-environment) saves another 25–40 ms on instance creation on this machine (9 ICDs installed).
+environment) saves another 25–40 ms on instance creation on this machine (9 ICDs installed);
+Lumenwall now does it by itself (below).
 
 ### Baseline (same machine and method, November 2026)
 
@@ -96,3 +97,4 @@ particles off, frames 0 and 44) stay identical to the pixel after each change.
 | Video applied to a scene device: device recreated with the decode queues (GPU release mechanism, Vulkan instance kept). Scene 3018340632 → video 3655057993 → scene over IPC | switch 187–257 ms; video by NVDEC + copy: 9.7 % CPU, 1280–1870 wake-ups/s, RSS 570–582 MiB, VRAM 675–683 MiB; back to the scene: RSS 305 MiB, VRAM 258 MiB | switch 188–191 ms; zero copy: 1.7–2.0 % CPU, 520 wake-ups/s, RSS 261 MiB, VRAM 222 MiB (= the video started alone); back to the scene: RSS 251 MiB, VRAM 174 MiB |
 | `malloc_trim(0)` (glibc) after a wallpaper is unloaded and after the GPU release, 0.8–2.6 ms each | back to the scene after the video: RSS 249 MiB; GPU released: 3018340632 117 MiB, 3463520581 131 MiB | 219–220 MiB; 101 MiB and 110 MiB |
 | Image composites A/B at the image size only when the chain writes them or a material names them, 1×1 otherwise (pixels identical on the 24 installed scenes) | tracked GPU memory, headless 1920×1080: 3463520581 515 MiB, 1960765686 380 MiB, 3372348904 316 MiB, 3089056751 253 MiB, razer_bedroom 206 MiB; VRAM in the window (nvidia-smi): 3463520581 642 MiB, 1960765686 438 MiB, 3372348904 415 MiB, 3018340632 170 MiB | 384, 190, 194, 141, 141 MiB; 514, 247, 257, 170 MiB |
+| Vulkan loader restricted to the driver of the GPU used last time (`VK_LOADER_DRIVERS_SELECT` set by `main` from `~/.cache/lumenwall/vulkan-driver`; every driver again when it finds no adapter or another one). Launch of 3018340632 | instance 71–75 ms, adapter + device 146–183 ms, exec → scene loaded 347–401 ms, RSS 194 MiB, 176 shared objects; GPU released: RSS 101 MiB | instance 47–49 ms, adapter + device 102–123 ms, exec → scene loaded 308–374 ms, RSS 144–145 MiB, 167 shared objects; GPU released: RSS 54–55 MiB |
