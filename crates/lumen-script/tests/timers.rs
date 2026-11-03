@@ -98,7 +98,8 @@ fn zero_and_negative_delays_wait_for_the_next_tick() {
          }",
     )
     .unwrap();
-    // Created during the load-time update: nothing fires yet.
+    // Created during the first tick's update (after timers ran): nothing fires yet.
+    e.tick(&mut h);
     assert_eq!(fired(&mut e, &mut h), "");
     e.tick(&mut h);
     assert_eq!(fired(&mut e, &mut h), "zero,neg");

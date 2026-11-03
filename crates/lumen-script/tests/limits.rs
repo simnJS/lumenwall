@@ -32,7 +32,7 @@ fn infinite_loop_in_update_is_interrupted() {
         1,
         "alpha",
         // A JS try/catch cannot swallow the interruption.
-        "let n = 0; export function update() { if (++n > 1) { for (;;) { try { for (;;) {} } catch (e) {} } } }",
+        "export function update() { for (;;) { try { for (;;) {} } catch (e) {} } }",
     )
     .unwrap();
     let good = load(
@@ -50,12 +50,14 @@ fn infinite_loop_in_update_is_interrupted() {
         "tick took {:?}",
         start.elapsed()
     );
+    // A budget overrun disables at once (no three-strikes rule).
     assert!(!e.is_active(bad));
     assert_eq!(h.logged("execution budget exceeded"), 1);
     // The script after the culprit is skipped this frame only.
+    assert_eq!(h.member(ObjectRef::Layer(2), "alpha"), Some(&Value::Int(0)));
     e.tick(&mut h);
     assert!(e.is_active(good));
-    assert_eq!(h.member(ObjectRef::Layer(2), "alpha"), Some(&Value::Int(2)));
+    assert_eq!(h.member(ObjectRef::Layer(2), "alpha"), Some(&Value::Int(1)));
 }
 
 #[test]
@@ -142,10 +144,23 @@ fn stack_overflow() {
         "alpha",
         "function f(n) { return f(n + 1) + 1; } export function update() { f(0); }",
     )
+    .unwrap();
+    for _ in 0..3 {
+        e.tick(&mut h);
+    }
+    assert!(!e.is_active(id));
+    assert_eq!(h.logged("RangeError"), 3);
+    let err = load(
+        &mut e,
+        &mut h,
+        2,
+        "alpha",
+        "function f() { return f() + 1; } f();",
+    )
     .unwrap_err();
     assert!(
-        matches!(&id, ScriptError::Failed { message, .. } if message.contains("RangeError")),
-        "{id:?}"
+        matches!(&err, ScriptError::Failed { message, .. } if message.contains("RangeError")),
+        "{err:?}"
     );
 }
 
@@ -177,6 +192,7 @@ fn unhandled_rejections_are_logged() {
         "export function update() { Promise.reject(new Error('nobody listens')); }",
     )
     .unwrap();
+    e.tick(&mut h);
     assert!(h.logged("unhandled promise rejection: Error: nobody listens") >= 1);
 }
 

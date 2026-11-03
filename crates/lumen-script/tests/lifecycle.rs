@@ -49,6 +49,9 @@ fn return_values_follow_spec_4_2() {
             &format!("export function update(value) {{ {body} }}"),
         )
         .unwrap();
+        // lumen: nothing runs before the first tick.
+        assert_eq!(alpha(&h, 1), Some(Value::Float(9.0)), "{body}");
+        e.tick(&mut h);
         assert!(e.is_active(id), "{body}");
         assert_eq!(alpha(&h, 1), expected, "{body}");
     }
@@ -62,6 +65,7 @@ fn return_values_follow_spec_4_2() {
         "export function update() { return { a: 1 }; }",
     )
     .unwrap();
+    e.tick(&mut h);
     assert_eq!(h.logged("no numeric x/y"), 1);
 }
 
@@ -81,6 +85,7 @@ fn vector_value_is_a_live_view_and_a_float_converts() {
         "export function update(value) { shared.same = shared.prev === value; shared.prev = value; value.y += 10; return value; }",
     )
     .unwrap();
+    e.tick(&mut h);
     assert_eq!(
         h.member(ObjectRef::Layer(1), "origin"),
         Some(&Value::Vec3([0.0, 110.0, 0.0]))
@@ -103,6 +108,7 @@ fn vector_value_is_a_live_view_and_a_float_converts() {
         "export function update(value) { return 2; }",
     )
     .unwrap();
+    e.tick(&mut h);
     assert_eq!(
         h.member(ObjectRef::Layer(1), "scale").map(Value::vec3),
         Some([2.0, 2.0, 2.0])
@@ -110,7 +116,7 @@ fn vector_value_is_a_live_view_and_a_float_converts() {
 }
 
 #[test]
-fn init_then_update_at_load_then_every_tick() {
+fn init_at_load_then_update_every_tick() {
     let (mut e, mut h) = setup();
     h.set_member(ObjectRef::Layer(1), "alpha", Value::Int(1));
     load(
@@ -123,6 +129,9 @@ fn init_then_update_at_load_then_every_tick() {
          export function update(v) { shared.calls.push('update:' + v); return v * 2; }",
     )
     .unwrap();
+    // lumen: init at load, first update on the first tick.
+    assert_eq!(alpha(&h, 1), Some(Value::Int(2)));
+    e.tick(&mut h);
     assert_eq!(alpha(&h, 1), Some(Value::Int(4)));
     e.tick(&mut h);
     assert_eq!(alpha(&h, 1), Some(Value::Int(8)));
@@ -178,6 +187,7 @@ fn duplicate_keys_and_load_errors() {
         ),
         Err(ScriptError::Duplicate("alpha_1".into()))
     );
+    e.tick(&mut h);
     assert_eq!(alpha(&h, 1), Some(Value::Int(1)));
 
     h.set_member(ObjectRef::Layer(2), "alpha", Value::Float(0.5));
@@ -210,10 +220,12 @@ fn duplicate_keys_and_load_errors() {
 }
 
 #[test]
-fn update_error_disables_the_script_once() {
+fn update_errors_disable_after_three_in_a_row() {
     let (mut e, mut h) = setup();
-    h.set_member(ObjectRef::Layer(1), "alpha", Value::Float(0.5));
-    h.set_member(ObjectRef::Layer(2), "alpha", Value::Float(0.5));
+    for layer in 1..=3 {
+        h.set_member(ObjectRef::Layer(layer), "alpha", Value::Float(0.5));
+    }
+    // Fails from the second call on.
     let bad = load(
         &mut e,
         &mut h,
@@ -222,30 +234,68 @@ fn update_error_disables_the_script_once() {
         "let n = 0; export function update(v) { if (++n > 1) { null.boom; } return 0.25; }",
     )
     .unwrap();
-    let good = load(
+    // Fails every other call: never three in a row.
+    let flaky = load(
         &mut e,
         &mut h,
         2,
         "alpha",
+        "let n = 0; export function update(v) { if (++n % 2 === 0) { throw new Error('flaky'); } return v + 1; }",
+    )
+    .unwrap();
+    let good = load(
+        &mut e,
+        &mut h,
+        3,
+        "alpha",
         "export function update(v) { return v + 1; }",
     )
     .unwrap();
+    e.tick(&mut h);
     assert_eq!(alpha(&h, 1), Some(Value::Float(0.25)));
     h.set_member(ObjectRef::Layer(1), "alpha", Value::Float(0.5));
-    for _ in 0..3 {
-        e.tick(&mut h);
-    }
+    // Errors 1 and 2 are logged, the script keeps running.
+    e.tick(&mut h);
+    e.tick(&mut h);
+    assert!(e.is_active(bad));
+    assert_eq!(h.logged("script 'alpha_1': update error (1/3)"), 1);
+    assert_eq!(h.logged("script 'alpha_1': update error (2/3)"), 1);
+    // The third consecutive error disables it.
+    e.tick(&mut h);
     assert!(!e.is_active(bad));
-    assert!(e.is_active(good));
+    assert_eq!(h.logged("script 'alpha_1' disabled (update)"), 1);
+    assert_eq!(h.logged("TypeError"), 3);
     assert_eq!(
         alpha(&h, 1),
         Some(Value::Float(0.5)),
-        "value untouched after the error"
+        "value untouched by failing calls"
     );
-    assert_eq!(alpha(&h, 2), Some(Value::Float(4.5)));
-    assert_eq!(h.logged("script 'alpha_1' disabled (update)"), 1);
-    assert_eq!(h.logged("TypeError"), 1);
-    assert_eq!(e.stats().per_frame, 1);
+    for _ in 0..6 {
+        e.tick(&mut h);
+    }
+    assert!(e.is_active(flaky));
+    assert!(e.is_active(good));
+    assert_eq!(h.logged("flaky"), 5);
+    assert_eq!(alpha(&h, 3), Some(Value::Float(10.5)));
+    assert_eq!(e.stats().per_frame, 2);
+}
+
+#[test]
+fn error_logs_are_capped_per_script() {
+    let (mut e, mut h) = setup();
+    load(
+        &mut e,
+        &mut h,
+        1,
+        "alpha",
+        "let n = 0; export function update() { if (++n % 2) throw new Error('odd'); }",
+    )
+    .unwrap();
+    for _ in 0..40 {
+        e.tick(&mut h);
+    }
+    assert_eq!(h.logged("odd"), 10);
+    assert_eq!(h.logged("further update errors are not logged"), 1);
 }
 
 #[test]
@@ -271,6 +321,8 @@ fn promise_jobs_are_drained_every_frame() {
          export function update() { Promise.resolve().then(() => { shared.ticks++; }); }",
     )
     .unwrap();
+    assert_eq!(eval(&mut e, &mut h, "shared.ticks"), Value::Int(0));
+    e.tick(&mut h);
     assert_eq!(eval(&mut e, &mut h, "shared.ticks"), Value::Int(1));
     e.tick(&mut h);
     assert_eq!(eval(&mut e, &mut h, "shared.ticks"), Value::Int(2));

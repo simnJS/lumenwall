@@ -11,8 +11,9 @@
 //! - [`ScriptEngine::tick`] — once per frame: timers, `update` calls, promise jobs;
 //! - event methods (`resize_screen`, `apply_user_properties`, `cursor_event`, `media_*`…).
 //!
-//! A JavaScript error, an exhausted time budget or an out-of-memory condition disables
-//! the faulty script with one log line; nothing panics.
+//! An exhausted time budget, an out-of-memory condition, a load or event error, or three
+//! consecutive `update` errors disable the faulty script with a log line; an isolated
+//! `update` error is logged and the script keeps running. Nothing panics.
 
 mod convert;
 mod engine;

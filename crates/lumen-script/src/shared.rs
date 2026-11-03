@@ -186,6 +186,10 @@ pub(crate) struct Script {
     pub active: bool,
     /// M2: `init` already ran.
     pub initialized: bool,
+    /// Consecutive failed `update` calls.
+    pub update_errors: u8,
+    /// Non-fatal `update` errors logged so far.
+    pub error_logs: u8,
     /// M2: last text handed to the host.
     pub text: String,
     /// M1: module namespace (`this` of event calls). M2: the layer record.
@@ -221,6 +225,8 @@ impl Script {
             prop_names: prop_names.iter().map(|s| (*s).to_owned()).collect(),
             active: true,
             initialized: false,
+            update_errors: 0,
+            error_logs: 0,
             text: String::new(),
             this: None,
             handlers: Default::default(),

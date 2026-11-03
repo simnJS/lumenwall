@@ -213,6 +213,52 @@ fn error_message(ctx: &Ctx<'_>, sh: &Shared, e: rquickjs::Error) -> String {
     }
 }
 
+/// Consecutive `update` errors that disable a script.
+const MAX_UPDATE_ERRORS: u8 = 3;
+/// Non-fatal `update` errors logged per script.
+const MAX_ERROR_LOGS: u8 = 10;
+
+/// lumen: an `update` error is logged and the script keeps running; it is disabled after
+/// [`MAX_UPDATE_ERRORS`] consecutive errors, or at once for a budget overrun or out-of-memory
+/// (those would otherwise stall every frame). Returns whether the script was disabled.
+fn update_failed(sh: &Shared, id: ScriptId, msg: &str) -> bool {
+    let fatal = sh.interrupted.get() || msg.contains("out of memory");
+    let (key, count, log) = {
+        let mut scripts = sh.scripts.borrow_mut();
+        let s = &mut scripts[id.0 as usize];
+        s.update_errors = s.update_errors.saturating_add(1);
+        let log = s.error_logs < MAX_ERROR_LOGS;
+        s.error_logs = s.error_logs.saturating_add(1);
+        (s.key.clone(), s.update_errors, log)
+    };
+    if fatal || count >= MAX_UPDATE_ERRORS {
+        deactivate(sh, id, "update", Some(msg));
+        return true;
+    }
+    if log {
+        sh.log(
+            LogLevel::Error,
+            &format!("script '{key}': update error ({count}/{MAX_UPDATE_ERRORS}): {msg}"),
+        );
+        if sh.scripts.borrow()[id.0 as usize].error_logs == MAX_ERROR_LOGS {
+            sh.log(
+                LogLevel::Error,
+                &format!("script '{key}': further update errors are not logged"),
+            );
+        }
+    }
+    false
+}
+
+/// Ends an `update` error streak.
+fn update_succeeded(sh: &Shared, id: ScriptId) {
+    let mut scripts = sh.scripts.borrow_mut();
+    let s = &mut scripts[id.0 as usize];
+    if s.update_errors != 0 {
+        s.update_errors = 0;
+    }
+}
+
 /// Disables a script: releases its JS handles and timers, logs `msg` when given.
 fn deactivate(sh: &Shared, id: ScriptId, what: &str, msg: Option<&str>) {
     let key = {
@@ -536,7 +582,8 @@ impl ScriptEngine {
     }
 
     /// Loads a property script (spec 06 §8.1): evaluates the module, then calls `init`,
-    /// `applyUserProperties`, `applyGeneralSettings` and `update` when exported.
+    /// `applyUserProperties` and `applyGeneralSettings` when exported. Its first `update`
+    /// runs on the next [`ScriptEngine::tick`].
     pub fn load_property_script(
         &mut self,
         host: &mut dyn SceneHost,
@@ -1248,11 +1295,8 @@ fn load_module_inner(
         let arg = payload(ctx, sh, &Payload::Record(&all)).map_err(err)?;
         call_event(ctx, sh, id, Event::ApplyGeneralSettings, &[arg])?;
     }
-    // Réf (spec 06 §8.1 step 5): first update right away.
-    if has_update {
-        enter_script(ctx, sh, &globals, &atoms, Some(id)).map_err(err)?;
-        call_bound(ctx, sh, id, Event::Update)?;
-    }
+    // lumen: the first `update` runs on the next tick, not at load (spec 06 §8.1 step 5,
+    // Q-M1-2), so it sees every object of the scene.
     Ok(has_update)
 }
 
@@ -1332,9 +1376,9 @@ fn run_updates(ctx: &Ctx<'_>, sh: &Shared, order: &mut Vec<ScriptId>) -> rquickj
             break;
         }
         enter_script(ctx, sh, &globals, &atoms, Some(id))?;
-        if let Err(msg) = call_bound(ctx, sh, id, Event::Update) {
-            deactivate(sh, id, "update", Some(&msg));
-            failed = true;
+        match call_bound(ctx, sh, id, Event::Update) {
+            Ok(()) => update_succeeded(sh, id),
+            Err(msg) => failed |= update_failed(sh, id, &msg),
         }
     }
     sh.current.set(None);
@@ -1459,6 +1503,7 @@ fn tick_text_layer(ctx: &Ctx<'_>, sh: &Shared, id: ScriptId, clock: crate::host:
     };
     arm(sh, sh.limits.call_budget);
     sh.current.set(Some(id));
+    let init_failed = std::cell::Cell::new(false);
     let run = || -> rquickjs::Result<bool> {
         let m2 = sh.js.borrow().m2_ctx.clone();
         if let Some(m2) = m2 {
@@ -1470,8 +1515,11 @@ fn tick_text_layer(ctx: &Ctx<'_>, sh: &Shared, id: ScriptId, clock: crate::host:
         let record = record.restore(ctx)?;
         let layer = layer.restore(ctx)?;
         if !initialized && let Some(init) = init {
+            // An `init` error disables the layer at once.
+            init_failed.set(true);
             init.restore(ctx)?
                 .call::<_, JsValue>((This(record.clone()),))?;
+            init_failed.set(false);
         }
         if let Some(update) = update {
             let current: JsValue = layer.get("text")?;
@@ -1508,10 +1556,17 @@ fn tick_text_layer(ctx: &Ctx<'_>, sh: &Shared, id: ScriptId, clock: crate::host:
         Ok(changed)
     };
     let changed = match run() {
-        Ok(changed) => changed,
+        Ok(changed) => {
+            update_succeeded(sh, id);
+            changed
+        }
         Err(e) => {
             let msg = error_message(ctx, sh, e);
-            deactivate(sh, id, "text update", Some(&msg));
+            if init_failed.get() {
+                deactivate(sh, id, "text init", Some(&msg));
+            } else {
+                update_failed(sh, id, &msg);
+            }
             false
         }
     };

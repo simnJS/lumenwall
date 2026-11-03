@@ -190,6 +190,9 @@ fn shared_and_constants() {
         "export function update() { return shared.factor * 2; }",
     )
     .unwrap();
+    // lumen: the first update runs on the first tick, not at load.
+    assert_eq!(h.member(ObjectRef::Layer(2), "alpha"), None);
+    e.tick(&mut h);
     assert_eq!(h.member(ObjectRef::Layer(2), "alpha"), Some(&Value::Int(8)));
     assert_eq!(
         eval(
@@ -289,9 +292,14 @@ fn scene_layer_lookup() {
         ),
         b(true)
     );
+    // lumen: an unknown name gives null instead of throwing.
     assert_eq!(
-        throws(&mut e, &mut h, "thisScene.getLayer('nope')"),
-        "Error"
+        eval(&mut e, &mut h, "thisScene.getLayer('nope')"),
+        Value::Null
+    );
+    assert_eq!(
+        throws(&mut e, &mut h, "thisScene.getLayer('nope').name"),
+        "TypeError"
     );
     assert_eq!(throws(&mut e, &mut h, "thisScene.getLayer()"), "TypeError");
     assert_eq!(
@@ -633,6 +641,7 @@ fn this_object_follows_the_binding() {
         eval(&mut e, &mut h, "shared.kind"),
         Value::Array(vec![b(true), b(true)])
     );
+    e.tick(&mut h);
     assert_eq!(h.member(fx, "visible"), Some(&b(false)));
 }
 
@@ -831,6 +840,7 @@ fn script_properties() {
         )
         .unwrap();
     assert!(e.is_active(id));
+    e.tick(&mut h);
     assert_eq!(num(h.member(ObjectRef::Layer(1), "alpha").unwrap()), 20.0);
     // Live: follows the host value.
     h.script_properties

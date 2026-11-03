@@ -214,11 +214,30 @@ fn props_are_frozen_except_live_vectors() {
 fn errors_and_destroy() {
     let (mut e, mut h) = setup();
     let id = create(&mut e, &mut h, 1, "var n = 0; function update() { if (++n > 1) throw new Error('text boom'); return 'ok' + n; }", "").unwrap();
+    // Two errors are logged and the layer keeps running; the third disables it.
+    for _ in 0..3 {
+        e.tick_text(&mut h, id);
+    }
+    assert!(e.is_active(id));
     e.tick_text(&mut h, id);
-    e.tick_text(&mut h, id);
+    assert!(!e.is_active(id));
     e.tick_text(&mut h, id);
     assert_eq!(text(&e, id), "ok1");
-    assert_eq!(h.logged("text boom"), 1);
+    assert_eq!(h.logged("text boom"), 3);
+    assert_eq!(h.logged("disabled (update)"), 1);
+
+    // An init error disables at once.
+    let id = create(
+        &mut e,
+        &mut h,
+        3,
+        "function init() { throw new Error('init boom'); } function update() { return 'x'; }",
+        "",
+    )
+    .unwrap();
+    e.tick_text(&mut h, id);
+    assert!(!e.is_active(id));
+    assert_eq!(h.logged("disabled (text init)"), 1);
 
     let id = create(&mut e, &mut h, 2, "function destroy() { shared.destroyed = thisLayer.text; } function update() { return 'live'; }", "").unwrap();
     e.tick_text(&mut h, id);

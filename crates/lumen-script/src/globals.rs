@@ -433,11 +433,9 @@ pub(crate) fn scene<'js>(ctx: &Ctx<'js>, sh: &Rc<Shared>) -> Result<Object<'js>>
             let name = name.to_string()?;
             return match s.host.with(|h| h.find_layer(&name)).flatten() {
                 Some(id) => Ok(layer_object(ctx, &s, id)?.into_value()),
-                // parity: an unknown name throws (spec 06 §6.3).
-                None => Err(crate::util::plain_error(
-                    ctx,
-                    &format!("layer '{name}' not found"),
-                )),
+                // lumen: an unknown name gives null (the reference throws, spec 06 §6.3), so
+                // scripts probing for an optional layer keep running.
+                None => Ok(JsValue::new_null(ctx.clone())),
             };
         }
         Err(type_error(ctx, "getLayer expects a layer name or id"))

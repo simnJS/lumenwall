@@ -62,10 +62,21 @@ F15 negative delay = 0.
 
 Reproduced reference behaviour (`// parity:`): `clearenabled` reads bloom, `skylightcolor` reads the
 ambient color, bloom strength/threshold truncated; `console.log` without separator, only
-`log`/`error`; `getLayer('unknown')` throws; binary vector ops with wrong arity return
-`undefined`; `%f` number format; `WEMath.mix.length === 1`; `rgb2hsv` f32 comparison and
-`hsv2rgb` truncation quirks; M2 source pre-processing; `pointSize` alias; update order by key
-bytes; first `update` at load; assigning a non-component to a vector throws (strict code).
+`log`/`error`; binary vector ops with wrong arity return `undefined`; `%f` number format;
+`WEMath.mix.length === 1`; `rgb2hsv` f32 comparison and `hsv2rgb` truncation quirks; M2 source
+pre-processing; `pointSize` alias; update order by key bytes; assigning a non-component to a
+vector throws (strict code).
+
+Orchestrator decisions (`// lumen:`):
+
+- `thisScene.getLayer('unknown')` returns `null` (the reference throws), so scripts probing for
+  an optional layer keep running.
+- The first `update` runs on the first tick after loading, not at load (spec §8.1 step 5,
+  Q-M1-2); `init` still runs at load.
+- An `update` error (property or text script) is logged and the script keeps running; three
+  consecutive errors disable it. At most 10 such errors are logged per script. A budget overrun
+  or out-of-memory in `update` disables at once (it would stall every frame).
+- `WEColor` uses a normalized hue in [0, 1) (`lib.sceneScript.d.ts`: "normalized HSV").
 
 ## lib.sceneScript.d.ts coverage
 
@@ -97,15 +108,16 @@ answer with neutral values (`undefined`, `0`, `-1`, `false`, `[]`) until the hos
 From the spec's [Réf], following `docs/PARITY-POLICY.md` rule 4/5 (`// we-doc:`) or the product
 brief:
 
-- Any uncaught error (load, `init`, `update`, events, timers, callbacks, text `init`/`update`),
-  budget overrun or out-of-memory disables that script with one error log; its timers and
-  callbacks are released (spec §11: silent and continues).
+- Errors at load, in `init`, events, timers, callbacks or text `init`, budget overruns and
+  out-of-memory disable the script at once with one error log; `update` errors follow the
+  three-in-a-row rule above. A disabled script's timers and callbacks are released (spec §11:
+  silent and continues).
 - Limits (spec: none, Q-RT-2): `tick_budget` 100 ms, `call_budget` 100 ms, `load_budget` 1 s,
   64 MiB heap, 512 KiB stack, 10 000 promise jobs per tick. Jobs run after every entry point
   (Q-RT-1).
 - `init`/`update` returning `undefined` keep the value (WE `init` page; Réf resets to Null). `null`
   still resets.
-- `init(value)` runs before the first `update`; `applyUserProperties` (all properties at load, then
+- `init(value)` runs at load, before the first `update`; `applyUserProperties` (all properties at load, then
   changes only), `applyGeneralSettings`, `resizeScreen`, cursor events, `mediaStatusChanged`,
   `destroy` are dispatched (spec §8.5: never).
 - Media timeline in seconds; thumbnail colors and all `MediaPropertiesEvent` fields from the host
@@ -113,8 +125,7 @@ brief:
 - `input.cursorScreenPosition` in pixels; `cursorWorldPosition`, `cursorLeftDown` from the host.
 - Vectors: `toString` separates with a space; `equals` uses an epsilon (1e-5); `new VecN()` is the
   zero vector; `new Vec2(vec3)` truncates; `mix` accepts a vector amount.
-- `WEColor.rgb2hsv`/`hsv2rgb` use a normalized hue in [0, 1) ("normalized HSV vector"); spec uses
-  degrees (Q-COL-1).
+- `WEColor.rgb2hsv`/`hsv2rgb` use a normalized hue (see above); the spec uses degrees (Q-COL-1).
 - `thisScene` members and layer properties are writable through the host (Réf: read-only / ignored).
   Writes use the true member name. Unknown names on layer objects become ordinary properties.
 - `engine.openUserShortcut` returns a boolean; `localStorage` follows `ILocalStorage` (any JSON
@@ -125,14 +136,14 @@ brief:
   (`engine.runtime`…) work (Q-M2-1). An empty initial text reads as `" "` (§9.1).
 - In non-strict text scripts, assigning a non-component to a vector is ignored instead of throwing.
 
-## Open questions
+## To calibrate on real Wallpaper Engine
 
-1. Hue scale of `WEColor` (normalized here, degrees in the spec): to check on real wallpapers.
-2. `getLayer('unknown')` throws (reference); with "error disables the script", scripts probing
-   optional layers stop. Return `undefined` instead?
-3. First `update` at load (Réf) or at the first frame (Q-M1-2)?
-4. Unverified conventions: `equals` epsilon, matrices column-major with Euler order Z·Y·X,
-   spherical azimuth measured from +Z toward +X, `perpendicular` = (−y, x).
+Unverified conventions, kept as is until compared with WE:
+
+- `Vec*.equals` / `Mat*.equals` tolerance: 1e-5 absolute per component.
+- Matrices column-major; Euler angles applied X then Y then Z (`R = Rz·Ry·Rx`).
+- `toSpherical` / `fromSpherical`: theta from +Y, azimuth phi measured from +Z toward +X.
+- `Vec2.perpendicular()` = (−y, x).
 
 ## Tests
 
