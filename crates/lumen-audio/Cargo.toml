@@ -1,0 +1,13 @@
+[package]
+name = "lumen-audio"
+description = "Scene sound playback and audio capture for audio-reactive wallpapers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
