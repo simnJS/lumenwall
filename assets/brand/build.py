@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Lumen brand assets: logo, app icon, tray icons, README banner, brand sheet.
+"""Lumenwall brand assets: logo, app icon, tray icons, README banner, brand sheet.
 
 Every SVG under assets/brand/ is written by this script from the geometry below, so a
 change of proportion or colour is made once here (see docs/BRAND.md for the rules).
 
     python3 assets/brand/build.py                 # SVG + PNG + ICO + Linux icon theme
+    python3 assets/brand/build.py --no-packaging  # same, without writing packaging/linux/icons
     python3 assets/brand/build.py --svg-only      # SVG sources only (no external tool)
 
 Rasterizing needs `resvg` and `usvg` 0.45 on the PATH (`cargo install resvg usvg`), or
@@ -27,6 +28,9 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
 
 # ------------------------------------------------------------------ palette (docs/BRAND.md)
+
+ID = "lumenwall"  # technical identifier: file, icon and package names
+NAME = "Lumenwall"
 
 AMBER = "#ffb347"  # brand accent (dark theme accent token)
 AMBER_HI = "#ffc46e"  # accent hover, horizon highlight
@@ -132,43 +136,83 @@ def sun_gradient(gid, y0, y1, bottom=EMBER):
 
 
 # ------------------------------------------------------------------ wordmark
-# Lowercase "lumen", monoline with round terminals, drawn (not typeset): no font licence.
-# Units: stroke 2.6, x-height 12.5, ascender 16.5, baseline y = 0.
+# Lowercase "lumenwall", monoline with round terminals, drawn (not typeset): no font licence.
+# Units: stroke 2.6, x-height 12.5, ascender 16.5, baseline y = 0. Each glyph is built from
+# round-capped segments and arcs of the same weight; strokes are centred so that every
+# terminal and vertex lands exactly on the baseline, x-height or ascender.
 
+WORD = "lumenwall"
 WM_W, WM_X, WM_A = 2.6, 12.5, 16.5
 WM_DN, WM_DM = 8.6, 7.4  # stem distance of n/u and of each m arch
-WM_GAP_STRAIGHT, WM_GAP_ROUND = 3.3, 2.7
+WM_WW, WM_APEX = 14.4, 0.85  # w: width between outer stroke centres, height of its middle apex
+# Spacing between ink edges, by the shape of the facing sides: S straight stem, R round
+# bowl, D diagonal. Diagonals and bowls leave open space at the edge, so they sit closer.
+WM_GAPS = {"SS": 3.3, "SR": 2.7, "RS": 2.7, "RR": 2.2, "SD": 1.3, "DS": 1.3, "RD": 0.9, "DR": 0.9, "DD": 0.8}
+WM_KERN = {"lu": 3.0, "ll": 3.0}  # a lone ascender stem needs a little less room
 
 
-def wordmark_parts():
+def wordmark_glyphs():
+    """Glyph -> (draw(x) -> parts, width between outer stroke centres, left side, right side)."""
     w, h = WM_W, WM_W / 2
     top, bot = -WM_X + h, -h
-    parts = []
-    x = h
-    parts.append(seg(x, -WM_A + h, x, bot, w))  # l
-    x += h + WM_GAP_STRAIGHT - 0.3 + h  # l is a lone stem: slightly tighter
-    r = WM_DN / 2
-    cy = bot - r  # u
-    parts += [seg(x, top, x, cy, w), arc(x + r, cy, r, 0, 180, w), seg(x + WM_DN, top, x + WM_DN, bot, w)]
-    x += WM_DN + h + WM_GAP_STRAIGHT + h
-    rm = WM_DM / 2
-    cy = top + rm  # m
-    parts += [
-        seg(x, top, x, bot, w),
-        arc(x + rm, cy, rm, -180, 0, w),
-        seg(x + WM_DM, cy, x + WM_DM, bot, w),
-        arc(x + WM_DM + rm, cy, rm, -180, 0, w),
-        seg(x + 2 * WM_DM, cy, x + 2 * WM_DM, bot, w),
-    ]
-    x += 2 * WM_DM
-    re = (WM_X - w) / 2  # e
-    cx, cy = x + h + WM_GAP_ROUND + h + re, -WM_X / 2
-    parts += [seg(cx - re, cy, cx + re, cy, w), arc(cx, cy, re, -320, 0, w)]
-    x = cx + re + h + WM_GAP_ROUND + h
-    cy = top + r  # n
-    parts += [seg(x, top, x, bot, w), arc(x + r, cy, r, -180, 0, w), seg(x + WM_DN, cy, x + WM_DN, bot, w)]
-    width = x + WM_DN + h
-    return parts, width
+    r, rm = WM_DN / 2, WM_DM / 2
+    re = (WM_X - w) / 2  # bowl radius of e and a
+    q = WM_WW / 4
+    apex = top + (bot - top) * (1 - WM_APEX)
+    return {
+        "l": (lambda x: [seg(x, -WM_A + h, x, bot, w)], 0, "S", "S"),
+        "u": (
+            lambda x: [seg(x, top, x, bot - r, w), arc(x + r, bot - r, r, 0, 180, w), seg(x + WM_DN, top, x + WM_DN, bot, w)],
+            WM_DN, "S", "S",
+        ),
+        "m": (
+            lambda x: [
+                seg(x, top, x, bot, w),
+                arc(x + rm, top + rm, rm, -180, 0, w),
+                seg(x + WM_DM, top + rm, x + WM_DM, bot, w),
+                arc(x + WM_DM + rm, top + rm, rm, -180, 0, w),
+                seg(x + 2 * WM_DM, top + rm, x + 2 * WM_DM, bot, w),
+            ],
+            2 * WM_DM, "S", "S",
+        ),
+        # e: circle open 40 degrees below the bar, bar across the full bowl.
+        "e": (lambda x: [seg(x, -WM_X / 2, x + 2 * re, -WM_X / 2, w), arc(x + re, -WM_X / 2, re, -320, 0, w)], 2 * re, "R", "R"),
+        "n": (
+            lambda x: [seg(x, top, x, bot, w), arc(x + r, top + r, r, -180, 0, w), seg(x + WM_DN, top + r, x + WM_DN, bot, w)],
+            WM_DN, "S", "S",
+        ),
+        # w: four diagonals with round vertices; the middle apex stops at 85 % of the x-height
+        # so the centre of the word does not darken.
+        "w": (
+            lambda x: [
+                seg(x, top, x + q, bot, w),
+                seg(x + q, bot, x + 2 * q, apex, w),
+                seg(x + 2 * q, apex, x + 3 * q, bot, w),
+                seg(x + 3 * q, bot, x + 4 * q, top, w),
+            ],
+            WM_WW, "D", "D",
+        ),
+        # a: single-storey, the e's circle closed against a full-height stem.
+        "a": (
+            lambda x: [arc(x + re, -WM_X / 2, re, -180, 0, w), arc(x + re, -WM_X / 2, re, 0, 180, w), seg(x + 2 * re, top, x + 2 * re, bot, w)],
+            2 * re, "R", "S",
+        ),
+    }
+
+
+def wordmark_parts(word=WORD):
+    glyphs = wordmark_glyphs()
+    h = WM_W / 2
+    x, parts, prev = h, [], None
+    for c in word:
+        draw, width, left, right = glyphs[c]
+        if prev:
+            pc, pr = prev
+            x += h + WM_KERN.get(pc + c, WM_GAPS[pr + left]) + h
+        parts += draw(x)
+        x += width
+        prev = (c, right)
+    return parts, x + h
 
 
 WM_PARTS, WM_WIDTH = wordmark_parts()
@@ -192,7 +236,7 @@ def svg_doc(w, h, body, title, view=None):
 
 
 def symbol_svg(variant):
-    title = "Lumen symbol"
+    title = f"{NAME} symbol"
     if variant == "color":
         body = f"<defs>{sun_gradient('sun', 5, 12.5)}</defs>" + symbol_paths("url(#sun)", AMBER)
     elif variant == "color-light":
@@ -207,7 +251,7 @@ def symbol_svg(variant):
 # gap = 0.42 x symbol height. Clear space around the lockup = x-height of the wordmark.
 
 
-def lockup(sym_sun, sym_lines, word_fill, defs=""):
+def lockup(sym_sun, sym_lines, word_fill, defs="", gid="sun"):
     s = (WM_A * 1.3) / SYMBOL_BOX[3]  # symbol scale
     sym_w, sym_h = SYMBOL_BOX[2] * s, SYMBOL_BOX[3] * s
     gap = 0.42 * sym_h
@@ -221,10 +265,17 @@ def lockup(sym_sun, sym_lines, word_fill, defs=""):
     sun_fill = sym_sun
     if defs:
         cx, cy, r, cut = SYMBOL_SUN
-        defs = f"<defs>{sun_gradient('sun', (cy - r) * s + sym_dy, cut * s + sym_dy, defs)}</defs>"
-        sun_fill = "url(#sun)"
+        defs = f"<defs>{sun_gradient(gid, (cy - r) * s + sym_dy, cut * s + sym_dy, defs)}</defs>"
+        sun_fill = f"url(#{gid})"
     body = defs + symbol_paths(sun_fill, sym_lines, sym_dx, sym_dy, s) + wordmark_g(word_fill, word_x, baseline, 1)
     return width, height, body
+
+
+def placed_lockup(x, y, scale, word_fill, line, bottom, gid):
+    """The horizontal lockup with its ink box's top-left corner at (x, y), for compositions."""
+    _, _, body = lockup(None, line, word_fill, defs=bottom, gid=gid)
+    pad = WM_X
+    return f'<g transform="translate({n(x - pad * scale)} {n(y - pad * scale)}) scale({n(scale)})">{body}</g>'
 
 
 def lockup_svg(variant):
@@ -235,12 +286,12 @@ def lockup_svg(variant):
     else:
         c = {"mono": INK, "inverse": "#ffffff"}[variant]
         w, h, body = lockup(c, c, c)
-    return svg_doc(w, h, body, "Lumen")
+    return svg_doc(w, h, body, NAME)
 
 
 def stacked_svg(variant):
     word_fill, line, bottom = (MIST, AMBER, EMBER) if variant == "on-dark" else (INK, EMBER_DEEP, EMBER_DEEP)
-    s = 2.0
+    s = 2.6  # symbol about half the wordmark's width
     pad = WM_X
     sym_w, sym_h = SYMBOL_BOX[2] * s, SYMBOL_BOX[3] * s
     width = max(sym_w, WM_WIDTH) + 2 * pad
@@ -255,13 +306,13 @@ def stacked_svg(variant):
         + symbol_paths("url(#sun)", line, sym_dx, sym_dy, s)
         + wordmark_g(word_fill, (width - WM_WIDTH) / 2, baseline, 1)
     )
-    return svg_doc(width, height, body, "Lumen")
+    return svg_doc(width, height, body, NAME)
 
 
 def wordmark_svg(fill):
     pad = 2
     w, h = WM_WIDTH + 2 * pad, WM_A + 2 * pad
-    return svg_doc(w, h, wordmark_g(fill, pad, pad + WM_A, 1), "Lumen")
+    return svg_doc(w, h, wordmark_g(fill, pad, pad + WM_A, 1), NAME)
 
 
 # ------------------------------------------------------------------ app icon
@@ -304,7 +355,7 @@ def app_icon(size, tile, rx, sunp, horizon, ripples, glow_r, rim):
             f'<rect x="{n(tx + rim / 2)}" y="{n(ty + rim / 2)}" width="{n(tw - rim)}" height="{n(tw - rim)}" '
             f'rx="{n(rx - rim / 2)}" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="{n(rim)}"/>'
         )
-    return svg_doc(size, size, "".join(out), "Lumen")
+    return svg_doc(size, size, "".join(out), NAME)
 
 
 # Masters: 1024 (64 px and up, scalable), 32 (32 and 48 px), 24, 16. Small masters are
@@ -341,7 +392,7 @@ def tray_svg(paused, fill="#2e3436"):
     cx, cy, r, cut = TRAY_SUN
     sun_d = sun_ring(cx, cy, r, cut, 1.5) if paused else sun(cx, cy, r, cut)
     lines = seg(2, 10, 14, 10, 2) + seg(6, 13, 10, 13, 2)
-    title = "Lumen (paused)" if paused else "Lumen"
+    title = f"{NAME} (paused)" if paused else NAME
     body = (
         f'<style id="current-color-scheme">.ColorScheme-Text{{color:{fill}}}</style>'
         # fill attribute for strict symbolic parsers (GTK), style for KDE's colour scheme.
@@ -364,7 +415,7 @@ def tray_flat(paused, fill, grid):
         sun_d = sun_ring(cx, cy, r, cut, 1.5) if paused else sun(cx, cy, r, cut)
         lines = seg(2, 10, 14, 10, 2) + seg(6, 13, 10, 13, 2)
     body = f'<path fill="{fill}" fill-rule="evenodd" d="{sun_d}"/><path fill="{fill}" d="{lines}"/>'
-    return svg_doc(grid, grid, body, "Lumen")
+    return svg_doc(grid, grid, body, NAME)
 
 
 # ------------------------------------------------------------------ banner (1280 x 640)
@@ -448,14 +499,7 @@ def banner_svg(lang):
     for x0, x1, y, w, op in [(-110, 110, 530, 12, 0.8), (-68, 68, 562, 10, 0.5), (-32, 32, 590, 8, 0.3)]:
         out.append(f'<path fill="{AMBER}" fill-opacity="{op}" d="{seg(scx + x0, y, scx + x1, y, w)}"/>')
     # Lockup, tagline, chips (left column, 96 px margin, nothing over the sun).
-    s = 3.2
-    top = 96
-    sym_dx, sym_dy = 96 - SYMBOL_BOX[0] * s, top - SYMBOL_BOX[1] * s
-    cy0 = (SYMBOL_SUN[1] - SYMBOL_SUN[2]) * s + sym_dy
-    out.append(f"<defs>{sun_gradient('sun2', cy0, SYMBOL_SUN[3] * s + sym_dy)}</defs>")
-    out.append(symbol_paths("url(#sun2)", AMBER, sym_dx, sym_dy, s))
-    ws = 3.9
-    out.append(wordmark_g(MIST, 96 + SYMBOL_BOX[2] * s + 28, top + SYMBOL_BOX[3] * s / 2 + WM_A * ws / 2, ws))
+    out.append(placed_lockup(96, 92, 3.3, MIST, AMBER, EMBER, "lk"))
     out.append(text(96, 262, t["tagline"][0], 44, MIST, 600))
     out.append(text(96, 316, t["tagline"][1], 44, MIST, 600))
     out.append(text(96, 368, t["line2"], 22, MUTED, 400))
@@ -464,7 +508,7 @@ def banner_svg(lang):
         c, w = chip(x, 400, label)
         out.append(c)
         x += w + 12
-    return svg_doc(W, H, "".join(out), "Lumen")
+    return svg_doc(W, H, "".join(out), NAME)
 
 
 # ------------------------------------------------------------------ brand sheet
@@ -475,12 +519,7 @@ def sheet_svg():
     out = [f'<rect width="{W}" height="{H}" fill="{NIGHT}"/>', f'<rect x="640" width="640" height="300" fill="#f6f6f9"/>']
     # Lockups on dark and light.
     for variant, ox, word, line, bottom in (("dark", 0, MIST, AMBER, EMBER), ("light", 640, INK, EMBER_DEEP, EMBER_DEEP)):
-        s = 3.0
-        dx, dy = ox + 80 - SYMBOL_BOX[0] * s, 110 - SYMBOL_BOX[1] * s
-        gid = f"s{variant}"
-        out.append(f"<defs>{sun_gradient(gid, (SYMBOL_SUN[1] - SYMBOL_SUN[2]) * s + dy, SYMBOL_SUN[3] * s + dy, bottom)}</defs>")
-        out.append(symbol_paths(f"url(#{gid})", line, dx, dy, s))
-        out.append(wordmark_g(word, ox + 80 + SYMBOL_BOX[2] * s + 26, 110 + SYMBOL_BOX[3] * s / 2 + WM_A * 3.6 / 2, 3.6))
+        out.append(placed_lockup(ox + 80, 96, 3.05, word, line, bottom, f"s{variant}"))
         out.append(text(ox + 80, 250, "on dark" if variant == "dark" else "on light", 18, MUTED if variant == "dark" else "#4d5060"))
     # Palette.
     swatches = [
@@ -529,28 +568,29 @@ def ico(path, pngs):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--svg-only", action="store_true")
+    ap.add_argument("--no-packaging", action="store_true", help="do not write packaging/linux/icons")
     ap.add_argument("--resvg", default="resvg")
     ap.add_argument("--usvg", default="usvg")
     args = ap.parse_args()
 
     logo = ROOT / "logo"
     for v in ("color", "color-light", "mono", "inverse"):
-        write(logo / f"lumen-symbol-{v}.svg", symbol_svg(v))
+        write(logo / f"{ID}-symbol-{v}.svg", symbol_svg(v))
     for v in ("on-dark", "on-light", "mono", "inverse"):
-        write(logo / f"lumen-logo-{v}.svg", lockup_svg(v))
+        write(logo / f"{ID}-logo-{v}.svg", lockup_svg(v))
     for v in ("on-dark", "on-light"):
-        write(logo / f"lumen-logo-stacked-{v}.svg", stacked_svg(v))
-    write(logo / "lumen-wordmark-mono.svg", wordmark_svg(INK))
-    write(logo / "lumen-wordmark-inverse.svg", wordmark_svg("#ffffff"))
+        write(logo / f"{ID}-logo-stacked-{v}.svg", stacked_svg(v))
+    write(logo / f"{ID}-wordmark-mono.svg", wordmark_svg(INK))
+    write(logo / f"{ID}-wordmark-inverse.svg", wordmark_svg("#ffffff"))
 
     icon = ROOT / "icon"
     for size, m in ICON_MASTERS.items():
-        name = "lumen.svg" if size == 1024 else f"lumen-{size}.svg"
+        name = f"{ID}.svg" if size == 1024 else f"{ID}-{size}.svg"
         write(icon / name, app_icon(size, **m))
 
     tray = ROOT / "tray"
-    write(tray / "lumen-symbolic.svg", tray_svg(False))
-    write(tray / "lumen-paused-symbolic.svg", tray_svg(True))
+    write(tray / f"{ID}-symbolic.svg", tray_svg(False))
+    write(tray / f"{ID}-paused-symbolic.svg", tray_svg(True))
 
     if args.svg_only:
         return
@@ -563,18 +603,19 @@ def main():
     png.mkdir(parents=True, exist_ok=True)
     rendered = {}
     for size, master in PNG_SIZES.items():
-        src = icon / ("lumen.svg" if master == 1024 else f"lumen-{master}.svg")
-        out = png / f"lumen-{size}.png"
+        src = icon / (f"{ID}.svg" if master == 1024 else f"{ID}-{master}.svg")
+        out = png / f"{ID}-{size}.png"
         run([args.resvg, "-w", str(size), "-h", str(size), str(src), str(out)])
         rendered[size] = out
-    ico(icon / "lumen.ico", [(s, rendered[s]) for s in ICO_SIZES])
-    theme = REPO / "packaging" / "linux" / "icons" / "hicolor"
-    for size in HICOLOR:
-        dst = theme / f"{size}x{size}" / "apps" / "lumen.png"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(rendered[size], dst)
-    write(theme / "scalable" / "apps" / "lumen.svg", (icon / "lumen.svg").read_text())
-    write(theme / "symbolic" / "apps" / "lumen-symbolic.svg", (tray / "lumen-symbolic.svg").read_text())
+    ico(icon / f"{ID}.ico", [(s, rendered[s]) for s in ICO_SIZES])
+    if not args.no_packaging:
+        theme = REPO / "packaging" / "linux" / "icons" / "hicolor"
+        for size in HICOLOR:
+            dst = theme / f"{size}x{size}" / "apps" / f"{ID}.png"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(rendered[size], dst)
+        write(theme / "scalable" / "apps" / f"{ID}.svg", (icon / f"{ID}.svg").read_text())
+        write(theme / "symbolic" / "apps" / f"{ID}-symbolic.svg", (tray / f"{ID}-symbolic.svg").read_text())
 
     # Windows tray: white glyph for dark taskbars, black for light ones.
     tpng = tray / "png"
@@ -586,7 +627,7 @@ def main():
                 for size in (16, 20, 24, 32):
                     grid = 24 if size == 24 else 16
                     src = write(tmp / f"t{grid}.svg", tray_flat(paused, fill, grid))
-                    name = f"lumen-tray-{colour}{'-paused' if paused else ''}-{size}.png"
+                    name = f"{ID}-tray-{colour}{'-paused' if paused else ''}-{size}.png"
                     run([args.resvg, "-w", str(size), "-h", str(size), str(src), str(tpng / name)])
 
         # Banners: text converted to outlines by usvg (needs the Lato font installed).
@@ -594,10 +635,10 @@ def main():
         for lang in ("en", "fr"):
             suffix = "" if lang == "en" else "-fr"
             raw = write(tmp / f"banner{suffix}.svg", banner_svg(lang))
-            svg = banner / f"lumen-banner{suffix}.svg"
+            svg = banner / f"{ID}-banner{suffix}.svg"
             svg.parent.mkdir(parents=True, exist_ok=True)
             run([args.usvg, "--font-family", FONT, str(raw), str(svg)])
-            run([args.resvg, str(svg), str(banner / f"lumen-banner{suffix}.png")])
+            run([args.resvg, str(svg), str(banner / f"{ID}-banner{suffix}.png")])
 
         # Brand sheet (overview image for docs/BRAND.md).
         W, H, out = sheet_svg()
@@ -605,7 +646,7 @@ def main():
         icons = []
         for size in (128, 64, 48, 32, 24, 16):
             master = PNG_SIZES[size]
-            src = icon / ("lumen.svg" if master == 1024 else f"lumen-{master}.svg")
+            src = icon / (f"{ID}.svg" if master == 1024 else f"{ID}-{master}.svg")
             icons.append(f'<image x="{x}" y="{760 - size}" width="{size}" height="{size}" href="{src.as_posix()}"/>')
             x += size + 28
         x += 40
@@ -618,7 +659,7 @@ def main():
                 x += 72
         out += icons
         out.append(text(80, 820, "Symbol grid 24 · stroke 2 · round caps · gaps 1.5", 15, MUTED))
-        raw = write(tmp / "sheet.svg", svg_doc(W, H, "".join(out), "Lumen brand sheet"))
+        raw = write(tmp / "sheet.svg", svg_doc(W, H, "".join(out), f"{NAME} brand sheet"))
         run([args.usvg, "--font-family", FONT, str(raw), str(tmp / "sheet-flat.svg")])
         run([args.resvg, str(tmp / "sheet-flat.svg"), str(ROOT / "brand-sheet.png")])
 

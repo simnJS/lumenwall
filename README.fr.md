@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/banner/lumen-banner-fr.png" alt="Lumen : des fonds d’écran animés qui dorment quand on ne les voit pas" width="100%">
+  <img src="assets/brand/banner/lumenwall-banner-fr.png" alt="Lumen : des fonds d’écran animés qui dorment quand on ne les voit pas" width="100%">
 </p>
 
 <p align="center">

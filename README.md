@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/banner/lumen-banner.png" alt="Lumen: animated wallpapers that sleep when you can't see them" width="100%">
+  <img src="assets/brand/banner/lumenwall-banner.png" alt="Lumen: animated wallpapers that sleep when you can't see them" width="100%">
 </p>
 
 <p align="center">
