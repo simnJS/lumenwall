@@ -2,6 +2,7 @@
 //! (KDE Plasma, most panels, GNOME with the AppIndicator extension).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender};
 
@@ -12,33 +13,116 @@ use zbus::zvariant::{ObjectPath, OwnedValue, Structure, StructureBuilder, Type, 
 
 use super::{Action, Msg, TrayError, TrayState, labels, tooltip};
 use crate::i18n::Lang;
+use crate::icons::TrayInk;
 
 const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
 
 type Pixmap = (i32, i32, Vec<u8>);
 
-fn pixmaps() -> Vec<Pixmap> {
-    [22u32, 32, 48]
+/// Symbolic icons of the `hicolor` theme (`packaging/linux/icons`): the panel
+/// recolours them like its own icons.
+const ICON_NAME: &str = "lumenwall-symbolic";
+const ICON_NAME_PAUSED: &str = "lumenwall-paused-symbolic";
+
+/// How the tray shows its glyph.
+enum Glyph {
+    /// Both symbolic icons are installed: `IconName`.
+    Named,
+    /// Not installed (running from a build folder): the embedded glyphs as
+    /// `IconPixmap`, playing and paused, in the panel's ink.
+    Pixmaps([Vec<Pixmap>; 2]),
+}
+
+impl Glyph {
+    fn detect() -> Self {
+        if [ICON_NAME, ICON_NAME_PAUSED]
+            .iter()
+            .all(|n| icon_installed(n))
+        {
+            tracing::debug!("tray: symbolic icons from the icon theme");
+            return Glyph::Named;
+        }
+        let ink = panel_ink();
+        tracing::debug!(?ink, "tray: symbolic icons not installed, embedded glyphs");
+        Glyph::Pixmaps([pixmaps(ink, false), pixmaps(ink, true)])
+    }
+}
+
+/// Every master size, as SNI wants them: ARGB32 in network byte order.
+fn pixmaps(ink: TrayInk, paused: bool) -> Vec<Pixmap> {
+    crate::icons::TRAY_SIZES
         .iter()
-        .map(|&size| {
-            // SNI wants ARGB32 in network byte order.
-            let rgba = crate::icons::logo_rgba(size, [0xff, 0xb3, 0x47]);
+        .filter_map(|&size| {
+            let (w, h, rgba) = crate::icons::decode_png(crate::icons::tray_png(ink, paused, size))?;
             let argb = rgba
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .flat_map(|p| [p[3], p[0], p[1], p[2]])
                 .collect();
-            (size as i32, size as i32, argb)
+            Some((w as i32, h as i32, argb))
         })
         .collect()
+}
+
+/// Base directories of the icon themes (XDG base directories, then `~/.icons`).
+fn icon_bases() -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = dirs::data_dir()
+        .map(|d| d.join("icons"))
+        .into_iter()
+        .collect();
+    if let Some(home) = dirs::home_dir() {
+        bases.push(home.join(".icons"));
+    }
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_owned());
+    bases.extend(
+        data_dirs
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| Path::new(d).join("icons")),
+    );
+    bases
+}
+
+/// Whether `name` is in the `hicolor` theme, which every icon theme inherits.
+fn icon_installed(name: &str) -> bool {
+    icon_bases().iter().any(|base| {
+        ["symbolic/apps", "scalable/apps"].iter().any(|sub| {
+            base.join("hicolor")
+                .join(sub)
+                .join(format!("{name}.svg"))
+                .is_file()
+        })
+    })
+}
+
+/// Pixmaps are not recoloured, so pick the ink of the panel: GNOME-family top
+/// bars and panels are dark in both colour schemes; elsewhere the panel follows
+/// the colour scheme.
+fn panel_ink() -> TrayInk {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    let dark_panel = ["gnome", "unity", "pantheon", "budgie", "cinnamon"]
+        .iter()
+        .any(|d| desktop.contains(d));
+    if !dark_panel && crate::platform::prefers_light() {
+        TrayInk::Black
+    } else {
+        TrayInk::White
+    }
 }
 
 struct Item {
     tx: Mutex<Sender<Msg>>,
     tooltip: String,
-    icon: Vec<Pixmap>,
+    /// Paused, stopped or in error: the outlined sun.
+    paused: bool,
+    glyph: Glyph,
 }
 
 impl Item {
@@ -59,7 +143,7 @@ impl Item {
     }
     #[zbus(property)]
     fn title(&self) -> &str {
-        "Lumen"
+        "Lumenwall"
     }
     #[zbus(property)]
     fn status(&self) -> &str {
@@ -67,11 +151,18 @@ impl Item {
     }
     #[zbus(property)]
     fn icon_name(&self) -> &str {
-        ""
+        match (&self.glyph, self.paused) {
+            (Glyph::Named, false) => ICON_NAME,
+            (Glyph::Named, true) => ICON_NAME_PAUSED,
+            (Glyph::Pixmaps(_), _) => "",
+        }
     }
     #[zbus(property)]
     fn icon_pixmap(&self) -> Vec<Pixmap> {
-        self.icon.clone()
+        match &self.glyph {
+            Glyph::Named => Vec::new(),
+            Glyph::Pixmaps(p) => p[usize::from(self.paused)].clone(),
+        }
     }
     #[zbus(property)]
     fn tool_tip(&self) -> (String, Vec<Pixmap>, String, String) {
@@ -103,6 +194,9 @@ impl Item {
 
     #[zbus(signal)]
     async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn new_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 struct Menu {
@@ -286,7 +380,8 @@ pub fn run(lang: Lang, endpoint: Endpoint) -> Result<(), TrayError> {
             Item {
                 tx: Mutex::new(tx.clone()),
                 tooltip: tooltip(lang, &state),
-                icon: pixmaps(),
+                paused: state.shows_paused(),
+                glyph: Glyph::detect(),
             },
         )
         .map_err(other)?
@@ -346,9 +441,17 @@ pub fn run(lang: Lang, endpoint: Endpoint) -> Result<(), TrayError> {
                     m.revision += 1;
                     m.revision
                 };
-                item.get_mut().tooltip = tooltip(lang, &state);
+                let icon_changed = {
+                    let mut it = item.get_mut();
+                    it.tooltip = tooltip(lang, &state);
+                    let paused = state.shows_paused();
+                    std::mem::replace(&mut it.paused, paused) != paused
+                };
                 let _ = zbus::block_on(Menu::layout_updated(menu.signal_emitter(), revision, 0));
                 let _ = zbus::block_on(Item::new_tool_tip(item.signal_emitter()));
+                if icon_changed {
+                    let _ = zbus::block_on(Item::new_icon(item.signal_emitter()));
+                }
             }
         }
     }

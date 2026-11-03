@@ -142,7 +142,7 @@ impl App {
         };
         let search = container(
             row![
-                icons::icon(Icon::Search, 16.0, t.faint),
+                icons::icon(Icon::Search, theme::icon::M, t.faint),
                 text_input(self.t(K::SearchHint), &self.search)
                     .id(Id::new(SEARCH_ID))
                     .on_input(Message::Search)
@@ -283,14 +283,14 @@ impl App {
                     .searched
                     .iter()
                     .take(8)
-                    .map(|p| label(tilde(p), size::MICRO, t.faint).into()),
+                    .map(|p| label(widgets::tilde(p), size::MICRO, t.faint).into()),
             )
             .spacing(2)
             .align_x(Alignment::Center);
             return column![
                 widgets::empty_state(
                     t,
-                    Illustration::Engine,
+                    Illustration::Folder,
                     self.t(K::NoSteamTitle),
                     self.t(K::NoSteamBody),
                     vec![
@@ -422,7 +422,7 @@ impl App {
         // Type badge (glass) and "on screen" badge (accent).
         let kind = container(
             row![
-                icons::icon(kind_icon(w.project.kind), 13.0, Color::WHITE),
+                icons::icon(kind_icon(w.project.kind), theme::icon::S, Color::WHITE),
                 label(
                     kind_label(w.project.kind).get(self.lang),
                     size::MICRO,
@@ -440,7 +440,7 @@ impl App {
             top = top.push(
                 container(
                     row![
-                        icons::icon(Icon::Sparkle, 13.0, t.on_accent),
+                        icons::icon(Icon::Sparkle, theme::icon::S, t.on_accent),
                         strong(self.t(K::NewBadge), size::MICRO, t.on_accent)
                     ]
                     .spacing(4)
@@ -455,7 +455,7 @@ impl App {
             top = top.push(
                 container(
                     row![
-                        icons::icon(Icon::Check, 13.0, t.on_accent),
+                        icons::icon(Icon::Check, theme::icon::S, t.on_accent),
                         strong(
                             format!("{} {}", self.t(K::OnScreen), list.join(", ")),
                             size::MICRO,
@@ -472,16 +472,16 @@ impl App {
         match w.blocker(self.has_we_assets()) {
             Some(Blocker::NeedsWallpaperEngine) => {
                 top = top.push(
-                    container(label(self.t(K::NeedsWe), size::MICRO, Color::BLACK))
+                    container(label(self.t(K::NeedsWe), size::MICRO, t.on_warning))
                         .padding(Padding::from([3.0, 9.0]))
-                        .style(theme::badge(t.warning, Color::BLACK)),
+                        .style(theme::badge(t.warning, t.on_warning)),
                 );
             }
             Some(Blocker::Unsupported) => {
                 top = top.push(
-                    container(label(self.t(K::Unsupported), size::MICRO, Color::WHITE))
+                    container(label(self.t(K::Unsupported), size::MICRO, t.on_danger))
                         .padding(Padding::from([3.0, 9.0]))
-                        .style(theme::badge(t.danger, Color::WHITE)),
+                        .style(theme::badge(t.danger, t.on_danger)),
                 );
             }
             None => {}
@@ -523,13 +523,5 @@ impl App {
             .on_exit(Message::Hover(w.dir.clone(), false))
             .interaction(mouse::Interaction::Pointer)
             .into()
-    }
-}
-
-/// A path with the home directory shown as `~`.
-fn tilde(p: &std::path::Path) -> String {
-    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(|r| r.to_path_buf())) {
-        Some(rest) => format!("~/{}", rest.display()),
-        None => p.display().to_string(),
     }
 }

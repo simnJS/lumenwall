@@ -1,12 +1,13 @@
 [Desktop Entry]
 Type=Application
-Name=Lumen
+Name=Lumenwall engine
+Name[fr]=Moteur Lumenwall
 GenericName=Animated wallpaper
 Comment=Plays Wallpaper Engine scene wallpapers on the desktop
 # The wallpaper comes from ~/.config/lumen/config.toml (`wallpaper = "<workshop id or path>"`).
 # To pin one here instead: Exec=lumen 3018340632
 Exec=lumen
-Icon=lumen
+Icon=lumenwall
 Terminal=false
 NoDisplay=true
 Categories=Utility;

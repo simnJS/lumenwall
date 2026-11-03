@@ -78,7 +78,7 @@ mod portal {
         options.insert("handle_token", Value::from(token.as_str()));
         options.insert("modal", Value::from(true));
         options.insert("directory", Value::from(directory));
-        let _handle: OwnedObjectPath = chooser.call("OpenFile", &("", "Lumen", options))?;
+        let _handle: OwnedObjectPath = chooser.call("OpenFile", &("", "Lumenwall", options))?;
         let Some(msg) = responses.next() else {
             return Ok(None);
         };

@@ -502,14 +502,14 @@ impl App {
                 let was_open = self.ws.selected.is_some();
                 self.ws.selected = Some(id);
                 if !was_open {
-                    self.panel.go_mut(true, Instant::now());
+                    self.panel = crate::theme::motion::panel_go(&self.panel, true, Instant::now());
                     self.ws.viewport = None;
                 }
             }
             WsMsg::Close => {
                 self.ws.selected = None;
                 self.ws.viewport = None;
-                self.panel.go_mut(false, Instant::now());
+                self.panel = crate::theme::motion::panel_go(&self.panel, false, Instant::now());
             }
             WsMsg::Shot(i) => self.ws.shot = i,
             WsMsg::Hover(id, inside) => {
@@ -610,10 +610,18 @@ impl App {
             .map(|(d, _)| d.clone())
             .collect();
         for dir in ready {
+            // Late file events on a folder already added (or a Steam update)
+            // reload it without announcing it again.
+            let known = self
+                .library
+                .as_ref()
+                .is_some_and(|l| l.wallpapers.iter().any(|w| w.dir == dir));
             if let Some(added) = self.ws_try_add(&dir) {
                 self.ws.pending.remove(&dir);
-                let msg = format!("{} · {added}", self.t(K::NewWallpaper));
-                self.toast(msg, false);
+                if !known {
+                    let msg = format!("{} · {added}", self.t(K::NewWallpaper));
+                    self.toast(msg, false);
+                }
             } else if self
                 .ws
                 .pending

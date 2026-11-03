@@ -9,7 +9,7 @@ lumen-ui --background    # start the daemon if needed, then the tray (what autos
 lumen-ui --demo-library --fake-daemon   # generated library + in-process fake daemon over real IPC
 ```
 
-Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screenshot-delay`, `--page`, `--select`, `--search`, `--lang`, `--size`, `--screenshot <png>` (saves the window once loaded, then exits), `--bench-animate`. Environment: `LUMEN_UI_RENDERER=software`, `LUMEN_LOG`, `LUMEN_IPC_ENDPOINT`, `LUMEN_WE_WORKSHOP`.
+Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screenshot-delay`, `--page`, `--select`, `--search`, `--lang`, `--size`, `--screenshot <png>` (saves the window once loaded, then exits), `--bench-animate`. Environment: `LUMEN_UI_RENDERER=software`, `LUMEN_UI_REDUCE_MOTION=1|0`, `LUMEN_LOG`, `LUMEN_IPC_ENDPOINT`, `LUMEN_WE_WORKSHOP`.
 
 ## Layout
 
@@ -18,7 +18,9 @@ Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screensho
 | `app.rs` | State, messages, update, conditional subscriptions, keyboard, drag and drop |
 | `view/` | Pages (library, details panel, screens, settings), status bar, reusable widgets, `drawn` (frame-drawn flag) |
 | `theme.rs` | Design system: colour tokens, spacing, radii, elevation, type scale, widget styles, UI font choice |
-| `icons.rs` | Lumen's own SVG icons and empty-state illustrations |
+| `icons.rs` | Lumenwall's own SVG icons, empty-state illustrations, and the embedded brand assets (symbol, logo, window icon, tray glyphs) |
+| `chrome.rs` | Linux: the title band, window buttons, move / resize / rounded frame the app draws itself |
+| `build.rs` | Windows: icon and version resources (`assets/brand/icon/lumenwall.ico`) |
 | `catalog/` | Library scan, lenient `project.json` reading, Steam / Workshop / Wallpaper Engine discovery (`Discovery` trait, native, Flatpak, Snap, Windows registry), resolution from `scene.pkg` / MP4 headers |
 | `thumbs.rs`, `previews.rs` | Preview decoding (16:9 crop, LZ4 frames, disk cache) and animation |
 | `daemon.rs` | IPC worker thread and the UI's view of the daemon |

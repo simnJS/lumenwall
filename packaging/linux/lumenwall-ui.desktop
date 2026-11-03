@@ -1,0 +1,20 @@
+[Desktop Entry]
+# The Lumenwall app, in the applications menu. Install (per user):
+#   cp packaging/linux/lumenwall-ui.desktop ~/.local/share/applications/
+#   cp -r packaging/linux/icons/hicolor ~/.local/share/icons/
+# The window's Wayland app id / X11 class is "lumenwall-ui", so docks match it to this file.
+# lumen.desktop next to it is the engine's autostart entry (hidden from menus).
+Type=Application
+Name=Lumenwall
+GenericName=Animated Wallpapers
+GenericName[fr]=Fonds d'écran animés
+Comment=Browse, apply and configure animated wallpapers
+Comment[fr]=Parcourir, appliquer et régler des fonds d'écran animés
+Keywords=wallpaper;live wallpaper;animated wallpaper;background;desktop;Workshop;Wallpaper Engine;
+Keywords[fr]=fond d'écran;fond d'écran animé;bureau;Workshop;Wallpaper Engine;
+Exec=lumen-ui
+Icon=lumenwall
+Terminal=false
+StartupNotify=true
+StartupWMClass=lumenwall-ui
+Categories=Settings;DesktopSettings;

@@ -42,7 +42,7 @@ macro_rules! strings {
 }
 
 strings! {
-    AppName => "Lumen", "Lumen";
+    AppName => "Lumenwall", "Lumenwall";
     NavLibrary => "Library", "Bibliothèque";
     NavScreens => "Screens", "Écrans";
     NavWorkshop => "Workshop", "Workshop";
@@ -50,7 +50,7 @@ strings! {
     WsOwnTitle => "Subscribing goes through Steam", "L'abonnement passe par Steam";
     WsOwnBody => "It opens the item in Steam and requires owning Wallpaper Engine. Steam downloads it; it then appears here and in your library by itself.",
         "Le bouton ouvre la fiche dans Steam et nécessite de posséder Wallpaper Engine. Steam télécharge le fond d'écran ; il apparaît ensuite ici et dans votre bibliothèque, tout seul.";
-    WsOwnShort => "Requires owning Wallpaper Engine. Steam downloads; Lumen adds it here by itself.", "Nécessite de posséder Wallpaper Engine. Steam télécharge, Lumen l'ajoute ici tout seul.";
+    WsOwnShort => "Requires owning Wallpaper Engine. Steam downloads; Lumenwall adds it here by itself.", "Nécessite de posséder Wallpaper Engine. Steam télécharge, Lumenwall l'ajoute ici tout seul.";
     WsBrowseSteam => "Browse in Steam", "Parcourir dans Steam";
     WsOpenBrowser => "Open in browser", "Ouvrir dans le navigateur";
     WsSearchHint => "Search the Workshop", "Rechercher dans le Workshop";
@@ -59,8 +59,8 @@ strings! {
     WsRecent => "Most recent", "Plus récents";
     WsResultsFor => "Results for “{q}”", "Résultats pour « {q} »";
     WsKeyTitle => "Browse the whole Workshop right here", "Parcourez tout le Workshop, ici même";
-    WsKeyBody => "Lumen uses Steam's official Web API, which asks for your personal key (free, tied to your Steam account). Add it in Settings: it stays on this computer. Until then, browse in Steam; new subscriptions still show up here automatically.",
-        "Lumen utilise l'API Web officielle de Steam, qui demande votre clé personnelle (gratuite, liée à votre compte Steam). Ajoutez-la dans les Réglages : elle reste sur cet ordinateur. En attendant, parcourez dans Steam ; vos nouveaux abonnements apparaissent quand même ici, automatiquement.";
+    WsKeyBody => "Lumenwall uses Steam's official Web API, which asks for your personal key (free, tied to your Steam account). Add it in Settings: it stays on this computer. Until then, browse in Steam; new subscriptions still show up here automatically.",
+        "Lumenwall utilise l'API Web officielle de Steam, qui demande votre clé personnelle (gratuite, liée à votre compte Steam). Ajoutez-la dans les Réglages : elle reste sur cet ordinateur. En attendant, parcourez dans Steam ; vos nouveaux abonnements apparaissent quand même ici, automatiquement.";
     WsAddKey => "Add my key", "Ajouter ma clé";
     WsGetKey => "Get a key", "Obtenir une clé";
     WsNewTitle => "Just arrived", "Récemment ajoutés";
@@ -95,8 +95,8 @@ strings! {
     WsTotal => "{n} wallpapers", "{n} fonds d'écran";
     SecWorkshop => "Steam Workshop", "Workshop Steam";
     ApiKey => "Steam Web API key", "Clé Steam Web API";
-    ApiKeyHelp => "Personal and free. Lumen keeps it only on this computer, in a private file, and sends it only to api.steampowered.com. Without it, the Workshop page still opens Steam and shows your installed wallpapers.",
-        "Personnelle et gratuite. Lumen la garde uniquement sur cet ordinateur, dans un fichier privé, et ne l'envoie qu'à api.steampowered.com. Sans elle, la page Workshop ouvre quand même Steam et affiche vos fonds installés.";
+    ApiKeyHelp => "Personal and free. Lumenwall keeps it only on this computer, in a private file, and sends it only to api.steampowered.com. Without it, the Workshop page still opens Steam and shows your installed wallpapers.",
+        "Personnelle et gratuite. Lumenwall la garde uniquement sur cet ordinateur, dans un fichier privé, et ne l'envoie qu'à api.steampowered.com. Sans elle, la page Workshop ouvre quand même Steam et affiche vos fonds installés.";
     ApiKeyPlaceholder => "Paste your key (32 hexadecimal characters)", "Collez votre clé (32 caractères hexadécimaux)";
     KeyStored => "Saved key: {k}", "Clé enregistrée : {k}";
     KeySaved => "Steam Web API key saved", "Clé Steam Web API enregistrée";
@@ -119,8 +119,8 @@ strings! {
     StartEngine => "Start engine", "Lancer le moteur";
     DemoBanner => "The engine is not running. You can browse your wallpapers; start the engine to apply them.",
         "Le moteur n'est pas lancé. Vous pouvez parcourir vos fonds d'écran ; lancez le moteur pour les appliquer.";
-    EngineMissingHelp => "Lumen looks for the “lumen” program next to this app, then in PATH.",
-        "Lumen cherche le programme « lumen » à côté de cette application, puis dans le PATH.";
+    EngineMissingHelp => "Lumenwall looks for the “lumen” program next to this app, then in PATH.",
+        "Lumenwall cherche le programme « lumen » à côté de cette application, puis dans le PATH.";
 
     Pause => "Pause", "Pause";
     Resume => "Resume", "Reprendre";
@@ -153,10 +153,13 @@ strings! {
     LibrarySubtitle => "{n} wallpapers ready to play", "{n} fonds d'écran prêts à jouer";
     NoMatchBody => "Try another word, or clear the filters.", "Essayez un autre mot, ou effacez les filtres.";
     ScreensSubtitle => "Click a screen to choose its wallpaper.", "Cliquez sur un écran pour choisir son fond d'écran.";
-    SettingsSubtitle => "Lumen stays light: every option here can only lower its cost.", "Lumen reste léger : chaque option ici ne peut qu'en réduire le coût.";
+    SettingsSubtitle => "Lumenwall stays light: every option here can only lower its cost.", "Lumenwall reste léger : chaque option ici ne peut qu'en réduire le coût.";
     ApplyAgain => "Apply again", "Réappliquer";
     PreviewAnimHelp => "On hover is the lightest.", "« Au survol » est le plus léger.";
     Close => "Close", "Fermer";
+    WinMinimize => "Minimize", "Réduire";
+    WinMaximize => "Maximize", "Agrandir";
+    WinRestore => "Restore", "Restaurer";
     Browse => "Browse…", "Parcourir…";
 
     SearchHint => "Search title, tag or id", "Rechercher un titre, un tag, un id";
@@ -181,8 +184,8 @@ strings! {
     Scanning => "Looking for wallpapers…", "Recherche des fonds d'écran…";
 
     NoSteamTitle => "Steam was not found", "Steam est introuvable";
-    NoSteamBody => "Lumen plays wallpapers from the Wallpaper Engine Workshop on Steam. Install Steam, or add a folder that contains wallpapers.",
-        "Lumen lit les fonds d'écran du Workshop de Wallpaper Engine sur Steam. Installez Steam, ou ajoutez un dossier qui contient des fonds d'écran.";
+    NoSteamBody => "Lumenwall plays wallpapers from the Wallpaper Engine Workshop on Steam. Install Steam, or add a folder that contains wallpapers.",
+        "Lumenwall lit les fonds d'écran du Workshop de Wallpaper Engine sur Steam. Installez Steam, ou ajoutez un dossier qui contient des fonds d'écran.";
     SearchedIn => "Looked in:", "Emplacements vérifiés :";
     NoWallpapersTitle => "No wallpapers yet", "Aucun fond d'écran pour l'instant";
     NoWallpapersBody => "Subscribe to wallpapers in the Wallpaper Engine Workshop on Steam: they appear here once downloaded. You can also add a folder.",
@@ -196,9 +199,9 @@ strings! {
     OnScreen => "On screen", "À l'écran";
     NeedsWe => "Needs Wallpaper Engine", "Nécessite Wallpaper Engine";
     Unsupported => "Not supported", "Non pris en charge";
-    UnsupportedApp => "Application wallpapers run programs: Lumen never runs them.",
-        "Les fonds d'écran de type application exécutent des programmes : Lumen ne les lance jamais.";
-    UnsupportedUnknown => "Lumen does not know this wallpaper type.", "Lumen ne connaît pas ce type de fond d'écran.";
+    UnsupportedApp => "Application wallpapers run programs: Lumenwall never runs them.",
+        "Les fonds d'écran de type application exécutent des programmes : Lumenwall ne les lance jamais.";
+    UnsupportedUnknown => "Lumenwall does not know this wallpaper type.", "Lumenwall ne connaît pas ce type de fond d'écran.";
 
     Apply => "Apply", "Appliquer";
     AllScreens => "All screens", "Tous les écrans";
@@ -249,9 +252,9 @@ strings! {
     Muted => "Muted", "Son coupé";
     Automute => "Mute when another app plays sound", "Couper le son quand une autre application en joue";
     SecStartup => "Startup", "Démarrage";
-    Autostart => "Start Lumen with my session", "Lancer Lumen à l'ouverture de session";
-    TrayHint => "The tray icon needs a system tray. On GNOME, install the AppIndicator extension; Lumen works without it.",
-        "L'icône de notification nécessite une zone de notification. Sous GNOME, installez l'extension AppIndicator ; Lumen fonctionne sans.";
+    Autostart => "Start Lumenwall with my session", "Lancer Lumenwall à l'ouverture de session";
+    TrayHint => "The tray icon needs a system tray. On GNOME, install the AppIndicator extension; Lumenwall works without it.",
+        "L'icône de notification nécessite une zone de notification. Sous GNOME, installez l'extension AppIndicator ; Lumenwall fonctionne sans.";
     SecLibrary => "Library", "Bibliothèque";
     Folders => "Extra wallpaper folders", "Dossiers de fonds d'écran supplémentaires";
     NoFolders => "None. The Steam Workshop is always included.", "Aucun. Le Workshop Steam est toujours inclus.";
@@ -276,12 +279,12 @@ strings! {
     EngineSettingsOffline => "Engine settings can be changed while the engine is running.",
         "Les réglages du moteur se modifient quand le moteur est lancé.";
     SecAbout => "About", "À propos";
-    AboutText => "Lumen {v}: free software under the MIT or Apache-2.0 license. Not affiliated with Wallpaper Engine or Valve.",
-        "Lumen {v} : logiciel libre sous licence MIT ou Apache-2.0. Sans lien avec Wallpaper Engine ni Valve.";
+    AboutText => "Lumenwall {v}: free software under the MIT or Apache-2.0 license. Not affiliated with Wallpaper Engine or Valve.",
+        "Lumenwall {v} : logiciel libre sous licence MIT ou Apache-2.0. Sans lien avec Wallpaper Engine ni Valve.";
     Error => "Error", "Erreur";
 
-    TrayOpen => "Open Lumen", "Ouvrir Lumen";
-    TrayQuit => "Quit Lumen", "Quitter Lumen";
+    TrayOpen => "Open Lumenwall", "Ouvrir Lumenwall";
+    TrayQuit => "Quit Lumenwall", "Quitter Lumenwall";
 }
 
 #[cfg(test)]

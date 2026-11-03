@@ -15,8 +15,10 @@ Screenshots (generated demo library, no Workshop content): [`docs/ui-screenshots
 ## Layout
 
 ```
-┌─────────┬──────────────────────────────────────────────┬────────────────────┐
-│ ☀ Lumen │ Library              Sort [Name▾] [⌕ search…] │ Details          ✕ │
+╭─────────────────────────────────────────────────────────────────────────────╮
+│ ◓ Lumenwall              Library (title band, Linux)                 – □ ✕ │
+├─────────┬──────────────────────────────────────────────┬────────────────────┤
+│         │ Library              Sort [Name▾] [⌕ search…] │ Details          ✕ │
 │         │ 32 wallpapers ready                            │ ┌────────────────┐ │
 │ Library │ (All)(Scene)(Video)(Web) [Any tag▾] [Any res▾] │ │  big preview   │ │
 │ Screens │ ┌──────────────┐ ┌──────────────┐              │ └────────────────┘ │
@@ -37,7 +39,9 @@ Screenshots (generated demo library, no Workshop content): [`docs/ui-screenshots
 - **Screens**: the monitors drawn to scale with the wallpaper of each, then one card per screen (status, scaling, fps, *Change*, *Remove*). A click on a screen opens the library with only that screen targeted.
 - **Settings**: cards for performance (fps limit with presets, pause on fullscreen / battery / lock), sound, startup, library folders and detected Steam / Wallpaper Engine paths, appearance (language, theme, preview animation), about.
 - **Status bar** (always visible): engine state, real fps (per screen × number of screens), CPU, GPU, engine RAM, the app's own RAM, pause, mute, volume; *Start engine* when it is off. Performance is the product's selling point.
-- **Tray** (`lumen-ui --tray`, separate process, ~10 MB, no GPU): open, pause/resume, mute, start engine, quit. Linux: StatusNotifierItem + dbusmenu over D-Bus (KDE, most panels, GNOME with the AppIndicator extension, which Ubuntu ships). Without a tray host everything stays reachable from the window.
+- **Tray** (`lumen-ui --tray`, separate process, ~10 MB, no GPU): open, pause/resume, mute, start engine, quit. Linux: StatusNotifierItem + dbusmenu over D-Bus (KDE, most panels, GNOME with the AppIndicator extension, which Ubuntu ships). Without a tray host everything stays reachable from the window. The glyph is the brand's monochrome sun, outlined while paused or stopped: on Linux `IconName` `lumenwall-symbolic` / `lumenwall-paused-symbolic` when both are in the `hicolor` theme (the panel recolours them), else the embedded `assets/brand/tray/png` glyphs as `IconPixmap` (white on GNOME-family and dark panels, black when the portal says light elsewhere); on Windows the white or black PNG for the taskbar theme (`SystemUsesLightTheme`, followed live through a registry change notification) at the system DPI (16/20/24/32 px).
+- **Window frame (Linux)**: the window opens undecorated and transparent and draws its own title band in the sidebar's colour (`chrome.rs`): brand mark, page title, and the window buttons the desktop shows on its side (`org.gnome.desktop.wm.preferences button-layout`, else GTK's `gtk-decoration-layout`). A press on the band moves the window, a double press (400 ms) maximises or restores it, a right press opens the window menu; 4 px edges and 12 px corners resize it; 12 px rounded corners and a hairline outline, dropped while maximised or full screen. Windows and macOS keep the native title bar.
+- **App icon**: the window icon comes from `assets/brand/icon/png/lumenwall-{32,64}.png`; on Windows `build.rs` embeds `lumenwall.ico` (with a version resource, "Lumenwall" in Task Manager) in `lumen-ui.exe` and `lumen.exe`, and the window then takes the hinted sizes at its DPI. Linux: `packaging/linux/lumenwall-ui.desktop` (menu entry, `Icon=lumenwall`, app id `lumenwall-ui`) and the `hicolor` icons in `packaging/linux/icons`.
 
 ## Workshop
 
@@ -75,8 +79,9 @@ Cost of the page (same machine, wgpu): idle 33 MB private / 201 MB RSS, the same
 
 ## Design system (`crates/lumen-ui/src/theme.rs`)
 
-- Tokens for dark (default) and light: background, sidebar, surface, raised, overlay, border, text / muted / faint, accent (warm amber, "lumen" = light), accent-hover, accent-soft, success, warning, danger.
-- Spacing 4 / 8 / 12 / 16 / 24 / 32; radii 6 / 10 / 14 / pill; three elevation levels of soft shadows; type scale 28 / 20 / 15.5 / 14 / 12.5 / 11 in regular, medium and semibold.
+- Tokens for dark (default) and light, values from [BRAND.md](BRAND.md): background, sidebar, surface, raised, overlay, border, text / muted / faint, accent (warm amber) for fills, accent-hover, accent-soft, `accent_text` (the accent as text or icon: darker in the light theme), `on_accent`, success, warning and `on_warning`, danger and `on_danger` (error toasts, red badges). Every text pair is at least 4.5:1 (WCAG AA) in both themes; `cargo test -p lumen-ui text_contrast -- --nocapture` checks and prints them.
+- Spacing 4 / 8 / 12 / 16 / 24 / 32; radii 6 / 10 / 14 / pill; three elevation levels of soft shadows; type scale 28 / 20 / 16 / 14 / 12.5 / 11 in regular, medium and semibold; icon sizes 14 / 16 / 20 / 24 (`theme::icon`), 28 for the brand mark.
+- Motion (`theme::motion`): 100 / 200 / 220 / 320 ms (press, hover wash, details panel, toasts). A tick subscription exists only while something moves. The system's "reduce animations" setting (GNOME `enable-animations` and KDE's animation speed through the settings portal, else `gsettings` / `kdeglobals`; Windows "Animation effects") is read at start and when the window regains focus; when on, every duration is zero. `LUMEN_UI_REDUCE_MOTION=1|0` overrides it. Preview animation stays the user's choice in Settings.
 - Font: the system UI font that has real static weights (Inter if installed, Segoe UI on Windows, then Ubuntu, Lato, Noto Sans…). Variable-only fonts are skipped: iced's text engine sees one face and would fake bold with another family.
 
 ## States worth designing

@@ -108,7 +108,7 @@ impl App {
             page = page.push(
                 container(
                     row![
-                        icons::icon(Icon::Store, 15.0, t.accent),
+                        icons::icon(Icon::Store, theme::icon::S, t.accent_text),
                         strong(self.t(K::WsOwnTitle), size::CAPTION, t.text),
                         label(self.t(K::WsOwnShort), size::CAPTION, t.muted).width(Length::Fill),
                     ]
@@ -164,7 +164,7 @@ impl App {
         }
         let search = container(
             row![
-                icons::icon(Icon::Search, 16.0, t.faint),
+                icons::icon(Icon::Search, theme::icon::M, t.faint),
                 text_input(self.t(K::WsSearchHint), &self.ws.search_input)
                     .id(Id::new("ws-search"))
                     .on_input(|s| msg(WsMsg::Search(s)))
@@ -376,12 +376,12 @@ impl App {
         }
         if let Some(s) = it.score {
             meta = meta
-                .push(icons::icon(Icon::Star, 12.0, t.warning))
+                .push(icons::icon(Icon::Star, theme::icon::S, t.warning))
                 .push(label(self.decimal(s * 5.0), size::CAPTION, white(0.85)));
         }
         if let Some(n) = it.subscriptions {
             meta = meta
-                .push(icons::icon(Icon::Users, 12.0, white(0.8)))
+                .push(icons::icon(Icon::Users, theme::icon::S, white(0.8)))
                 .push(label(
                     ws::format_count(n, self.lang),
                     size::CAPTION,
@@ -406,7 +406,7 @@ impl App {
             top = top.push(
                 container(
                     row![
-                        icons::icon(kind_icon(k), 13.0, Color::WHITE),
+                        icons::icon(kind_icon(k), theme::icon::S, Color::WHITE),
                         label(kind_label(k).get(self.lang), size::MICRO, Color::WHITE)
                     ]
                     .spacing(5)
@@ -425,9 +425,9 @@ impl App {
         };
         if let Some(r) = rating {
             top = top.push(
-                container(label(r, size::MICRO, Color::BLACK))
+                container(label(r, size::MICRO, t.on_warning))
                     .padding(Padding::from([3.0, 9.0]))
-                    .style(theme::badge(t.warning, Color::BLACK)),
+                    .style(theme::badge(t.warning, t.on_warning)),
             );
             top = top.push(space().width(sp::XS));
         }
@@ -436,7 +436,7 @@ impl App {
             top = top.push(
                 container(
                     row![
-                        icons::icon(Icon::Check, 13.0, t.on_accent),
+                        icons::icon(Icon::Check, theme::icon::S, t.on_accent),
                         strong(
                             self.t(if new { K::NewBadge } else { K::Installed }),
                             size::MICRO,
@@ -516,7 +516,7 @@ impl App {
             .wrap(),
             container(
                 row![
-                    icons::icon(Icon::Alert, 16.0, t.accent),
+                    icons::icon(Icon::Alert, theme::icon::M, t.accent_text),
                     label(self.t(K::WsOwnBody), size::CAPTION, t.muted)
                 ]
                 .spacing(sp::S)
@@ -734,7 +734,7 @@ impl App {
         info = info.push(by);
         if let Some(s) = it.score {
             let mut rr = row![
-                stars(t, s, 16.0),
+                stars(t, s, theme::icon::M),
                 strong(self.decimal(s * 5.0), size::BODY, t.text)
             ]
             .spacing(sp::S)
@@ -755,7 +755,7 @@ impl App {
         let stat = |icon: Icon, name: &'static str, value: String| -> Element<'_, Message> {
             column![
                 row![
-                    icons::icon(icon, 14.0, t.faint),
+                    icons::icon(icon, theme::icon::S, t.faint),
                     label(name, size::MICRO, t.faint)
                 ]
                 .spacing(5)
@@ -856,7 +856,7 @@ impl App {
                 ));
                 actions = actions.push(
                     row![
-                        icons::icon(Icon::Alert, 14.0, t.accent),
+                        icons::icon(Icon::Alert, theme::icon::S, t.accent_text),
                         label(self.t(K::WsOwnShort), size::CAPTION, t.muted)
                     ]
                     .spacing(sp::S)
@@ -943,7 +943,7 @@ impl App {
                         _ => theme::regular(),
                     };
                     let color = if s.link.is_some() {
-                        t.accent
+                        t.accent_text
                     } else if s.spoiler {
                         t.faint
                     } else if b.kind == BlockKind::Heading {
@@ -962,7 +962,7 @@ impl App {
                 .collect();
             let text: Element<'a, Message> = rich_text(spans).on_link_click(Message::Open).into();
             let el: Element<'a, Message> = match b.kind {
-                BlockKind::Bullet => row![label("•", size::CAPTION, t.accent), text]
+                BlockKind::Bullet => row![label("•", size::CAPTION, t.accent_text), text]
                     .spacing(sp::S)
                     .into(),
                 BlockKind::Quote | BlockKind::Code => container(text)

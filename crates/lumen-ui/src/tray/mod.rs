@@ -22,6 +22,11 @@ pub struct TrayState {
 }
 
 impl TrayState {
+    /// Paused, engine stopped or unreachable: the outlined sun (the menu says why).
+    pub fn shows_paused(&self) -> bool {
+        !self.online || self.paused
+    }
+
     pub fn from_daemon(state: Option<&State>) -> Self {
         match state {
             Some(s) => Self {
@@ -73,7 +78,7 @@ pub fn tooltip(lang: Lang, s: &TrayState) -> String {
         (true, true) => K::Paused,
         (true, false) => K::Playing,
     };
-    format!("Lumen · {}", status.get(lang))
+    format!("Lumenwall · {}", status.get(lang))
 }
 
 /// Connects to the daemon and forwards its state to `tx`.

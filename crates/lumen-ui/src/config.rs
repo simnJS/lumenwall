@@ -160,8 +160,8 @@ pub mod autostart {
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         let text = format!(
-            "[Desktop Entry]\nType=Application\nName=Lumen\nComment=Animated wallpapers\n\
-             Exec=\"{exe}\" --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+            "[Desktop Entry]\nType=Application\nName=Lumenwall\nComment=Animated wallpapers\n\
+             Exec=\"{exe}\" --background\nIcon=lumenwall\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
         );
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;

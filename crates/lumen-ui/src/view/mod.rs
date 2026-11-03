@@ -8,8 +8,8 @@ mod settings;
 pub mod widgets;
 mod workshop;
 
-use iced::widget::{button, column, container, pin, row, slider, space, stack, text};
-use iced::{Alignment, Color, Element, Length, Padding};
+use iced::widget::{button, column, container, float, pin, row, slider, space, stack, text};
+use iced::{Alignment, Color, Element, Length, Padding, Vector};
 use lumen_ipc::PauseReason;
 
 use crate::app::{App, Message, Page};
@@ -65,12 +65,23 @@ impl App {
                 );
             }
         }
-        let root = column![body.height(Length::Fill), self.status_bar(t)];
+        let mut root = column![];
+        if let Some(band) = self.title_band(t) {
+            root = root.push(band);
+        }
+        let root = root
+            .push(body.height(Length::Fill))
+            .push(self.status_bar(t));
+        let radius = self.corner_radius(true, true);
         let mut layers = stack![
             container(root)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .style(theme::app_bg)
+                .style(move |th| {
+                    let mut s = theme::app_bg(th);
+                    s.border.radius = radius;
+                    s
+                })
         ];
         if let Some(d) = &self.drag
             && d.active
@@ -94,28 +105,31 @@ impl App {
             layers = layers.push(pin(ghost).x(d.pos.x + 14.0).y(d.pos.y + 14.0));
         }
         if !self.toasts.is_empty() {
+            let now = std::time::Instant::now();
             let list = column(self.toasts.iter().map(|toast| {
-                let fg = if toast.error { Color::WHITE } else { t.text };
-                container(
+                // Fades in while rising 12 px, fades out in place.
+                let p = toast.shown.interpolate(0.0, 1.0, now);
+                let rise = if toast.leaving { 0.0 } else { 12.0 * (1.0 - p) };
+                let alpha = |c: Color| Color { a: c.a * p, ..c };
+                let (fg, mark, icon) = if toast.error {
+                    (t.on_danger, t.on_danger, Icon::Alert)
+                } else {
+                    (t.text, t.success, Icon::Check)
+                };
+                let body = container(
                     row![
-                        icons::icon(
-                            if toast.error {
-                                Icon::Alert
-                            } else {
-                                Icon::Check
-                            },
-                            16.0,
-                            if toast.error { Color::WHITE } else { t.success }
-                        ),
-                        label(toast.text.as_str(), size::BODY, fg),
+                        icons::icon(icon, theme::icon::M, alpha(mark)),
+                        label(toast.text.as_str(), size::BODY, alpha(fg)),
                     ]
                     .spacing(sp::S)
                     .align_y(Alignment::Center),
                 )
                 .padding(Padding::from([10.0, 14.0]))
                 .max_width(420)
-                .style(theme::toast(toast.error))
-                .into()
+                .style(theme::toast(toast.error, p));
+                float(body)
+                    .translate(move |_, _| Vector::new(0.0, rise))
+                    .into()
             }))
             .spacing(sp::S)
             .align_x(Alignment::Center);
@@ -126,22 +140,22 @@ impl App {
                     .padding(Padding::default().bottom(layout::STATUS_H + sp::L)),
             );
         }
-        drawn::drawn(layers, &self.drawn)
+        drawn::drawn(self.window_frame(t, layers.into()), &self.drawn)
     }
 
     fn sidebar(&self, t: &'static Tokens) -> Element<'_, Message> {
         let logo = row![
-            icons::icon(Icon::Logo, 26.0, t.accent),
+            icons::symbol(t, theme::icon::BRAND),
             strong(self.t(K::AppName), size::TITLE, t.text)
         ]
         .spacing(sp::S)
         .align_y(Alignment::Center);
         let nav = |page: Page, icon: Icon, k: K| -> Element<'_, Message> {
             let selected = self.page == page;
-            let color = if selected { t.accent } else { t.muted };
+            let color = if selected { t.accent_text } else { t.muted };
             button(
                 row![
-                    icons::icon(icon, 18.0, color),
+                    icons::icon(icon, theme::icon::L, color),
                     text(self.t(k)).size(size::BODY).font(theme::medium())
                 ]
                 .spacing(sp::M)
@@ -153,8 +167,17 @@ impl App {
             .on_press(Message::Nav(page))
             .into()
         };
+        // With the app's title bar (Linux), the brand mark is in the band above.
+        let top: Element<'_, Message> = if crate::chrome::DRAWN {
+            space().height(sp::M).into()
+        } else {
+            // Same left edge as the navigation icons below.
+            container(logo)
+                .padding(Padding::from([sp::XL, sp::M]))
+                .into()
+        };
         let col = column![
-            container(logo).padding(Padding::from([sp::XL, sp::S])),
+            top,
             nav(Page::Library, Icon::Library, K::NavLibrary),
             nav(Page::Workshop, Icon::Workshop, K::NavWorkshop),
             nav(Page::Screens, Icon::Screens, K::NavScreens),
@@ -237,8 +260,8 @@ impl App {
             );
             metrics = metrics.push(
                 row![
-                    icons::icon(Icon::Gauge, 15.0, t.accent),
-                    strong(fps, size::CAPTION, t.accent),
+                    icons::icon(Icon::Gauge, theme::icon::S, t.accent_text),
+                    strong(fps, size::CAPTION, t.accent_text),
                     label("fps", size::CAPTION, t.faint)
                 ]
                 .spacing(5)
@@ -301,7 +324,7 @@ impl App {
                 .push(
                     button(
                         row![
-                            icons::icon(Icon::Play, 14.0, t.on_accent),
+                            icons::icon(Icon::Play, theme::icon::S, t.on_accent),
                             text(self.t(K::StartEngine))
                                 .size(size::CAPTION)
                                 .font(theme::semibold())
@@ -314,12 +337,17 @@ impl App {
                     .on_press(Message::StartEngine),
                 );
         }
+        let radius = self.corner_radius(false, true);
         container(
             bar.padding(Padding::from([0.0, sp::L]))
                 .height(layout::STATUS_H),
         )
         .width(Length::Fill)
-        .style(theme::status_bar)
+        .style(move |th| {
+            let mut s = theme::status_bar(th);
+            s.border.radius = radius;
+            s
+        })
         .into()
     }
 

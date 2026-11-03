@@ -33,8 +33,8 @@ pub fn icon_button<'a>(
     active: bool,
     msg: Option<Message>,
 ) -> Element<'a, Message> {
-    let color = if active { t.accent } else { t.muted };
-    let b = button(container(icons::icon(icon, 18.0, color)).center(Length::Fixed(34.0)))
+    let color = if active { t.accent_text } else { t.muted };
+    let b = button(container(icons::icon(icon, theme::icon::M, color)).center(Length::Fixed(34.0)))
         .padding(0)
         .style(theme::icon_button(active))
         .on_press_maybe(msg);
@@ -58,7 +58,7 @@ pub fn primary_button<'a>(
     let fg = if msg.is_some() { t.on_accent } else { t.faint };
     let mut content = row![].spacing(sp::S).align_y(Alignment::Center);
     if let Some(i) = icon {
-        content = content.push(icons::icon(i, 18.0, fg));
+        content = content.push(icons::icon(i, theme::icon::M, fg));
     }
     content = content.push(strong(s, size::HEADING, fg));
     button(content)
@@ -77,7 +77,7 @@ pub fn primary_wide<'a>(
     let fg = if msg.is_some() { t.on_accent } else { t.faint };
     let mut content = row![].spacing(sp::S).align_y(Alignment::Center);
     if let Some(i) = icon {
-        content = content.push(icons::icon(i, 18.0, fg));
+        content = content.push(icons::icon(i, theme::icon::M, fg));
     }
     content = content.push(strong(s, size::HEADING, fg));
     button(container(content).center_x(Length::Fill))
@@ -96,7 +96,7 @@ pub fn secondary_button<'a>(
 ) -> Element<'a, Message> {
     let mut content = row![].spacing(sp::S).align_y(Alignment::Center);
     if let Some(i) = icon {
-        content = content.push(icons::icon(i, 16.0, t.muted));
+        content = content.push(icons::icon(i, theme::icon::M, t.muted));
     }
     content = content.push(text(s).size(size::BODY).font(theme::medium()));
     button(content)
@@ -114,7 +114,7 @@ pub fn ghost_button<'a>(
 ) -> Element<'a, Message> {
     let mut content = row![].spacing(sp::S).align_y(Alignment::Center);
     if let Some(i) = icon {
-        content = content.push(icons::icon(i, 16.0, t.muted));
+        content = content.push(icons::icon(i, theme::icon::M, t.muted));
     }
     content = content.push(text(s).size(size::BODY).font(theme::medium()));
     button(content)
@@ -180,7 +180,7 @@ pub fn notice<'a>(
     action: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let color = match kind {
-        theme::Notice::Info => t.accent,
+        theme::Notice::Info => t.accent_text,
         theme::Notice::Warning => t.warning,
         theme::Notice::Danger => t.danger,
     };
@@ -189,7 +189,7 @@ pub fn notice<'a>(
         texts = texts.push(label(body, size::CAPTION, t.muted));
     }
     let mut r = row![
-        icons::icon(Icon::Alert, 20.0, color),
+        icons::icon(Icon::Alert, theme::icon::L, color),
         texts.width(Length::Fill)
     ]
     .spacing(sp::M)
@@ -266,15 +266,29 @@ pub fn preview<'a>(
                 .into()
             }
         }
-        None => container(space())
-            .width(w)
-            .height(h)
-            .style(move |th| {
-                let mut s = theme::preview_placeholder(th);
-                s.border.radius = r.into();
-                s
-            })
-            .into(),
+        // No wallpaper there: the brand symbol marks the empty slot. A preview
+        // still decoding gets the plain placeholder.
+        None => {
+            let slot: Element<'a, Message> = if path.is_none() && h >= 40.0 {
+                let ink = app.tokens().faint;
+                icons::icon(
+                    Icon::Logo,
+                    (h * 0.3).clamp(theme::icon::M, 48.0),
+                    Color { a: 0.55, ..ink },
+                )
+            } else {
+                space().into()
+            };
+            container(slot)
+                .center_x(w)
+                .center_y(h)
+                .style(move |th| {
+                    let mut s = theme::preview_placeholder(th);
+                    s.border.radius = r.into();
+                    s
+                })
+                .into()
+        }
     }
 }
 
@@ -407,6 +421,15 @@ pub fn monitor_map<'a>(
         layers = layers.push(pin(area).x(x).y(y));
     }
     container(layers).width(width).height(height).into()
+}
+
+/// A path with the home directory shown as `~` (screenshots and screen sharing
+/// never show the user name).
+pub fn tilde(p: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(|r| r.to_path_buf())) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
+    }
 }
 
 pub fn format_bytes(b: u64, lang: crate::i18n::Lang) -> String {

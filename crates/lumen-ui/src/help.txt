@@ -1,4 +1,4 @@
-lumen-ui: browse, apply and configure Lumen wallpapers
+lumen-ui: browse, apply and configure Lumenwall wallpapers
 
 USAGE:
     lumen-ui                  Open the window
@@ -21,6 +21,7 @@ DEVELOPER OPTIONS:
 
 ENVIRONMENT:
     LUMEN_IPC_ENDPOINT        Daemon socket path (Linux) or pipe name (Windows)
-    LUMEN_UI_RENDERER         glow or wgpu
+    LUMEN_UI_RENDERER         software (CPU) or wgpu (default, falls back to software)
     LUMEN_LOG                 Log filter, e.g. "debug"
+    LUMEN_UI_REDUCE_MOTION    1: no UI animations, 0: animations (default: system setting)
     LUMEN_WE_WORKSHOP         Extra Workshop folder (testing)

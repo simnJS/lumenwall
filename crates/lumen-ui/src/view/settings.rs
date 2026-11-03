@@ -86,7 +86,7 @@ impl App {
             ))
             .width(200)
             .style(theme::slider_style),
-            strong(format!("{fps} fps"), size::BODY, t.accent).width(64),
+            strong(format!("{fps} fps"), size::BODY, t.accent_text).width(64),
         ]
         .spacing(sp::M)
         .align_y(Alignment::Center);
@@ -159,7 +159,12 @@ impl App {
             .step(0.01_f32)
             .width(200)
             .style(theme::slider_style),
-            strong(format!("{:.0} %", s.volume * 100.0), size::BODY, t.accent).width(64),
+            strong(
+                format!("{:.0} %", s.volume * 100.0),
+                size::BODY,
+                t.accent_text
+            )
+            .width(64),
         ]
         .spacing(sp::M)
         .align_y(Alignment::Center);
@@ -217,8 +222,8 @@ impl App {
         }
         for (i, f) in self.cfg.folders.iter().enumerate() {
             let mut r = row![
-                icons::icon(Icon::Folder, 16.0, t.muted),
-                label(f.display().to_string(), size::CAPTION, t.text).width(Length::Fill)
+                icons::icon(Icon::Folder, theme::icon::M, t.muted),
+                label(widgets::tilde(f), size::CAPTION, t.text).width(Length::Fill)
             ]
             .spacing(sp::S)
             .align_y(Alignment::Center);
@@ -288,13 +293,13 @@ impl App {
                 .steam
                 .libraries
                 .iter()
-                .map(|l| l.display().to_string())
+                .map(|l| widgets::tilde(l))
                 .collect();
             let ws: Vec<String> = lib
                 .steam
                 .workshop_dirs
                 .iter()
-                .map(|l| l.display().to_string())
+                .map(|l| widgets::tilde(l))
                 .collect();
             col = col
                 .push(line(
@@ -307,7 +312,7 @@ impl App {
                 ))
                 .push(line(
                     "Wallpaper Engine",
-                    lib.steam.we_assets().map(|p| p.display().to_string()),
+                    lib.steam.we_assets().map(|p| widgets::tilde(&p)),
                 ));
         }
         col = col.push(row![
@@ -327,7 +332,7 @@ impl App {
         let ws_msg = |m: WsMsg| Message::Ws(m);
         let mut col = column![
             row![
-                icons::icon(Icon::Key, 18.0, t.accent),
+                icons::icon(Icon::Key, theme::icon::L, t.accent_text),
                 strong(self.t(K::ApiKey), size::BODY, t.text),
                 space().width(Length::Fill),
                 widgets::ghost_button(
@@ -346,7 +351,7 @@ impl App {
             Some(k) => {
                 col = col.push(
                     row![
-                        icons::icon(Icon::Check, 16.0, t.success),
+                        icons::icon(Icon::Check, theme::icon::M, t.success),
                         label(
                             self.t(K::KeyStored)
                                 .replace("{k}", &crate::workshop::key::masked(k)),
@@ -491,28 +496,25 @@ impl App {
     }
 
     fn about_section(&self, t: &'static Tokens) -> Element<'_, Message> {
-        let mut col = column![
-            row![
-                icons::icon(Icon::Logo, 28.0, t.accent),
-                label(
-                    self.t(K::AboutText)
-                        .replace("{v}", env!("CARGO_PKG_VERSION")),
-                    size::BODY,
-                    t.text
-                )
-                .width(Length::Fill)
-            ]
-            .spacing(sp::M)
-            .align_y(Alignment::Center)
-        ]
-        .spacing(sp::S);
+        let mut text = column![label(
+            self.t(K::AboutText)
+                .replace("{v}", env!("CARGO_PKG_VERSION")),
+            size::BODY,
+            t.text
+        )]
+        .spacing(sp::XS)
+        .width(Length::Fill);
         if let crate::daemon::Link::Online(info) = &self.daemon.link {
-            col = col.push(label(
+            text = text.push(label(
                 format!("{} {} · IPC v{}", info.server, info.version, info.protocol),
                 size::CAPTION,
                 t.faint,
             ));
         }
+        // The horizontal logo (its clear space is part of the image).
+        let col = row![text, icons::logo(t, 168.0)]
+            .spacing(sp::L)
+            .align_y(Alignment::Center);
         widgets::section(t, self.t(K::SecAbout), col)
     }
 }

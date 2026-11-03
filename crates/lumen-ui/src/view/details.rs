@@ -274,8 +274,8 @@ impl App {
             row![
                 icons::icon(
                     if live { Icon::Sparkle } else { Icon::Check },
-                    14.0,
-                    if live { t.accent } else { t.faint }
+                    theme::icon::S,
+                    if live { t.accent_text } else { t.faint }
                 ),
                 label(
                     if live {
@@ -358,7 +358,8 @@ impl App {
                     format!("{v:.2}")
                 };
                 column![
-                    row![title, strong(shown, size::CAPTION, t.accent)].align_y(Alignment::Center),
+                    row![title, strong(shown, size::CAPTION, t.accent_text)]
+                        .align_y(Alignment::Center),
                     slider(*min..=*max, v, move |n| Message::Prop(
                         key.clone(),
                         PropertyValue::Number(n)

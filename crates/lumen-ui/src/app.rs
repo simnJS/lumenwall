@@ -17,7 +17,7 @@ use crate::config::{LangPref, PreviewMode, SortKey, ThemePref, UiConfig};
 use crate::daemon::{DaemonEvent, DaemonLink, Link};
 use crate::i18n::{K, Lang};
 use crate::previews::{Previews, ThumbEvent};
-use crate::theme::layout;
+use crate::theme::{layout, motion};
 
 /// Delay after the last change before previewed properties are saved.
 const SAVE_DELAY: Duration = Duration::from_millis(700);
@@ -72,7 +72,11 @@ type FilterKey = (
 pub struct Toast {
     pub text: String,
     pub error: bool,
+    /// When it starts leaving, then when it is removed.
     pub until: Instant,
+    /// Fades and slides in, then out (`motion::SLOW`).
+    pub shown: Animation<bool>,
+    pub leaving: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +137,7 @@ pub struct App {
     select_title: Option<String>,
     _keep_alive: Option<Box<dyn std::any::Any + Send>>,
     pub ws: crate::workshop::state::WorkshopState,
+    pub chrome: crate::chrome::Chrome,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +154,13 @@ pub enum Message {
     Housekeeping(Instant),
     Key(keyboard::Key, keyboard::Modifiers),
     Window(window::Id, window::Event),
+    /// Native handle of the window, once it exists (Windows: icon from the resources).
+    NativeWindow(u64),
+    /// The title bar the app draws on Linux.
+    Chrome(crate::chrome::Msg),
     SystemTheme(iced::theme::Mode),
+    /// The system's "reduce animations" setting, read at start and on focus.
+    ReduceMotion(bool),
     CursorMoved(Point),
     MouseReleased,
 
@@ -247,10 +258,10 @@ impl App {
             filter_key: None,
             selected: None,
             hovered: None,
-            hover_in: Animation::new(false).quick(),
+            hover_in: Animation::new(false),
             hover_prev: None,
-            hover_out: Animation::new(false).quick(),
-            panel: Animation::new(false).duration(Duration::from_millis(220)),
+            hover_out: Animation::new(false),
+            panel: motion::panel_at(false),
             previews: Previews::default(),
             anim_tick: None,
             daemon: DaemonLink::new(),
@@ -286,6 +297,7 @@ impl App {
                 .unwrap_or(Duration::from_millis(1800)),
             _keep_alive: launch.keep_alive.take(),
             ws: crate::workshop::state::WorkshopState::new(&cfg),
+            chrome: crate::chrome::Chrome::default(),
             cfg,
         };
         // Engine stats are wanted while the window exists; the daemon samples
@@ -297,7 +309,11 @@ impl App {
         app.ws.pending_select = launch.ws_select.take();
         let scan = app.rescan();
         let theme = iced::system::theme().map(Message::SystemTheme);
-        (app, Task::batch([scan, theme]))
+        let motion = Task::perform(
+            crate::platform::reduce_motion_async(),
+            Message::ReduceMotion,
+        );
+        (app, Task::batch([scan, theme, motion]))
     }
 
     pub fn own_rss(&self) -> Option<u64> {
@@ -315,7 +331,7 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-        "Lumen".to_owned()
+        "Lumenwall".to_owned()
     }
 
     pub fn theme(&self) -> Theme {
@@ -325,6 +341,17 @@ impl App {
             ThemePref::Light => false,
         };
         crate::theme::theme(dark)
+    }
+
+    /// What the window is cleared to: nothing on Linux, so the corners the
+    /// app's frame rounds are see-through (`chrome.rs`).
+    pub fn style(&self, theme: &Theme) -> iced::theme::Style {
+        use iced::theme::Base;
+        let mut style = theme.base();
+        if crate::chrome::DRAWN {
+            style.background_color = iced::Color::TRANSPARENT;
+        }
+        style
     }
 
     fn rescan(&mut self) -> Task<Message> {
@@ -550,11 +577,30 @@ impl App {
     }
 
     pub(crate) fn toast(&mut self, text: impl Into<String>, error: bool) {
+        let now = Instant::now();
         self.toasts.push(Toast {
             text: text.into(),
             error,
-            until: Instant::now() + TOAST_TIME,
+            until: now + TOAST_TIME,
+            shown: motion::toast(now),
+            leaving: false,
         });
+    }
+
+    /// Toasts past their time start leaving; those that have left are removed.
+    fn expire_toasts(&mut self, now: Instant) {
+        self.toasts.retain(|t| !(t.leaving && now >= t.until));
+        for t in &mut self.toasts {
+            if !t.leaving && now >= t.until {
+                t.leaving = true;
+                t.until = now + motion::duration(motion::SLOW);
+                t.shown = t
+                    .shown
+                    .clone()
+                    .duration(motion::duration(motion::SLOW))
+                    .go(false, now);
+            }
+        }
     }
 
     pub(crate) fn save_cfg(&mut self) {
@@ -570,7 +616,7 @@ impl App {
         }
         self.selected = dir;
         if self.selected.is_some() != was_open {
-            self.panel.go_mut(self.selected.is_some(), Instant::now());
+            self.panel = motion::panel_go(&self.panel, self.selected.is_some(), Instant::now());
             // The grid width changes with the panel; recompute from the window.
             self.viewport = None;
         }
@@ -762,7 +808,7 @@ impl App {
             Message::Frame => {}
             Message::Ws(m) => return self.ws_update(m),
             Message::Housekeeping(now) => {
-                self.toasts.retain(|t| t.until > now);
+                self.expire_toasts(now);
                 let ws_task = self.ws_housekeeping(now);
                 if let Some((at, dir)) = self.save_at.clone()
                     && now >= at
@@ -777,31 +823,65 @@ impl App {
                 return Task::batch([ws_task, self.check_screenshot()]);
             }
             Message::Key(key, mods) => return self.on_key(key, mods),
-            Message::Window(id, ev) => match ev {
-                window::Event::Resized(size) => {
-                    self.window = size;
-                    self.viewport = None;
-                }
-                window::Event::Focused => {
-                    self.focused = true;
-                    // Event-driven reconnect: the user came back to the window.
-                    self.daemon.reconnect();
-                }
-                window::Event::Unfocused => self.focused = false,
-                window::Event::CloseRequested => {
-                    self.cfg.window = Some([self.window.width, self.window.height]);
-                    self.cfg.last_session = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs());
-                    self.daemon.want_stats(false);
-                    self.save_cfg();
-                    return window::close(id);
-                }
-                _ => {}
-            },
+            Message::Window(id, ev) => {
+                let chrome = self.chrome_window_event(id, &ev);
+                let task = match ev {
+                    window::Event::Resized(size) => {
+                        self.window = size;
+                        self.viewport = None;
+                        Task::none()
+                    }
+                    window::Event::Opened { .. } if cfg!(windows) => {
+                        window::raw_id::<Message>(id).map(Message::NativeWindow)
+                    }
+                    window::Event::Focused => {
+                        self.focused = true;
+                        // Event-driven reconnect: the user came back to the window.
+                        self.daemon.reconnect();
+                        // The system setting may have changed while the user was away.
+                        Task::perform(
+                            crate::platform::reduce_motion_async(),
+                            Message::ReduceMotion,
+                        )
+                    }
+                    window::Event::Unfocused => {
+                        self.focused = false;
+                        Task::none()
+                    }
+                    window::Event::CloseRequested => {
+                        self.cfg.window = Some([self.window.width, self.window.height]);
+                        self.cfg.last_session = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs());
+                        self.daemon.want_stats(false);
+                        self.save_cfg();
+                        window::close(id)
+                    }
+                    _ => Task::none(),
+                };
+                return Task::batch([chrome, task]);
+            }
+            Message::Chrome(m) => return self.chrome_update(m),
+            Message::NativeWindow(raw) => crate::platform::set_window_icon(raw),
             Message::SystemTheme(mode) => {
                 self.system_dark = !matches!(mode, iced::theme::Mode::Light)
+            }
+            Message::ReduceMotion(reduced) => {
+                if reduced != motion::reduced() {
+                    tracing::info!(reduced, "system animation setting");
+                }
+                motion::set_reduced(reduced);
+                if reduced {
+                    // Anything still moving ends now.
+                    let open = self.panel.value();
+                    self.panel = motion::panel_at(open);
+                    self.hover_in = Animation::new(self.hover_in.value());
+                    self.hover_out = Animation::new(self.hover_out.value());
+                    for t in &mut self.toasts {
+                        t.shown = Animation::new(t.shown.value());
+                    }
+                }
             }
             Message::CursorMoved(pos) => {
                 if let Some(d) = &mut self.drag {
@@ -828,11 +908,9 @@ impl App {
                     self.ws_leave();
                 }
                 if page == Page::Workshop && self.page != Page::Workshop {
-                    let open = self.ws.selected.is_some();
-                    self.panel = Animation::new(open).duration(Duration::from_millis(220));
+                    self.panel = motion::panel_at(self.ws.selected.is_some());
                 } else if page == Page::Library && self.page != Page::Library {
-                    let open = self.selected.is_some();
-                    self.panel = Animation::new(open).duration(Duration::from_millis(220));
+                    self.panel = motion::panel_at(self.selected.is_some());
                 }
                 self.page = page;
                 self.viewport = None;
@@ -900,13 +978,13 @@ impl App {
                 if inside {
                     if self.hovered.as_ref() != Some(&dir) {
                         self.hover_prev = self.hovered.take();
-                        self.hover_out = Animation::new(true).quick().go(false, now);
+                        self.hover_out = motion::hover(true, false, now);
                         self.hovered = Some(dir);
-                        self.hover_in = Animation::new(false).quick().go(true, now);
+                        self.hover_in = motion::hover(false, true, now);
                     }
                 } else if self.hovered.as_ref() == Some(&dir) {
                     self.hover_prev = self.hovered.take();
-                    self.hover_out = Animation::new(true).quick().go(false, now);
+                    self.hover_out = motion::hover(true, false, now);
                 }
             }
             Message::ClosePanel => self.select(None),
@@ -920,8 +998,7 @@ impl App {
                 }
                 self.page = Page::Library;
                 self.search.clear();
-                self.panel =
-                    Animation::new(self.selected.is_some()).duration(Duration::from_millis(220));
+                self.panel = motion::panel_at(self.selected.is_some());
                 self.select(Some(dir.clone()));
                 if let Some(i) = self.library.as_ref().and_then(|l| {
                     self.filtered
@@ -1212,6 +1289,7 @@ impl App {
         if self.hover_in.is_animating(now)
             || self.hover_out.is_animating(now)
             || self.panel.is_animating(now)
+            || self.toasts.iter().any(|t| t.shown.is_animating(now))
         {
             subs.push(window::frames().map(|_| Message::Frame));
         }

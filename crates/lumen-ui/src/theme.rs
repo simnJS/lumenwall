@@ -32,10 +32,98 @@ pub mod radius {
 pub mod size {
     pub const DISPLAY: f32 = 28.0;
     pub const TITLE: f32 = 20.0;
-    pub const HEADING: f32 = 15.5;
+    /// On the 4 px rhythm (16/24 line).
+    pub const HEADING: f32 = 16.0;
     pub const BODY: f32 = 14.0;
     pub const CAPTION: f32 = 12.5;
     pub const MICRO: f32 = 11.0;
+}
+
+/// Icon sizes: four steps keep the 2-unit stroke of the 24-unit grid between
+/// 1.17 and 2 px (see `docs/BRAND.md`, Iconography).
+pub mod icon {
+    /// Status bar, badges, dense rows.
+    pub const S: f32 = 14.0;
+    /// Buttons, chips, fields.
+    pub const M: f32 = 16.0;
+    /// Navigation, notices.
+    pub const L: f32 = 20.0;
+    /// Headers (part of the scale; no view uses it yet).
+    #[allow(dead_code)]
+    pub const XL: f32 = 24.0;
+    /// The brand mark in the sidebar, nothing else.
+    pub const BRAND: f32 = 28.0;
+}
+
+/// Named durations (iced's `Animation` presets) and the system's "reduce
+/// animations" setting: when it is on, every duration is zero, so an animation
+/// ends as soon as it starts and no frame subscription is created for it.
+pub mod motion {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use iced::Animation;
+    use iced::animation::Easing;
+
+    /// Press, small colour changes (ease-out). Part of the scale; iced styles
+    /// change instantly today, so no view uses it yet.
+    #[allow(dead_code)]
+    pub const FAST: Duration = Duration::from_millis(100);
+    /// Hover wash, chips, toggles (ease-in-out).
+    pub const BASE: Duration = Duration::from_millis(200);
+    /// Details panel (ease-out entering, ease-in leaving).
+    pub const PANEL: Duration = Duration::from_millis(220);
+    /// Toasts (ease-in-out).
+    pub const SLOW: Duration = Duration::from_millis(320);
+
+    static REDUCED: AtomicBool = AtomicBool::new(false);
+
+    /// Follows the system setting (read at start and when the window regains focus).
+    pub fn set_reduced(reduced: bool) {
+        REDUCED.store(reduced, Ordering::Relaxed);
+    }
+
+    pub fn reduced() -> bool {
+        REDUCED.load(Ordering::Relaxed)
+    }
+
+    /// `d`, or zero when the system asks for reduced motion.
+    pub fn duration(d: Duration) -> Duration {
+        if reduced() { Duration::ZERO } else { d }
+    }
+
+    /// Hover wash of a card, starting from `from` and going to `to` now.
+    pub fn hover(from: bool, to: bool, now: Instant) -> Animation<bool> {
+        Animation::new(from)
+            .duration(duration(BASE))
+            .easing(Easing::EaseInOut)
+            .go(to, now)
+    }
+
+    /// The details panel at rest, open or closed.
+    pub fn panel_at(open: bool) -> Animation<bool> {
+        Animation::new(open).duration(duration(PANEL))
+    }
+
+    /// Slides the panel towards `open` from wherever it is.
+    pub fn panel_go(anim: &Animation<bool>, open: bool, now: Instant) -> Animation<bool> {
+        anim.clone()
+            .duration(duration(PANEL))
+            .easing(if open {
+                Easing::EaseOut
+            } else {
+                Easing::EaseIn
+            })
+            .go(open, now)
+    }
+
+    /// A toast appearing.
+    pub fn toast(now: Instant) -> Animation<bool> {
+        Animation::new(false)
+            .duration(duration(SLOW))
+            .easing(Easing::EaseOut)
+            .go(true, now)
+    }
 }
 
 /// Layout constants shared by views and by the update logic (visibility maths).
@@ -59,14 +147,23 @@ pub struct Tokens {
     pub border: Color,
     pub text: Color,
     pub muted: Color,
+    /// Placeholders, hints, secondary labels: still AA (≥ 4.5:1) on every surface.
     pub faint: Color,
+    /// Fills and outlines: buttons, chips, selection, sliders.
     pub accent: Color,
     pub accent_hover: Color,
     pub accent_soft: Color,
+    /// The accent used as text or as an icon on a surface (selected navigation,
+    /// values, links): darker than `accent` in the light theme to stay AA.
+    pub accent_text: Color,
     pub on_accent: Color,
     pub success: Color,
     pub warning: Color,
+    /// Text on a `warning` fill (badges).
+    pub on_warning: Color,
     pub danger: Color,
+    /// Text on a `danger` fill (error toasts, red badges).
+    pub on_danger: Color,
 }
 
 pub const DARK: Tokens = Tokens {
@@ -79,7 +176,7 @@ pub const DARK: Tokens = Tokens {
     border: color!(0x2c303b),
     text: color!(0xeeeff4),
     muted: color!(0xa3a7b7),
-    faint: color!(0x6d7183),
+    faint: color!(0x878c9e),
     accent: color!(0xffb347),
     accent_hover: color!(0xffc46e),
     accent_soft: Color {
@@ -88,10 +185,13 @@ pub const DARK: Tokens = Tokens {
         b: 0.28,
         a: 0.14,
     },
+    accent_text: color!(0xffb347),
     on_accent: color!(0x221605),
     success: color!(0x5cd68d),
     warning: color!(0xf5c542),
+    on_warning: color!(0x221605),
     danger: color!(0xff7a7a),
+    on_danger: color!(0x2a0a0a),
 };
 
 pub const LIGHT: Tokens = Tokens {
@@ -103,20 +203,24 @@ pub const LIGHT: Tokens = Tokens {
     overlay: color!(0xf0f0f4),
     border: color!(0xdedfe6),
     text: color!(0x16171c),
-    muted: color!(0x5a5d6c),
-    faint: color!(0x8d90a0),
+    muted: color!(0x4d5060),
+    faint: color!(0x676a7b),
     accent: color!(0xb35d00),
-    accent_hover: color!(0xc96a00),
+    // In the light theme hover darkens (white label: 6.1:1).
+    accent_hover: color!(0x9a4d00),
     accent_soft: Color {
         r: 0.70,
         g: 0.36,
         b: 0.0,
         a: 0.10,
     },
+    accent_text: color!(0x9a4d00),
     on_accent: color!(0xffffff),
-    success: color!(0x1b8045),
+    success: color!(0x187a41),
     warning: color!(0x8a6200),
+    on_warning: color!(0xffffff),
     danger: color!(0xb91c1c),
+    on_danger: color!(0xffffff),
 };
 
 pub fn tokens(theme: &Theme) -> &'static Tokens {
@@ -130,7 +234,11 @@ pub fn tokens(theme: &Theme) -> &'static Tokens {
 pub fn theme(dark: bool) -> Theme {
     let t = if dark { &DARK } else { &LIGHT };
     Theme::custom(
-        if dark { "Lumen dark" } else { "Lumen light" },
+        if dark {
+            "Lumenwall dark"
+        } else {
+            "Lumenwall light"
+        },
         iced::theme::Palette {
             background: t.bg,
             text: t.text,
@@ -520,18 +628,23 @@ pub fn hint_bar(theme: &Theme) -> container::Style {
     }
 }
 
-pub fn toast(error: bool) -> impl Fn(&Theme) -> container::Style {
+/// A toast, `alpha` from 0 (hidden) to 1 while it appears or leaves.
+pub fn toast(error: bool, alpha: f32) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let t = tokens(theme);
+        let bg = if error { t.danger } else { t.overlay };
+        let fg = if error { t.on_danger } else { t.text };
+        let mut shadow = elevation(3, t);
+        shadow.color.a *= alpha;
         container::Style {
-            background: Some(if error { t.danger } else { t.overlay }.into()),
-            text_color: Some(if error { Color::WHITE } else { t.text }),
+            background: Some(with_alpha(bg, alpha).into()),
+            text_color: Some(with_alpha(fg, alpha)),
             border: Border {
                 radius: radius::M.into(),
-                color: t.border,
+                color: with_alpha(t.border, alpha),
                 width: if error { 0.0 } else { 1.0 },
             },
-            shadow: elevation(3, t),
+            shadow,
             ..Default::default()
         }
     }
@@ -670,7 +783,7 @@ pub fn nav(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
         };
         base_button(
             bg,
-            if selected { t.accent } else { t.muted },
+            if selected { t.accent_text } else { t.muted },
             Border {
                 radius: radius::M.into(),
                 ..Default::default()
@@ -715,7 +828,7 @@ pub fn icon_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::S
         };
         base_button(
             bg,
-            if active { t.accent } else { t.muted },
+            if active { t.accent_text } else { t.muted },
             Border {
                 radius: radius::PILL.into(),
                 ..Default::default()
@@ -854,4 +967,99 @@ pub fn scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::St
 
 pub fn icon_tint(color: Color) -> impl Fn(&Theme, svg::Status) -> svg::Style {
     move |_, _| svg::Style { color: Some(color) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2.2 relative luminance of an sRGB colour.
+    fn luminance(c: Color) -> f32 {
+        let lin = |v: f32| {
+            if v <= 0.040_45 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+
+    /// `top` (possibly translucent) composited over an opaque `bottom`.
+    fn over(top: Color, bottom: Color) -> Color {
+        let mix = |a: f32, b: f32| a * top.a + b * (1.0 - top.a);
+        Color::from_rgb(
+            mix(top.r, bottom.r),
+            mix(top.g, bottom.g),
+            mix(top.b, bottom.b),
+        )
+    }
+
+    fn contrast(fg: Color, bg: Color) -> f32 {
+        let (a, b) = (luminance(fg), luminance(bg));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Every pair that carries text in the views meets AA (4.5:1), in both themes.
+    /// `cargo test -p lumen-ui contrast -- --nocapture` prints the table.
+    #[test]
+    fn text_contrast_meets_wcag_aa() {
+        for t in [&DARK, &LIGHT] {
+            let selected_nav = over(t.accent_soft, t.sidebar);
+            let pairs = [
+                ("text / bg", t.text, t.bg),
+                ("text / raised", t.text, t.raised),
+                ("text / overlay (toast)", t.text, t.overlay),
+                ("muted / bg", t.muted, t.bg),
+                ("muted / raised", t.muted, t.raised),
+                ("muted / sidebar", t.muted, t.sidebar),
+                ("muted / surface (panel)", t.muted, t.surface),
+                ("faint / bg", t.faint, t.bg),
+                ("faint / raised", t.faint, t.raised),
+                ("faint / sidebar", t.faint, t.sidebar),
+                ("faint / surface (panel)", t.faint, t.surface),
+                ("accent_text / bg", t.accent_text, t.bg),
+                ("accent_text / raised", t.accent_text, t.raised),
+                ("accent_text / sidebar", t.accent_text, t.sidebar),
+                ("accent_text / selected nav", t.accent_text, selected_nav),
+                ("on_accent / accent", t.on_accent, t.accent),
+                ("on_accent / accent_hover", t.on_accent, t.accent_hover),
+                ("on_warning / warning", t.on_warning, t.warning),
+                ("on_danger / danger", t.on_danger, t.danger),
+                ("success / bg", t.success, t.bg),
+                ("success / sidebar", t.success, t.sidebar),
+                ("success / raised", t.success, t.raised),
+                ("warning / bg", t.warning, t.bg),
+                ("danger / bg", t.danger, t.bg),
+                ("danger / raised", t.danger, t.raised),
+            ];
+            let theme = if t.dark { "dark" } else { "light" };
+            for (name, fg, bg) in pairs {
+                let r = contrast(fg, bg);
+                println!("{theme:5} {name:28} {r:5.2}");
+                assert!(r >= 4.5, "{theme} {name}: {r:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_matches_known_values() {
+        assert!((contrast(Color::WHITE, Color::BLACK) - 21.0).abs() < 0.01);
+        // BRAND.md: white on the old light accent_hover failed at 3.79:1.
+        assert!((contrast(Color::WHITE, color!(0xc96a00)) - 3.79).abs() < 0.02);
+    }
+
+    #[test]
+    fn reduced_motion_zeroes_durations() {
+        assert_eq!(motion::duration(motion::PANEL), motion::PANEL);
+        motion::set_reduced(true);
+        assert_eq!(motion::duration(motion::SLOW), std::time::Duration::ZERO);
+        let now = std::time::Instant::now();
+        let anim = motion::panel_go(&motion::panel_at(false), true, now);
+        assert!(!anim.is_animating(now));
+        assert_eq!(anim.interpolate(0.0, 1.0, now), 1.0);
+        motion::set_reduced(false);
+        let anim = motion::panel_go(&motion::panel_at(false), true, now);
+        assert!(anim.is_animating(now));
+    }
 }

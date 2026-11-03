@@ -13,6 +13,7 @@
 
 mod app;
 mod catalog;
+mod chrome;
 mod config;
 mod daemon;
 mod demo;
@@ -239,15 +240,19 @@ fn run_window(args: Args) -> ExitCode {
         .size
         .or(UiConfig::load().window)
         .unwrap_or([1360.0, 860.0]);
-    let icon = iced::window::icon::from_rgba(icons::logo_rgba(64, [0xff, 0xb3, 0x47]), 64, 64).ok();
     let window = iced::window::Settings {
         size: iced::Size::new(size[0], size[1]),
         min_size: Some(iced::Size::new(980.0, 620.0)),
-        icon,
+        icon: icons::window_icon(),
         exit_on_close_request: false,
+        // Linux: the app draws its own title bar and rounded frame (chrome.rs).
+        decorations: !chrome::DRAWN,
+        transparent: chrome::DRAWN,
+        // Wayland app id and X11 WM_CLASS: the desktop entry
+        // `packaging/linux/lumenwall-ui.desktop` (name and icon in docks).
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
-            application_id: "lumen".into(),
+            application_id: "lumenwall-ui".into(),
             ..Default::default()
         },
         ..Default::default()
@@ -260,6 +265,7 @@ fn run_window(args: Args) -> ExitCode {
     )
     .title(App::title)
     .theme(App::theme)
+    .style(App::style)
     .subscription(App::subscription)
     .default_font(font)
     .window(window)
