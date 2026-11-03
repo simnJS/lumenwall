@@ -1,12 +1,18 @@
-//! Operators (spec 05 §8). Each operator reads its [U] parameters once per frame, then runs one
-//! monomorphic loop over the live particles.
+//! Operators (spec 05 §8 and amendments A4, A6.1-a, A6.3). Each operator reads its [U]
+//! parameters once per frame, then runs one monomorphic loop over the live particles.
 
-use crate::model::{OperatorDef, OscillateDef, RampDef, TurbulenceDef, VortexDef};
+use crate::boids::{self, BoidsGrid};
+use crate::event::{ParentParticle, apply_inherit};
+use crate::model::{
+    CollisionBehavior, CollisionDef, CollisionKind, OperatorBlend, OperatorDef, OscillateDef,
+    RampDef, RemapOutput, TurbulenceDef, VortexDef,
+};
 use crate::noise::curl;
 use crate::pool::{Live, Osc, OscPos, Pool};
+use crate::remap::{RemapEnv, RemapParams, remap_particle};
 use crate::rng::Rng;
 use crate::system::ControlPoint;
-use glam::{Vec3, Vec3A};
+use glam::{Vec2, Vec3, Vec3A};
 use std::f32::consts::{PI, TAU};
 
 /// Per-frame operator context.
@@ -17,26 +23,139 @@ pub(crate) struct OpCtx<'a> {
     /// `override.speed` (`S`).
     pub speed: f32,
     pub cps: &'a [ControlPoint; 8],
+    /// Control point positions at the previous simulated frame (A6.1-e).
+    pub cp_prev: &'a [Vec3; 8],
+    /// Σ of the simulated `dt` (A6.3.1 `particlesystemtime`).
+    pub system_time: f32,
+    pub time_of_day: f32,
+    /// Scene size `W × H` and system origin `O` (A6.3.7 `collisionbounds`).
+    pub scene_size: Vec2,
+    pub origin: Vec3,
+    pub perspective: bool,
+    /// Live parent particle of a child instance (A6.5 `inheritvaluefromevent`).
+    pub parent: Option<&'a ParentParticle>,
+}
+
+#[cfg(test)]
+static ZERO_CP: [Vec3; 8] = [Vec3::ZERO; 8];
+
+impl<'a> OpCtx<'a> {
+    #[cfg(test)]
+    pub fn basic(cps: &'a [ControlPoint; 8], dt: f32, time: f32, speed: f32) -> Self {
+        Self {
+            dt,
+            time,
+            speed,
+            cps,
+            cp_prev: &ZERO_CP,
+            system_time: 0.0,
+            time_of_day: 0.0,
+            scene_size: Vec2::new(1920.0, 1080.0),
+            origin: Vec3::ZERO,
+            perspective: false,
+            parent: None,
+        }
+    }
+}
+
+/// Fields an operator writes, for blending (A6.1-a).
+mod field {
+    pub const POS: u8 = 1;
+    pub const VEL: u8 = 2;
+    pub const ROT: u8 = 4;
+    pub const ANGVEL: u8 = 8;
+    pub const COLOR: u8 = 16;
+    pub const ALPHA: u8 = 32;
+    pub const SIZE: u8 = 64;
+}
+
+/// Snapshot buffers for operator blending, shared by the operators of a system.
+#[derive(Debug, Default)]
+pub(crate) struct BlendScratch {
+    pos: Vec<Vec3A>,
+    vel: Vec<Vec3A>,
+    rot: Vec<Vec3A>,
+    angvel: Vec<Vec3A>,
+    color: Vec<Vec3A>,
+    alpha: Vec<f32>,
+    size: Vec<f32>,
+}
+
+impl BlendScratch {
+    pub fn with_capacity(slots: usize) -> Self {
+        Self {
+            pos: vec![Vec3A::ZERO; slots],
+            vel: vec![Vec3A::ZERO; slots],
+            rot: vec![Vec3A::ZERO; slots],
+            angvel: vec![Vec3A::ZERO; slots],
+            color: vec![Vec3A::ZERO; slots],
+            alpha: vec![0.0; slots],
+            size: vec![0.0; slots],
+        }
+    }
+}
+
+/// Blending parameters read for the frame.
+pub(crate) struct BlendParams {
+    blend_in: Option<(f32, f32)>,
+    blend_out: Option<(f32, f32)>,
+}
+
+impl BlendParams {
+    fn read(b: &OperatorBlend) -> Self {
+        Self {
+            blend_in: b.blend_in.as_ref().map(|(s, e)| (s.f32(), e.f32())),
+            blend_out: b.blend_out.as_ref().map(|(s, e)| (s.f32(), e.f32())),
+        }
+    }
+
+    /// `b = b_in × b_out` for a particle at relative life `l`.
+    #[inline]
+    fn weight(&self, l: f32) -> f32 {
+        let bin = self.blend_in.map_or(1.0, |(s, e)| ramp(l, s, e, 0.0, 1.0));
+        let bout = self
+            .blend_out
+            .map_or(1.0, |(s, e)| 1.0 - ramp(l, s, e, 0.0, 1.0));
+        bin * bout
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct OperatorRt {
     pub def: OperatorDef,
+    /// A6.1-a blending, `None` without blending keys.
+    pub blend: Option<OperatorBlend>,
     /// `turbulence`: phase and speed drawn once at creation.
     pub turb_phase: f32,
     pub turb_speed: f32,
-    /// `vortex` with `audioprocessingmode > 0` at creation.
+    /// `vortex` with `audioprocessingmode > 0` at creation; `collisionmodel`; remap without
+    /// supported input/output.
     pub inactive: bool,
+    /// `boids` grid, sized at creation.
+    pub boids: Option<Box<BoidsGrid>>,
 }
 
 impl OperatorRt {
     /// Creates the runtime operator; `turbulence` draws its phase then its speed here (§8.7).
+    #[cfg(test)]
     pub fn new(def: OperatorDef, rng: &mut Rng) -> Self {
+        Self::with_blend(def, None, rng, 0)
+    }
+
+    /// Full constructor: blending keys and the number of pool slots (scratch sizing).
+    pub fn with_blend(
+        def: OperatorDef,
+        blend: Option<OperatorBlend>,
+        rng: &mut Rng,
+        slots: usize,
+    ) -> Self {
         let mut rt = Self {
             def,
+            blend,
             turb_phase: 0.0,
             turb_speed: 0.0,
             inactive: false,
+            boids: None,
         };
         match &rt.def {
             OperatorDef::Turbulence(t) => {
@@ -48,19 +167,141 @@ impl OperatorRt {
                 // parity: audio-reactive vortex is fully inactive (no audio amplitude).
                 rt.inactive = v.audio_processing_mode.f32() > 0.0;
             }
+            OperatorDef::Collision(c) => rt.inactive = c.kind == CollisionKind::Model,
+            OperatorDef::RemapValue(r) => rt.inactive = !r.active(),
+            OperatorDef::Boids(_) => rt.boids = Some(Box::new(BoidsGrid::with_capacity(slots))),
             _ => {}
         }
         rt
     }
 
+    /// Fields written by this operator (blending snapshot).
+    fn fields(&self) -> u8 {
+        use field::*;
+        match &self.def {
+            OperatorDef::Movement { .. } | OperatorDef::Collision(_) => POS | VEL,
+            OperatorDef::AngularMovement { .. } => ROT | ANGVEL,
+            OperatorDef::AlphaFade { .. }
+            | OperatorDef::AlphaChange(_)
+            | OperatorDef::OscillateAlpha(_) => ALPHA,
+            OperatorDef::SizeChange(_) | OperatorDef::OscillateSize(_) => SIZE,
+            OperatorDef::ColorChange(_) => COLOR,
+            OperatorDef::Turbulence(_)
+            | OperatorDef::Vortex(_)
+            | OperatorDef::ControlPointAttract { .. }
+            | OperatorDef::ReduceMovementNearControlPoint { .. }
+            | OperatorDef::CapVelocity { .. }
+            | OperatorDef::Boids(_) => VEL,
+            OperatorDef::OscillatePosition(_)
+            | OperatorDef::MaintainDistanceBetweenControlPoints { .. }
+            | OperatorDef::MaintainDistanceToControlPoint { .. } => POS,
+            OperatorDef::RemapValue(r) => match r.output {
+                RemapOutput::Size => SIZE,
+                RemapOutput::Opacity => ALPHA,
+                RemapOutput::Color => COLOR,
+                RemapOutput::Velocity | RemapOutput::Speed => VEL,
+                RemapOutput::Rotation => ROT,
+                RemapOutput::AngularSpeed => ANGVEL,
+                RemapOutput::Position => POS,
+                RemapOutput::Unsupported => 0,
+            },
+            OperatorDef::InheritValueFromEvent { .. } => COLOR | ALPHA | VEL | SIZE | ROT | ANGVEL,
+        }
+    }
+
+    /// True when the operator rewrites an oscillator base from the value it writes (§8.4–8.5).
+    fn updates_osc_base(&self) -> bool {
+        matches!(
+            &self.def,
+            OperatorDef::AlphaFade { .. }
+                | OperatorDef::AlphaChange(_)
+                | OperatorDef::SizeChange(_)
+        ) || matches!(&self.def, OperatorDef::RemapValue(r) if matches!(r.output, RemapOutput::Size | RemapOutput::Opacity))
+    }
+
+    /// Runs the operator without blending scratch (blending keys, if any, are ignored).
+    #[cfg(test)]
     pub fn run(&mut self, pool: &mut Pool, ctx: &OpCtx<'_>, rng: &mut Rng) {
+        self.run_inner(pool, ctx, rng, None);
+    }
+
+    /// Runs the operator, applying its blending (A6.1-a) with `scratch` when it has one.
+    pub fn run_blended(
+        &mut self,
+        pool: &mut Pool,
+        ctx: &OpCtx<'_>,
+        rng: &mut Rng,
+        scratch: &mut BlendScratch,
+    ) {
+        let Some(blend) = self.blend.as_ref().map(BlendParams::read) else {
+            self.run_inner(pool, ctx, rng, None);
+            return;
+        };
         if pool.len == 0 {
             return;
         }
+        let mask = self.fields();
+        let r = pool.range();
+        snapshot(pool, scratch, mask, r.clone());
+        self.run_inner(pool, ctx, rng, Some(&blend));
+        blend_back(pool, scratch, mask, r, &blend);
+        if self.updates_osc_base() {
+            let l = pool.live();
+            set_base(l.osc_alpha, l.alpha);
+            set_base(l.osc_size, l.size);
+        }
+    }
+
+    fn run_inner(
+        &mut self,
+        pool: &mut Pool,
+        ctx: &OpCtx<'_>,
+        rng: &mut Rng,
+        blend: Option<&BlendParams>,
+    ) {
+        if pool.len == 0 {
+            return;
+        }
+        let Self {
+            def,
+            turb_phase,
+            turb_speed,
+            inactive,
+            boids,
+            ..
+        } = self;
+        if *inactive {
+            return;
+        }
+        let (dt, s) = (ctx.dt, ctx.speed);
+        // Operators working on absolute pool indices.
+        match def {
+            OperatorDef::RemapValue(r) => {
+                let params = RemapParams::read(r);
+                let env = RemapEnv {
+                    cps: ctx.cps,
+                    time: ctx.time,
+                    system_time: ctx.system_time,
+                    time_of_day: ctx.time_of_day,
+                };
+                for i in pool.range() {
+                    remap_particle(r, &params, &env, pool, i, false, rng);
+                }
+                return;
+            }
+            OperatorDef::InheritValueFromEvent { mode } => {
+                if let Some(parent) = ctx.parent {
+                    for i in pool.range() {
+                        apply_inherit(*mode, parent, pool, i, false);
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
         let l = pool.live();
         let n = l.pos.len();
-        let (dt, s) = (ctx.dt, ctx.speed);
-        match &self.def {
+        match def {
             OperatorDef::Movement { drag, gravity } => {
                 let g = gravity.vec3();
                 let g = Vec3A::new(g.x, -g.y, g.z) * dt * s;
@@ -133,11 +374,9 @@ impl OperatorRt {
                     l.color[i] = l.init_color[i] * m;
                 }
             }
-            OperatorDef::Turbulence(t) => turbulence(t, self.turb_phase, self.turb_speed, l, ctx),
+            OperatorDef::Turbulence(t) => turbulence(t, *turb_phase, *turb_speed, l, ctx),
             OperatorDef::Vortex(v) => {
-                if !self.inactive {
-                    vortex(v, l, ctx);
-                }
+                vortex(v, l, ctx);
             }
             OperatorDef::ControlPointAttract {
                 control_point,
@@ -167,7 +406,283 @@ impl OperatorRt {
             OperatorDef::OscillatePosition(o) => {
                 oscillate_position(o, l.osc_pos, l.pos, l.age, ctx, rng)
             }
+            OperatorDef::ReduceMovementNearControlPoint {
+                control_point,
+                distance_inner,
+                distance_outer,
+                reduction_inner,
+                reduction_outer,
+            } => {
+                let Some(cp) = cp_get(ctx.cps, *control_point) else {
+                    return;
+                };
+                let c = Vec3A::from(cp.position);
+                let (din, dout) = (distance_inner.f32(), distance_outer.f32());
+                let (rin, rout) = (reduction_inner.f32(), reduction_outer.f32());
+                for (p, v) in l.pos.iter().zip(l.vel.iter_mut()) {
+                    let d = (*p - c).length();
+                    let r = if d <= din {
+                        rin
+                    } else if d >= dout {
+                        rout
+                    } else {
+                        rin + (d - din) / (dout - din) * (rout - rin)
+                    };
+                    // Same form as the `movement` drag; r < 0 accelerates.
+                    *v *= (1.0 - r * dt).max(0.0);
+                }
+            }
+            OperatorDef::MaintainDistanceBetweenControlPoints {
+                control_point_start,
+                control_point_end,
+            } => {
+                let (Some(a), Some(b)) =
+                    (cp_index(*control_point_start), cp_index(*control_point_end))
+                else {
+                    return;
+                };
+                let (a_t, b_t) = (ctx.cps[a].position, ctx.cps[b].position);
+                let (a_p, b_p) = (ctx.cp_prev[a], ctx.cp_prev[b]);
+                let ab = b_t - a_t;
+                let l2 = ab.length_squared();
+                for i in 0..n {
+                    let newborn = l.age[i] <= dt;
+                    let p = Vec3::from(l.pos[i]);
+                    let u = match l.seq_s.get_mut(i) {
+                        Some(u) => {
+                            if u.is_nan() {
+                                *u = if l2 > 0.0 {
+                                    ((p - a_t).dot(ab) / l2).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+                            }
+                            *u
+                        }
+                        None => return,
+                    };
+                    // A particle born this frame was placed relative to the current points.
+                    if !newborn {
+                        l.pos[i] += Vec3A::from(a_t.lerp(b_t, u) - a_p.lerp(b_p, u));
+                    }
+                }
+            }
+            OperatorDef::CapVelocity { max_speed } => {
+                let m = max_speed.f32();
+                for v in l.vel.iter_mut() {
+                    let sp = v.length();
+                    if sp > m {
+                        *v = *v / sp * m;
+                    }
+                }
+            }
+            OperatorDef::Boids(b) => {
+                if let Some(grid) = boids.as_deref_mut() {
+                    boids::run(b, grid, l.pos, l.vel, dt);
+                }
+            }
+            OperatorDef::MaintainDistanceToControlPoint {
+                control_point,
+                distance,
+                variable_strength,
+            } => {
+                let Some(cp) = cp_get(ctx.cps, *control_point) else {
+                    return;
+                };
+                let c = Vec3A::from(cp.position);
+                let dist = distance.f32();
+                let alpha = variable_strength.f32().clamp(0.0, 1.0);
+                for p in l.pos.iter_mut() {
+                    let delta = *p - c;
+                    let d = delta.length();
+                    if d > 1e-4 {
+                        let target = c + delta / d * dist;
+                        *p += (target - *p) * alpha;
+                    }
+                }
+            }
+            OperatorDef::Collision(c) => collide(c, l, ctx, blend),
+            OperatorDef::RemapValue(_) | OperatorDef::InheritValueFromEvent { .. } => {}
         }
+    }
+}
+
+fn cp_index(i: i32) -> Option<usize> {
+    usize::try_from(i).ok().filter(|&i| i < 8)
+}
+
+fn cp_get(cps: &[ControlPoint; 8], i: i32) -> Option<&ControlPoint> {
+    cp_index(i).map(|i| &cps[i])
+}
+
+/// Copies the fields an operator writes before it runs.
+fn snapshot(pool: &Pool, s: &mut BlendScratch, mask: u8, r: std::ops::Range<usize>) {
+    fn cp<T: Copy>(dst: &mut [T], src: &[T], r: std::ops::Range<usize>) {
+        if let Some(d) = dst.get_mut(r.clone()) {
+            d.copy_from_slice(&src[r]);
+        }
+    }
+    use field::*;
+    if mask & POS != 0 {
+        cp(&mut s.pos, &pool.pos, r.clone());
+    }
+    if mask & VEL != 0 {
+        cp(&mut s.vel, &pool.vel, r.clone());
+    }
+    if mask & ROT != 0 {
+        cp(&mut s.rot, &pool.rot, r.clone());
+    }
+    if mask & ANGVEL != 0 {
+        cp(&mut s.angvel, &pool.angvel, r.clone());
+    }
+    if mask & COLOR != 0 {
+        cp(&mut s.color, &pool.color, r.clone());
+    }
+    if mask & ALPHA != 0 {
+        cp(&mut s.alpha, &pool.alpha, r.clone());
+    }
+    if mask & SIZE != 0 {
+        cp(&mut s.size, &pool.size, r);
+    }
+}
+
+/// `X ← X_before + b × (X_after − X_before)` per particle (A6.1-a).
+fn blend_back(
+    pool: &mut Pool,
+    s: &BlendScratch,
+    mask: u8,
+    r: std::ops::Range<usize>,
+    bp: &BlendParams,
+) {
+    use field::*;
+    if s.pos.len() < r.end {
+        return;
+    }
+    for i in r {
+        let b = bp.weight(life(pool.age[i], pool.lifetime[i]));
+        if b == 1.0 {
+            continue;
+        }
+        let mix3 = |old: Vec3A, new: Vec3A| old + (new - old) * b;
+        if mask & POS != 0 {
+            pool.pos[i] = mix3(s.pos[i], pool.pos[i]);
+        }
+        if mask & VEL != 0 {
+            pool.vel[i] = mix3(s.vel[i], pool.vel[i]);
+        }
+        if mask & ROT != 0 {
+            pool.rot[i] = mix3(s.rot[i], pool.rot[i]);
+        }
+        if mask & ANGVEL != 0 {
+            pool.angvel[i] = mix3(s.angvel[i], pool.angvel[i]);
+        }
+        if mask & COLOR != 0 {
+            pool.color[i] = mix3(s.color[i], pool.color[i]);
+        }
+        if mask & ALPHA != 0 {
+            pool.alpha[i] = s.alpha[i] + (pool.alpha[i] - s.alpha[i]) * b;
+        }
+        if mask & SIZE != 0 {
+            pool.size[i] = s.size[i] + (pool.size[i] - s.size[i]) * b;
+        }
+    }
+}
+
+/// Collision operators (A6.3.7). Vectors follow the `gravity` Y convention.
+fn collide(c: &CollisionDef, l: Live<'_>, ctx: &OpCtx<'_>, blend: Option<&BlendParams>) {
+    let flip = |v: Vec3| Vec3A::new(v.x, -v.y, v.z);
+    let bounce = c.bounce_factor.f32();
+    let behavior = c.behavior;
+    let dt = ctx.dt;
+    // Response to a penetration of depth `sigma < 0` along the outward normal `nrm`.
+    let respond = |i: usize,
+                   sigma: f32,
+                   nrm: Vec3A,
+                   pos: &mut [Vec3A],
+                   vel: &mut [Vec3A],
+                   age: &mut [f32],
+                   lifetime: &[f32]| {
+        pos[i] -= nrm * sigma;
+        let vn = vel[i].dot(nrm);
+        if vn < 0.0 {
+            match behavior {
+                CollisionBehavior::Bounce => vel[i] -= nrm * ((1.0 + bounce) * vn),
+                CollisionBehavior::Slide => vel[i] -= nrm * vn,
+                CollisionBehavior::Stop => vel[i] = Vec3A::ZERO,
+                CollisionBehavior::Delete => {
+                    let b = blend.map_or(1.0, |bp| bp.weight(life(age[i], lifetime[i])));
+                    if b > 0.0 {
+                        age[i] = age[i].max(lifetime[i]);
+                    }
+                }
+            }
+        }
+    };
+    let n = l.pos.len();
+    match c.kind {
+        CollisionKind::Plane => {
+            let nrm = flip(c.plane.vec3()).normalize_or(Vec3A::Y);
+            let dist = c.distance.f32();
+            for i in 0..n {
+                let sigma = l.pos[i].dot(nrm) - dist;
+                if sigma < 0.0 {
+                    respond(i, sigma, nrm, l.pos, l.vel, l.age, l.lifetime);
+                }
+            }
+        }
+        CollisionKind::Sphere => {
+            let centre = flip(c.origin.vec3());
+            let radius = c.radius.f32();
+            for i in 0..n {
+                let delta = l.pos[i] - centre;
+                let d = delta.length();
+                let sigma = d - radius;
+                if sigma < 0.0 {
+                    let nrm = if d > 1e-6 { delta / d } else { Vec3A::Y };
+                    respond(i, sigma, nrm, l.pos, l.vel, l.age, l.lifetime);
+                }
+            }
+        }
+        CollisionKind::Bounds => {
+            let half = ctx.scene_size / 2.0;
+            let o = ctx.origin;
+            // Scene rectangle in local space, inward normals.
+            let planes = [
+                (Vec3A::X, -half.x - o.x),
+                (Vec3A::NEG_X, -(half.x - o.x)),
+                (Vec3A::Y, -half.y - o.y),
+                (Vec3A::NEG_Y, -(half.y - o.y)),
+            ];
+            for i in 0..n {
+                for &(nrm, d) in &planes {
+                    let sigma = l.pos[i].dot(nrm) - d;
+                    if sigma < 0.0 {
+                        respond(i, sigma, nrm, l.pos, l.vel, l.age, l.lifetime);
+                    }
+                }
+            }
+        }
+        CollisionKind::Quad => {
+            let centre = flip(c.origin.vec3());
+            let nrm = flip(c.plane.vec3()).normalize_or(Vec3A::Y);
+            let fwd = flip(c.forward.vec3());
+            let side = fwd.cross(nrm).normalize_or_zero();
+            let fwd_n = fwd.normalize_or_zero();
+            let size = c.size.vec2();
+            for i in 0..n {
+                let rel = l.pos[i] - centre;
+                let sigma = rel.dot(nrm);
+                let prev = rel - l.vel[i] * dt;
+                if sigma < 0.0
+                    && prev.dot(nrm) >= 0.0
+                    && rel.dot(side).abs() <= size.x / 2.0
+                    && (!ctx.perspective || rel.dot(fwd_n).abs() <= size.y / 2.0)
+                {
+                    respond(i, sigma, nrm, l.pos, l.vel, l.age, l.lifetime);
+                }
+            }
+        }
+        CollisionKind::Model => {}
     }
 }
 
@@ -415,12 +930,7 @@ mod tests {
     }
 
     fn ctx(cps: &[ControlPoint; 8], dt: f32) -> OpCtx<'_> {
-        OpCtx {
-            dt,
-            time: 3.0,
-            speed: 1.0,
-            cps,
-        }
+        OpCtx::basic(cps, dt, 3.0, 1.0)
     }
 
     const CPS: [ControlPoint; 8] = [ControlPoint {
@@ -451,16 +961,7 @@ mod tests {
             json!({"name": "movement", "gravity": "0 100 0", "drag": 2}),
             &mut rng,
         );
-        m.run(
-            &mut pool,
-            &OpCtx {
-                dt: 0.1,
-                time: 0.0,
-                speed: 2.0,
-                cps: &CPS,
-            },
-            &mut rng,
-        );
+        m.run(&mut pool, &OpCtx::basic(&CPS, 0.1, 0.0, 2.0), &mut rng);
         // 1. pos += v·dt (previous velocity, not × S) = (1, 0, 0)
         assert_eq!(pool.pos[0], Vec3A::new(1.0, 0.0, 0.0));
         // 2. v += (0, -100, 0)·0.1·2 = (10, -20, 0); 3. × max(0, 1 - 0.2) = (8, -16, 0)
@@ -482,16 +983,7 @@ mod tests {
             json!({"name": "angularmovement", "force": "0 10 0"}),
             &mut rng,
         );
-        m.run(
-            &mut pool,
-            &OpCtx {
-                dt: 0.1,
-                time: 0.0,
-                speed: 2.0,
-                cps: &CPS,
-            },
-            &mut rng,
-        );
+        m.run(&mut pool, &OpCtx::basic(&CPS, 0.1, 0.0, 2.0), &mut rng);
         // 3 + 2·0.1·2 = 3.4 > π → 3.4 - 2π
         let r = pool.rot[0];
         assert!(
@@ -677,16 +1169,7 @@ mod tests {
             json!({"name": "controlpointattract", "controlpoint": 1, "origin": "0 0 0", "scale": 50}),
             &mut rng,
         );
-        a.run(
-            &mut pool,
-            &OpCtx {
-                dt: 0.1,
-                time: 0.0,
-                speed: 2.0,
-                cps: &cps,
-            },
-            &mut rng,
-        );
+        a.run(&mut pool, &OpCtx::basic(&cps, 0.1, 0.0, 2.0), &mut rng);
         assert!((pool.vel[0] - Vec3A::new(10.0, 0.0, 0.0)).length() < 1e-5);
         assert_eq!(pool.vel[1], Vec3A::ZERO);
         assert!((pool.vel[2] - Vec3A::new(-10.0, 0.0, 0.0)).length() < 1e-5);
@@ -743,16 +1226,7 @@ mod tests {
         pool.age[0] = 0.5;
         let mut expect = rng.clone();
         let mut o = op(json!({"name": "oscillateposition"}), &mut rng);
-        o.run(
-            &mut pool,
-            &OpCtx {
-                dt: 0.1,
-                time: 0.0,
-                speed: 2.0,
-                cps: &CPS,
-            },
-            &mut rng,
-        );
+        o.run(&mut pool, &OpCtx::basic(&CPS, 0.1, 0.0, 2.0), &mut rng);
         let mut d = [0.0f32; 3];
         for (a, slot) in d.iter_mut().enumerate() {
             let f = expect.uniform(0.0, 5.0);
@@ -763,5 +1237,242 @@ mod tests {
         }
         let p = pool.pos[0];
         assert!((p - Vec3A::from_array(d)).length() < 1e-4, "{p} vs {d:?}");
+    }
+
+    #[test]
+    fn reduce_movement_cap_velocity_maintain_distance() {
+        let mut rng = Rng::seeded(1);
+        let mut cps = CPS;
+        cps[1].position = Vec3::new(100.0, 0.0, 0.0);
+        let mut pool = pool_with(3, false);
+        pool.pos[0] = Vec3A::new(110.0, 0.0, 0.0); // d = 10 ≤ 20 → r = 10
+        pool.pos[1] = Vec3A::new(135.0, 0.0, 0.0); // d = 35 → r = lerp(10, 0, 0.5) = 5
+        pool.pos[2] = Vec3A::new(200.0, 0.0, 0.0); // d ≥ 50 → r = 0
+        for v in &mut pool.vel[..3] {
+            *v = Vec3A::new(100.0, 0.0, 0.0);
+        }
+        let mut r = op(
+            json!({"name": "reducemovementnearcontrolpoint", "controlpoint": 1,
+            "distanceinner": 20, "distanceouter": 50, "reductioninner": 10, "reductionouter": 0}),
+            &mut rng,
+        );
+        r.run(&mut pool, &ctx(&cps, 0.05), &mut rng);
+        assert!((pool.vel[0].x - 50.0).abs() < 1e-4);
+        assert!((pool.vel[1].x - 75.0).abs() < 1e-4);
+        assert_eq!(pool.vel[2].x, 100.0);
+        let mut c = op(json!({"name": "capvelocity", "maxspeed": 60}), &mut rng);
+        c.run(&mut pool, &ctx(&cps, 0.05), &mut rng);
+        assert_eq!(pool.vel[0].x, 50.0);
+        assert!((pool.vel[1].x - 60.0).abs() < 1e-4 && (pool.vel[2].x - 60.0).abs() < 1e-4);
+        // maintaindistancetocontrolpoint: strength clamped to 1 → exactly on the circle.
+        let mut m = op(
+            json!({"name": "maintaindistancetocontrolpoint", "controlpoint": 1, "distance": 30,
+            "variablestrength": 5}),
+            &mut rng,
+        );
+        m.run(&mut pool, &ctx(&cps, 0.05), &mut rng);
+        assert!((pool.pos[2] - Vec3A::new(130.0, 0.0, 0.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn maintain_distance_between_follows_moving_points() {
+        let mut rng = Rng::seeded(1);
+        let mut pool = Pool::new(2, false, false, false).with_extras(false, true, false);
+        let base = BaseValues {
+            color: Vec3A::ONE,
+            alpha: 1.0,
+            size: 20.0,
+            lifetime: 10.0,
+        };
+        pool.spawn(0, Vec3A::new(25.0, 0.0, 0.0), Vec3A::ZERO, &base);
+        pool.len = 1;
+        pool.age[0] = 1.0;
+        let mut cps = CPS;
+        cps[1].position = Vec3::new(100.0, 0.0, 0.0);
+        let prev = [
+            Vec3::ZERO,
+            Vec3::new(100.0, 0.0, 0.0),
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ];
+        let mut m = op(
+            json!({"name": "maintaindistancebetweencontrolpoints"}),
+            &mut rng,
+        );
+        let mut c = OpCtx::basic(&cps, 0.1, 0.0, 1.0);
+        c.cp_prev = &prev;
+        m.run(&mut pool, &c, &mut rng);
+        assert_eq!(pool.seq_s[0], 0.25);
+        // CP1 moves up by 40: the point at u = 0.25 moves by 10.
+        let mut cps2 = cps;
+        cps2[1].position = Vec3::new(100.0, 40.0, 0.0);
+        let mut c = OpCtx::basic(&cps2, 0.1, 0.0, 1.0);
+        c.cp_prev = &prev;
+        m.run(&mut pool, &c, &mut rng);
+        assert!((pool.pos[0] - Vec3A::new(25.0, 10.0, 0.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn collisions() {
+        let mut rng = Rng::seeded(1);
+        let mut pool = pool_with(2, false);
+        // Plane: JSON normal (0,1,0) → local (0,-1,0); distance -200: particles must stay below y = 200.
+        pool.pos[0] = Vec3A::new(0.0, 210.0, 0.0);
+        pool.vel[0] = Vec3A::new(5.0, 100.0, 0.0);
+        let mut p = op(
+            json!({"name": "collisionplane", "distance": -200, "bouncefactor": 0.5}),
+            &mut rng,
+        );
+        p.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        assert!((pool.pos[0] - Vec3A::new(0.0, 200.0, 0.0)).length() < 1e-4);
+        assert!((pool.vel[0] - Vec3A::new(5.0, -50.0, 0.0)).length() < 1e-4);
+        // Sphere (slide): stays outside the radius.
+        pool.pos[1] = Vec3A::new(0.0, -150.0, 0.0);
+        pool.vel[1] = Vec3A::new(3.0, 20.0, 0.0);
+        let mut s = op(
+            json!({"name": "collisionsphere", "collisionbehavior": "slide", "origin": "0 100 0"}),
+            &mut rng,
+        );
+        s.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        // Centre (0, -100); particle 50 inside along -Y → pushed to (0, -200), normal velocity removed.
+        assert!((pool.pos[1] - Vec3A::new(0.0, -200.0, 0.0)).length() < 1e-3);
+        assert!((pool.vel[1] - Vec3A::new(3.0, 0.0, 0.0)).length() < 1e-4);
+        // Bounds with delete: outside the 1920×1080 scene → dies.
+        pool.pos[0] = Vec3A::new(2000.0, 0.0, 0.0);
+        pool.vel[0] = Vec3A::new(10.0, 0.0, 0.0);
+        let mut b = op(
+            json!({"name": "collisionbounds", "collisionbehavior": "delete"}),
+            &mut rng,
+        );
+        b.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        assert!(pool.age[0] >= pool.lifetime[0]);
+        assert!(pool.age[1] < pool.lifetime[1]);
+        // Quad: crossing from the positive side within the rectangle stops at the plane.
+        pool.pos[1] = Vec3A::new(10.0, -105.0, 0.0);
+        pool.vel[1] = Vec3A::new(0.0, -100.0, 0.0);
+        let mut q = op(
+            json!({"name": "collisionquad", "collisionbehavior": "stop", "origin": "0 100 0",
+            "plane": "0 -1 0"}),
+            &mut rng,
+        );
+        q.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        assert!((pool.pos[1] - Vec3A::new(10.0, -100.0, 0.0)).length() < 1e-4);
+        assert_eq!(pool.vel[1], Vec3A::ZERO);
+    }
+
+    #[test]
+    fn operator_blending() {
+        let mut rng = Rng::seeded(1);
+        let mut pool = pool_with(3, false);
+        // Lives 0.1, 0.55, 0.9 of capvelocity blended in over [0.5, 0.6].
+        for (i, age) in [0.1, 0.55, 0.9].into_iter().enumerate() {
+            pool.age[i] = age;
+            pool.vel[i] = Vec3A::new(200.0, 0.0, 0.0);
+        }
+        let j =
+            json!({"name": "capvelocity", "maxspeed": 100, "blendinstart": 0.5, "blendinend": 0.6});
+        let o = j.as_object().unwrap();
+        let mut c = OperatorRt::with_blend(
+            OperatorDef::from_obj(o).unwrap(),
+            OperatorBlend::from_obj(o),
+            &mut rng,
+            4,
+        );
+        let mut scratch = BlendScratch::with_capacity(pool.slots());
+        c.run_blended(&mut pool, &ctx(&CPS, 0.1), &mut rng, &mut scratch);
+        assert_eq!(pool.vel[0].x, 200.0, "before blend-in: untouched");
+        assert!(
+            (pool.vel[1].x - 150.0).abs() < 1e-2,
+            "half blended: {}",
+            pool.vel[1].x
+        );
+        assert_eq!(pool.vel[2].x, 100.0, "fully applied");
+        // Blend-out only: missing end key reads as 1.
+        let j = json!({"name": "capvelocity", "maxspeed": 0, "blendoutstart": 0.5});
+        let blend = OperatorBlend::from_obj(j.as_object().unwrap()).unwrap();
+        assert!(blend.blend_in.is_none());
+        let bp = BlendParams::read(&blend);
+        assert_eq!(bp.weight(0.25), 1.0);
+        assert_eq!(bp.weight(0.75), 0.5);
+        assert!(
+            OperatorBlend::from_obj(json!({"name": "movement"}).as_object().unwrap()).is_none()
+        );
+    }
+
+    #[test]
+    fn remap_value_operator() {
+        let mut rng = Rng::seeded(1);
+        let mut pool = pool_with(2, true);
+        pool.age[0] = 0.25;
+        pool.age[1] = 0.75;
+        // Default input lifetimefraction, output size, remap → size = 2 + life × 8.
+        let mut r = op(
+            json!({"name": "remapvalue", "outputrangemin": 2, "outputrangemax": 10}),
+            &mut rng,
+        );
+        r.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        assert_eq!((pool.size[0], pool.size[1]), (4.0, 8.0));
+        assert_eq!(pool.osc_size[0].base, 4.0);
+        // Multiply from the initial value (20), not compounding across frames.
+        let mut m = op(
+            json!({"name": "remapvalue", "operation": "multiply", "outputrangemin": 0.5, "outputrangemax": 0.5}),
+            &mut rng,
+        );
+        m.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        m.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        assert_eq!(pool.size[0], 10.0);
+        // Velocity remap: same Y convention as velocityrandom; sine transform.
+        let mut v = op(
+            json!({"name": "remapvalue", "output": "velocity", "transformfunction": "sine",
+            "transforminputscale": 1, "outputrangemin": "0 0 0", "outputrangemax": "0 10 0"}),
+            &mut rng,
+        );
+        v.run(&mut pool, &ctx(&CPS, 0.1), &mut rng);
+        // life 0.25 → 0.5 + 0.5 sin(π/2) = 1 → y = 10 → v.y = -10.
+        assert!((pool.vel[0] - Vec3A::new(0.0, -10.0, 0.0)).length() < 1e-4);
+        // Noise transform draws one phase per particle.
+        let mut nz = op(
+            json!({"name": "remapvalue", "output": "opacity", "transformfunction": "simplexnoise"}),
+            &mut rng,
+        );
+        let mut pool2 = Pool::new(2, false, false, false).with_extras(false, false, true);
+        let base = BaseValues {
+            color: Vec3A::ONE,
+            alpha: 1.0,
+            size: 20.0,
+            lifetime: 1.0,
+        };
+        pool2.spawn(0, Vec3A::ZERO, Vec3A::ZERO, &base);
+        pool2.len = 1;
+        nz.run(&mut pool2, &ctx(&CPS, 0.1), &mut rng);
+        let ph = pool2.remap_phase[0];
+        assert!((0.0..256.0).contains(&ph));
+        nz.run(&mut pool2, &ctx(&CPS, 0.1), &mut rng);
+        assert_eq!(pool2.remap_phase[0], ph);
+        assert!((0.0..=1.0).contains(&pool2.alpha[0]));
+    }
+
+    #[test]
+    fn inherit_value_from_event() {
+        let mut rng = Rng::seeded(1);
+        let mut pool = pool_with(1, false);
+        let parent = ParentParticle {
+            velocity: Vec3::new(1.0, 2.0, 3.0),
+            ..ParentParticle::default()
+        };
+        let mut o = op(
+            json!({"name": "inheritvaluefromevent", "input": "addvelocity"}),
+            &mut rng,
+        );
+        let mut c = OpCtx::basic(&CPS, 0.1, 0.0, 1.0);
+        o.run(&mut pool, &c, &mut rng);
+        assert_eq!(pool.vel[0], Vec3A::ZERO, "no parent: no effect");
+        c.parent = Some(&parent);
+        o.run(&mut pool, &c, &mut rng);
+        assert_eq!(pool.vel[0], Vec3A::new(1.0, 2.0, 3.0));
     }
 }

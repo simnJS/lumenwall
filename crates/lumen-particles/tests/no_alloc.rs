@@ -2,8 +2,8 @@
 
 use glam::{Mat4, Vec2};
 use lumen_particles::{
-    DepthRange, FrameInput, ParticleDefinition, ParticleObject, ParticleSystem, SystemOptions,
-    UniformInput,
+    ChildAssets, DepthRange, FrameInput, ParticleDefinition, ParticleObject, ParticleSystem,
+    SystemOptions, UniformInput,
 };
 use serde_json::json;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -53,15 +53,29 @@ fn frame(t: f32) -> FrameInput {
 }
 
 fn run_steady_state(def: serde_json::Value, object: serde_json::Value) {
+    run_with_children(def, object, None);
+}
+
+fn run_with_children(
+    def: serde_json::Value,
+    object: serde_json::Value,
+    child: Option<serde_json::Value>,
+) {
     let def = ParticleDefinition::from_json(&def);
     let object = ParticleObject::from_json(&object);
+    let mut loader = |_: &str| {
+        child.as_ref().map(|c| ChildAssets {
+            definition: ParticleDefinition::from_json(c),
+            ..ChildAssets::default()
+        })
+    };
     let opts = SystemOptions {
         width: 1280.0,
         height: 720.0,
         seed: Some(3),
         ..SystemOptions::default()
     };
-    let mut sys = ParticleSystem::new(&def, &object, &opts);
+    let mut sys = ParticleSystem::new_with_children(&def, &object, &opts, &mut loader);
     let mut vertices = Vec::new();
     let uniforms_in = UniformInput {
         width: 1280.0,
@@ -80,9 +94,18 @@ fn run_steady_state(def: serde_json::Value, object: serde_json::Value) {
         t += 1.0 / 60.0;
         if sys.update(&frame(t)) {
             sys.write_vertices_vec(&mut vertices);
+            sys.for_each_child_mut(&mut |c| {
+                c.write_vertices_vec(&mut vertices);
+            });
         }
     }
     assert!(!sys.is_empty());
+    if child.is_some() {
+        assert!(
+            sys.child_count() > 1,
+            "event children must be active during the measure"
+        );
+    }
     let before = allocations();
     assert!(
         before > 0,
@@ -92,7 +115,11 @@ fn run_steady_state(def: serde_json::Value, object: serde_json::Value) {
         t += 1.0 / 60.0;
         if sys.update(&frame(t)) {
             std::hint::black_box(sys.write_vertices_vec(&mut vertices));
-            std::hint::black_box(sys.uniforms(&uniforms_in));
+            let parent = sys.uniforms(&uniforms_in);
+            sys.for_each_child_mut(&mut |c| {
+                std::hint::black_box(c.write_vertices_vec(&mut vertices));
+                std::hint::black_box(c.child_uniforms(&uniforms_in, &parent.model));
+            });
         }
     }
     assert_eq!(allocations() - before, 0, "steady-state frames allocated");
@@ -136,5 +163,57 @@ fn steady_state_frames_do_not_allocate() {
             "renderer": [{"name": "rope", "subdivision": 3}]
         }),
         json!({}),
+    );
+    // Amendment types: pre-simulation, blending, sequences, remaps, boids, collisions and
+    // children created and recycled on spawn/death events.
+    run_with_children(
+        json!({
+            "maxcount": 800,
+            "starttime": 2,
+            "emitter": [{"name": "sphererandom", "rate": 400, "distancemax": 300, "speedmin": 20, "speedmax": 60,
+                "flags": 4, "maxtoemitperperiod": 50, "minperiodicdelay": 0.1, "maxperiodicdelay": 0.2,
+                "minperiodicduration": 0.3, "maxperiodicduration": 0.5}],
+            "controlpoint": [{"id": 0}, {"id": 1, "offset": "200 100 0"}],
+            "initializer": [
+                {"name": "lifetimerandom", "min": 0.3, "max": 0.9, "exponent": 2},
+                {"name": "mapsequencebetweencontrolpoints", "count": 16, "flags": 31, "limitbehavior": "mirror"},
+                {"name": "positionoffsetrandom", "distance": 30},
+                {"name": "hsvcolorrandom", "huesteps": 6},
+                {"name": "colorlist", "colors": ["1 0 0", "0 1 0"]},
+                {"name": "inheritcontrolpointvelocity", "controlpoint": 1},
+                {"name": "remapinitialvalue", "input": "distancetocontrolpoint", "output": "opacity"},
+                {"name": "mapsequencearoundcontrolpoint", "count": 5, "limitbehavior": "mirror", "axis": "0 1 1"}
+            ],
+            "operator": [
+                {"name": "movement", "gravity": "0 50 0"},
+                {"name": "remapvalue", "output": "velocity", "transformfunction": "fbmnoise",
+                 "outputrangemin": "-10 -10 0", "outputrangemax": "10 10 0", "operation": "add"},
+                {"name": "remapvalue", "input": "particlesystemtime", "output": "size", "transformfunction": "sine"},
+                {"name": "reducemovementnearcontrolpoint", "controlpoint": 1},
+                {"name": "maintaindistancebetweencontrolpoints"},
+                {"name": "capvelocity", "maxspeed": 80, "blendinstart": 0.2, "blendinend": 0.6},
+                {"name": "boids", "neighborthreshold": 60},
+                {"name": "maintaindistancetocontrolpoint", "variablestrength": 0.1},
+                {"name": "collisionplane", "distance": -250},
+                {"name": "collisionsphere", "collisionbehavior": "slide"},
+                {"name": "collisionbounds", "collisionbehavior": "delete"},
+                {"name": "collisionquad", "origin": "0 -100 0"},
+                {"name": "turbulence", "blendoutstart": 0.5}
+            ],
+            "children": [
+                {"type": "eventspawn", "name": "child.json", "maxcount": 4, "probability": 0.5, "flags": 1},
+                {"type": "eventdeath", "name": "child.json", "maxcount": 6},
+                {"type": "eventfollow", "name": "child.json", "maxcount": 3, "flags": 1},
+                {"name": "child.json"}
+            ]
+        }),
+        json!({"instanceoverride": {"brightness": 2, "controlpoint1": "150 80 0"}}),
+        Some(json!({
+            "maxcount": 40,
+            "emitter": [{"name": "boxrandom", "rate": 0, "instantaneous": 10}],
+            "initializer": [{"name": "lifetimerandom", "min": 0.2, "max": 0.4},
+                            {"name": "inheritinitialvaluefromevent", "input": "setcoloropacity"}],
+            "operator": [{"name": "movement"}, {"name": "inheritvaluefromevent", "input": "addvelocity"}]
+        })),
     );
 }

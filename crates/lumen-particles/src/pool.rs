@@ -88,6 +88,14 @@ pub(crate) struct Pool {
     pub osc_size: Vec<Osc>,
     /// Empty unless an `oscillateposition` operator exists.
     pub osc_pos: Vec<OscPos>,
+    /// Spawn-ordered particle ids; empty unless child events need to track particles (A6.5).
+    pub ids: Vec<u64>,
+    /// Sequence position `s` (A6.2.1 / A6.3.3), NaN when unset; empty unless needed.
+    pub seq_s: Vec<f32>,
+    /// Noise phase of `remapvalue` transforms (A6.3.1), NaN until drawn; empty unless needed.
+    pub remap_phase: Vec<f32>,
+    /// Next particle id.
+    pub next_id: u64,
 }
 
 /// Mutable view of the live window.
@@ -108,6 +116,7 @@ pub(crate) struct Live<'a> {
     pub osc_alpha: &'a mut [Osc],
     pub osc_size: &'a mut [Osc],
     pub osc_pos: &'a mut [OscPos],
+    pub seq_s: &'a mut [f32],
 }
 
 /// Shared view of the live window.
@@ -161,7 +170,37 @@ impl Pool {
             } else {
                 Vec::new()
             },
+            ids: Vec::new(),
+            seq_s: Vec::new(),
+            remap_phase: Vec::new(),
+            next_id: 0,
         }
+    }
+
+    /// Allocates the optional per-particle attributes.
+    pub fn with_extras(mut self, ids: bool, seq_s: bool, remap_phase: bool) -> Self {
+        let slots = self.pos.len();
+        if ids {
+            self.ids = vec![0; slots];
+        }
+        if seq_s {
+            self.seq_s = vec![f32::NAN; slots];
+        }
+        if remap_phase {
+            self.remap_phase = vec![f32::NAN; slots];
+        }
+        self
+    }
+
+    /// Number of slots of the buffer (window + spare).
+    pub fn slots(&self) -> usize {
+        self.pos.len()
+    }
+
+    /// Empties the pool (child instances are recycled); ids keep increasing.
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
     }
 
     /// Live window `[head, head + len)`.
@@ -194,7 +233,8 @@ impl Pool {
             frame: &mut self.frame[r.clone()],
             osc_alpha: self.osc_alpha.get_mut(r.clone()).unwrap_or_default(),
             osc_size: self.osc_size.get_mut(r.clone()).unwrap_or_default(),
-            osc_pos: self.osc_pos.get_mut(r).unwrap_or_default(),
+            osc_pos: self.osc_pos.get_mut(r.clone()).unwrap_or_default(),
+            seq_s: self.seq_s.get_mut(r).unwrap_or_default(),
         }
     }
 
@@ -252,6 +292,22 @@ impl Pool {
         if let Some(o) = self.osc_pos.get_mut(i) {
             *o = OscPos::RESET;
         }
+        if let Some(id) = self.ids.get_mut(i) {
+            *id = self.next_id;
+            self.next_id += 1;
+        }
+        if let Some(s) = self.seq_s.get_mut(i) {
+            *s = f32::NAN;
+        }
+        if let Some(p) = self.remap_phase.get_mut(i) {
+            *p = f32::NAN;
+        }
+    }
+
+    /// Live index of the particle with id `id` (ids increase in spawn order).
+    pub fn find_id(&self, id: u64) -> Option<usize> {
+        let ids = self.ids.get(self.range())?;
+        ids.binary_search(&id).ok()
     }
 
     /// Moves slots `src` to `dst..` in every attribute (`memmove`).
@@ -279,7 +335,10 @@ impl Pool {
         mv(&mut self.frame, src.clone(), dst);
         mv(&mut self.osc_alpha, src.clone(), dst);
         mv(&mut self.osc_size, src.clone(), dst);
-        mv(&mut self.osc_pos, src, dst);
+        mv(&mut self.osc_pos, src.clone(), dst);
+        mv(&mut self.ids, src.clone(), dst);
+        mv(&mut self.seq_s, src.clone(), dst);
+        mv(&mut self.remap_phase, src, dst);
     }
 
     /// Removes every particle with `age >= lifetime`, keeping the survivors in spawn order

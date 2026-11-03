@@ -22,25 +22,35 @@
 //! Performance: structure-of-arrays pool allocated once at `N_pool`, one monomorphic loop per
 //! operator, stable compaction by `memmove` runs, no allocation in the steady-state frame loop.
 
+mod boids;
+mod children;
+pub mod defaults;
 mod emitter;
+mod event;
 mod initializer;
 mod model;
 mod noise;
 mod operator;
 mod pool;
+mod remap;
 mod render;
 mod rng;
 mod sheet;
 mod system;
 mod value;
 
+pub use children::ChildAssets;
+pub use emitter::EmitterImage;
+pub use event::ParentParticle;
 pub use model::{
-    AnimationMode, ChildDef, ControlPointDef, EmitterDef, EmitterKind, InitializerDef,
-    InstanceOverride, OperatorDef, OscillateDef, ParticleDefinition, ParticleObject,
-    ParticleSource, RampDef, RendererDef, RendererKind, TurbulenceDef, TurbulentVelocityDef,
-    VortexDef,
+    AnimationMode, BoidsDef, ChildDef, ChildKind, CollisionBehavior, CollisionDef, CollisionKind,
+    ControlPointDef, EmitterDef, EmitterKind, HsvColorDef, InheritMode, InitializerDef,
+    InstanceOverride, LimitBehavior, OperatorBlend, OperatorDef, OscillateDef, ParticleDefinition,
+    ParticleObject, ParticleSource, PositionOffsetDef, RampDef, RemapDef, RemapInput,
+    RemapOperation, RemapOutput, RemapTransform, RendererDef, RendererKind, SequenceBetweenDef,
+    TurbulenceDef, TurbulentVelocityDef, VortexDef,
 };
-pub use noise::{curl, noise, noise3};
+pub use noise::{curl, fbm3, noise, noise3};
 pub use render::{
     BlendMode, DepthRange, EYE, GeometryKind, ParallaxInput, ParticleUniforms, QUAD_INDICES,
     REFRACT_AMOUNT, ROPE_ATTRIBUTES, ROPE_VERTEX_FLOATS, RenderInfo, SPRITE_ATTRIBUTES,

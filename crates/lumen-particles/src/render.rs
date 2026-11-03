@@ -144,6 +144,22 @@ pub struct UniformInput {
     pub brightness: f32,
 }
 
+impl Default for UniformInput {
+    fn default() -> Self {
+        Self {
+            width: 1920.0,
+            height: 1080.0,
+            scene_view_projection: Mat4::IDENTITY,
+            fov_degrees: 50.0,
+            near: 0.01,
+            far: 10_000.0,
+            depth: DepthRange::ZeroToOne,
+            parallax: None,
+            brightness: 1.0,
+        }
+    }
+}
+
 /// Particle-specific uniform values (§12.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParticleUniforms {
@@ -160,7 +176,10 @@ pub struct ParticleUniforms {
     pub eye_position: Vec3,
     pub render_var0: Vec4,
     pub render_var1: Vec4,
+    /// `g_Brightness`: material overbright × `instanceoverride.brightness` (A2).
     pub brightness: f32,
+    /// `g_Overbright`: same value as `brightness` (A2); multiplies the final RGB only.
+    pub overbright: f32,
     /// `g_Alpha` and `g_UserAlpha`.
     pub alpha: f32,
     pub color: Vec3,
@@ -540,6 +559,8 @@ impl ParticleSystem {
             }
             _ => Vec4::new(0.0, 0.0, 0.0, 1.0),
         };
+        // A2: the instance brightness multiplies the material overbright (RGB only, unbounded).
+        let brightness = input.brightness * over.brightness.f32();
         ParticleUniforms {
             model,
             model_inverse: model.inverse(),
@@ -555,13 +576,26 @@ impl ParticleSystem {
             eye_position: EYE,
             render_var0,
             render_var1,
-            brightness: input.brightness,
+            brightness,
+            overbright: brightness,
             alpha: over.alpha.f32(),
             color: over.color.vec3(),
             // parity: vec3 → vec4 conversion gives w = 0 when `instanceoverride` is present.
             color4: over.color.vec4(),
             refract_amount: REFRACT_AMOUNT,
         }
+    }
+
+    /// Uniforms of a child instance (A6.5): its model matrix is `parent_model · attach`, where
+    /// `parent_model` is the parent's `ParticleUniforms::model`.
+    pub fn child_uniforms(&self, input: &UniformInput, parent_model: &Mat4) -> ParticleUniforms {
+        let mut u = self.uniforms(input);
+        let model = *parent_model * self.child_attach.unwrap_or(Mat4::IDENTITY);
+        u.model = model;
+        u.model_inverse = model.inverse();
+        u.model_view_projection = u.view_projection * model;
+        u.model_view_projection_inverse = u.model_view_projection.inverse();
+        u
     }
 }
 

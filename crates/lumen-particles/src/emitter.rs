@@ -1,14 +1,77 @@
-//! Emitters (spec 05 §6).
+//! Emitters (spec 05 §6, amendments A6.1-c and A6.4).
 
-use crate::initializer::{self, InitializerRt, SpawnCtx};
+use crate::defaults as d;
+use crate::initializer::{self, InitializerRt, SpawnCtx, SpawnInfo};
 use crate::model::{EmitterDef, EmitterKind};
 use crate::pool::{BaseValues, Pool};
 use crate::rng::Rng;
-use glam::{Vec3, Vec3A};
+use glam::{Mat4, Vec3, Vec3A};
 use std::f32::consts::TAU;
 
+/// Emission bitmap of a `layerimage` emitter (A6.4): the texels whose alpha is at least 0.5,
+/// computed once at load, and the mapping from the layer's texture coordinates to the scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmitterImage {
+    width: u32,
+    height: u32,
+    /// Retained texels, `y * width + x`.
+    texels: Vec<u32>,
+    uv_to_scene: Mat4,
+}
+
+impl EmitterImage {
+    /// Builds the bitmap from the alpha channel (`width × height` bytes, row 0 at the top, `v`
+    /// down) of the source layer's base texture. `uv_to_scene` maps `(u, v, 0)` with `u, v ∈ [0, 1]`
+    /// to the centred scene space (Y up), with the same transform as the layer's own rendering.
+    /// Larger bitmaps are reduced to at most 256×256 texels (nearest sample).
+    pub fn from_alpha(width: u32, height: u32, alpha: &[u8], uv_to_scene: Mat4) -> Self {
+        let (sw, sh) = (
+            width.min(d::LAYER_MAX_BITMAP),
+            height.min(d::LAYER_MAX_BITMAP),
+        );
+        let mut texels = Vec::new();
+        if alpha.len() >= (width as usize) * (height as usize) && sw > 0 && sh > 0 {
+            for y in 0..sh {
+                let src_y = (u64::from(y) * u64::from(height) / u64::from(sh)) as usize;
+                for x in 0..sw {
+                    let src_x = (u64::from(x) * u64::from(width) / u64::from(sw)) as usize;
+                    if alpha[src_y * width as usize + src_x] >= d::LAYER_ALPHA_THRESHOLD {
+                        texels.push(y * sw + x);
+                    }
+                }
+            }
+        }
+        Self {
+            width: sw,
+            height: sh,
+            texels,
+            uv_to_scene,
+        }
+    }
+
+    /// Number of emitting texels.
+    pub fn len(&self) -> usize {
+        self.texels.len()
+    }
+
+    /// True when no texel can emit.
+    pub fn is_empty(&self) -> bool {
+        self.texels.is_empty()
+    }
+
+    /// Random point of a random retained texel, in centred scene space.
+    fn sample(&self, rng: &mut Rng) -> Vec3 {
+        let t = self.texels[rng.below(self.texels.len() as u32) as usize];
+        let (x, y) = (t % self.width, t / self.width);
+        let u = (x as f32 + rng.uniform(0.0, 1.0)) / self.width as f32;
+        let v = (y as f32 + rng.uniform(0.0, 1.0)) / self.height as f32;
+        self.uv_to_scene.transform_point3(Vec3::new(u, v, 0.0))
+    }
+}
+
+/// Timers and accumulators of an emitter (§6.2, §6.3, A6.1-c).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct BoxState {
+pub(crate) struct EmitterState {
     pub acc: f32,
     pub delay_left: f32,
     pub duration_timer: f32,
@@ -16,21 +79,16 @@ pub(crate) struct BoxState {
     pub periodic_duration: f32,
     pub periodic_delay: f32,
     pub emitting: bool,
+    /// Box / layer: the `instantaneous` burst was emitted.
     pub burst_done: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct SphereState {
-    pub acc: f32,
+    /// Sphere: burst still to emit.
     pub burst_left: u32,
-    /// Base lifetime frozen at creation (`1 × override.lifetime`).
+    /// Sphere: base lifetime frozen at creation (`1 × override.lifetime`).
     pub lifetime: f32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum EmitterState {
-    Box(BoxState),
-    Sphere(SphereState),
+    /// Particles emitted in the current periodic window (`maxtoemitperperiod`).
+    pub period_emitted: u32,
+    /// Incremented each time a periodic window starts.
+    pub epoch: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +99,8 @@ pub(crate) struct EmitterRt {
     /// `rate × override.rate`, read once.
     pub rate_eff: f32,
     pub state: EmitterState,
+    /// `layerimage` emission bitmap (A6.4).
+    pub image: Option<Box<EmitterImage>>,
 }
 
 impl EmitterRt {
@@ -57,28 +117,44 @@ impl EmitterRt {
         } else {
             def.control_point
         };
-        let state = match def.kind {
-            EmitterKind::BoxRandom => EmitterState::Box(BoxState {
-                delay_left: def.delay,
-                ..BoxState::default()
-            }),
-            EmitterKind::SphereRandom => EmitterState::Sphere(SphereState {
-                acc: 0.0,
-                burst_left: def.instantaneous,
-                lifetime: lifetime_mul,
-            }),
-        };
-        Self {
+        let mut rt = Self {
             rate_eff: def.rate * rate_mul,
             def,
             cp,
-            state,
+            state: EmitterState::default(),
+            image: None,
+        };
+        rt.reset(lifetime_mul);
+        rt
+    }
+
+    /// Back to the creation state (child instances are recycled).
+    pub fn reset(&mut self, lifetime_mul: f32) {
+        self.state = EmitterState {
+            delay_left: self.def.delay,
+            burst_left: self.def.instantaneous,
+            lifetime: lifetime_mul,
+            ..EmitterState::default()
+        };
+    }
+
+    /// False once the emitter can no longer emit (instance end, A6.5 item 7).
+    pub fn can_emit(&self) -> bool {
+        let (def, st) = (&self.def, &self.state);
+        if def.duration > 0.0 && st.duration_timer >= def.duration {
+            return false;
+        }
+        match def.kind {
+            EmitterKind::SphereRandom => st.burst_left > 0 || self.rate_eff > 0.0,
+            EmitterKind::LayerImage if self.image.as_ref().is_none_or(|i| i.is_empty()) => false,
+            _ => def.rate > 0.0 || (def.instantaneous > 0 && !st.burst_done),
         }
     }
 
-    /// Runs the emitter for one frame (§6.1–§6.3).
+    /// Runs the emitter for one frame (§6.1–§6.3, A6.1-c, A6.4).
     pub fn emit(
         &mut self,
+        index: u32,
         dt: f32,
         pool: &mut Pool,
         inits: &mut [InitializerRt],
@@ -90,13 +166,30 @@ impl EmitterRt {
             return;
         }
         let def = &self.def;
-        let count = match &mut self.state {
-            EmitterState::Box(st) => box_count(st, def, self.rate_eff, dt, rng),
-            EmitterState::Sphere(st) => sphere_count(st, def, self.rate_eff, dt),
+        let st = &mut self.state;
+        if !gate(st, def, dt, rng) {
+            return;
+        }
+        let mut count = match def.kind {
+            EmitterKind::SphereRandom => sphere_count(st, def, self.rate_eff, dt),
+            _ => box_count(st, def, self.rate_eff, dt),
         };
+        let periodic = def.flags & EmitterDef::FLAG_PERIODIC != 0;
+        if periodic && def.max_to_emit_per_period > 0 {
+            count = count.min(u64::from(
+                def.max_to_emit_per_period.saturating_sub(st.period_emitted),
+            ));
+        }
         if count == 0 {
             return;
         }
+        let image = match def.kind {
+            EmitterKind::LayerImage => match self.image.as_deref() {
+                Some(img) if !img.is_empty() => Some(img),
+                _ => return,
+            },
+            _ => None,
+        };
         // parity: the default control point is 0, so every emitter is offset by CP0's position.
         let mut e = Vec3::new(def.origin.x, -def.origin.y, def.origin.z);
         if let Some(cp) = usize::try_from(self.cp).ok().and_then(|i| ctx.cps.get(i)) {
@@ -107,41 +200,54 @@ impl EmitterRt {
             color: over.colorn.vec3().into(),
             alpha: over.alpha.f32(),
             size: 20.0 * over.size.f32(),
-            lifetime: match &self.state {
-                EmitterState::Box(_) => over.lifetime.f32(),
-                EmitterState::Sphere(st) => st.lifetime,
+            lifetime: match def.kind {
+                EmitterKind::SphereRandom => st.lifetime,
+                _ => over.lifetime.f32(),
             },
+        };
+        let info = SpawnInfo {
+            spawn_point: e,
+            emitter: index,
+            epoch: st.epoch,
         };
         for _ in 0..count {
             if pool.full() {
                 break; // parity: what does not fit (burst remainder included) is lost.
             }
             let i = pool.next_slot();
-            let (p, v) = match def.kind {
-                EmitterKind::BoxRandom => (e + box_offset(def, rng), Vec3::ZERO),
-                EmitterKind::SphereRandom => {
+            let (p, v) = match (def.kind, image) {
+                (EmitterKind::SphereRandom, _) => {
                     let p = sphere_offset(def, ctx.perspective, rng);
                     (e + p, sphere_velocity(def, p, rng))
                 }
+                (EmitterKind::LayerImage, Some(img)) => {
+                    // Layer texel in scene space, brought to local space by subtracting O.
+                    let mut p = img.sample(rng) - ctx.origin;
+                    p.z = 0.0;
+                    (p, Vec3::ZERO)
+                }
+                _ => (e + box_offset(def, rng), Vec3::ZERO),
             };
             pool.spawn(i, Vec3A::from(p), Vec3A::from(v), &base);
             pool.len += 1;
-            initializer::apply_all(inits, pool, i, ctx, rng);
+            st.period_emitted = st.period_emitted.saturating_add(1);
+            initializer::apply_all(inits, pool, i, ctx, &info, rng);
         }
     }
 }
 
-/// Box emitter timers and particle count for this frame (§6.2 steps 1–4).
-fn box_count(st: &mut BoxState, def: &EmitterDef, rate_eff: f32, dt: f32, rng: &mut Rng) -> u64 {
+/// Delay, duration and periodic windows (§6.2 steps 1–3; A6.1-c for the sphere). Returns whether
+/// the emitter emits this frame.
+fn gate(st: &mut EmitterState, def: &EmitterDef, dt: f32, rng: &mut Rng) -> bool {
     if st.delay_left > 0.0 {
         // parity: the frame where the delay runs out emits nothing; the excess is lost.
         st.delay_left -= dt;
-        return 0;
+        return false;
     }
     if def.duration > 0.0 {
         st.duration_timer += dt;
         if st.duration_timer >= def.duration {
-            return 0;
+            return false;
         }
     }
     if def.flags & EmitterDef::FLAG_PERIODIC != 0 {
@@ -151,17 +257,24 @@ fn box_count(st: &mut BoxState, def: &EmitterDef, rate_eff: f32, dt: f32, rng: &
                 st.emitting = false;
                 st.periodic_timer = 0.0;
                 st.periodic_delay = rng.uniform(def.min_periodic_delay, def.max_periodic_delay);
-                return 0;
+                return false;
             }
         } else if st.periodic_timer >= st.periodic_delay {
             st.emitting = true;
             st.periodic_timer = 0.0;
             st.periodic_duration =
                 rng.uniform(def.min_periodic_duration, def.max_periodic_duration);
+            st.period_emitted = 0;
+            st.epoch = st.epoch.wrapping_add(1);
         } else {
-            return 0;
+            return false;
         }
     }
+    true
+}
+
+/// Box (and layer image) particle count for this frame (§6.2 step 4).
+fn box_count(st: &mut EmitterState, def: &EmitterDef, rate_eff: f32, dt: f32) -> u64 {
     let mut k = 0u64;
     if def.instantaneous > 0 && !st.burst_done {
         k = u64::from(def.instantaneous);
@@ -181,7 +294,7 @@ fn box_count(st: &mut BoxState, def: &EmitterDef, rate_eff: f32, dt: f32, rng: &
 }
 
 /// Sphere emitter particle count for this frame (§6.3 steps 1–2).
-fn sphere_count(st: &mut SphereState, def: &EmitterDef, rate_eff: f32, dt: f32) -> u64 {
+fn sphere_count(st: &mut EmitterState, def: &EmitterDef, rate_eff: f32, dt: f32) -> u64 {
     st.acc += dt * rate_eff;
     let m = st.acc.trunc();
     st.acc -= m;
@@ -211,11 +324,23 @@ fn box_offset(def: &EmitterDef, rng: &mut Rng) -> Vec3 {
     d * Vec3::new(def.directions.x, -def.directions.y, def.directions.z)
 }
 
+/// Applies a per-axis `sign` (1: positive, -1: negative, other: unchanged).
+pub(crate) fn apply_sign(mut p: Vec3, sign: glam::IVec3) -> Vec3 {
+    for a in 0..3 {
+        match sign[a] {
+            1 => p[a] = p[a].abs(),
+            -1 => p[a] = -p[a].abs(),
+            _ => {}
+        }
+    }
+    p
+}
+
 /// Sphere position offset `p` (§6.3 step 3), before adding the origin.
 fn sphere_offset(def: &EmitterDef, perspective: bool, rng: &mut Rng) -> Vec3 {
     let rmin = def.distance_min.x;
     let rmax = def.distance_max.x;
-    let mut p = if perspective {
+    let p = if perspective {
         let phi = rng.uniform(0.0, TAU);
         let c = rng.uniform(-1.0, 1.0);
         let s = (1.0 - c * c).sqrt();
@@ -229,14 +354,7 @@ fn sphere_offset(def: &EmitterDef, perspective: bool, rng: &mut Rng) -> Vec3 {
         // parity: sphere directions are not Y-flipped.
         Vec3::new(rho * theta.cos(), rho * theta.sin(), z) * def.directions
     };
-    for a in 0..3 {
-        match def.sign[a] {
-            1 => p[a] = p[a].abs(),
-            -1 => p[a] = -p[a].abs(),
-            _ => {}
-        }
-    }
-    p
+    apply_sign(p, def.sign)
 }
 
 /// Sphere initial velocity (§6.3): radial, not multiplied by `override.speed`.
@@ -272,14 +390,9 @@ mod tests {
         rng: &mut Rng,
     ) -> usize {
         let over = InstanceOverride::default();
-        let ctx = SpawnCtx {
-            cps,
-            over: &over,
-            time: 1.0,
-            perspective: false,
-        };
+        let ctx = SpawnCtx::basic(cps, &over, 1.0, false);
         let before = pool.len;
-        e.emit(dt, pool, &mut [], &ctx, rng);
+        e.emit(0, dt, pool, &mut [], &ctx, rng);
         pool.len - before
     }
 
@@ -319,21 +432,13 @@ mod tests {
         let mut rng = Rng::seeded(1);
         // Burst 3 + rate 100 × 0.1 = 10 → capped to 1 (excess dropped).
         assert_eq!(run(&mut e, &mut pool, &cps, 0.1, &mut rng), 4);
-        let EmitterState::Box(st) = &e.state else {
-            unreachable!()
-        };
+        let st = &e.state;
         assert_eq!(st.acc, 0.0);
         // Pool of 5: one more fits, then frozen.
         assert_eq!(run(&mut e, &mut pool, &cps, 0.1, &mut rng), 1);
-        let EmitterState::Box(st) = e.state.clone() else {
-            unreachable!()
-        };
+        let st = e.state.clone();
         assert_eq!(run(&mut e, &mut pool, &cps, 0.1, &mut rng), 0);
-        assert_eq!(
-            e.state,
-            EmitterState::Box(st),
-            "timers frozen while the pool is full"
-        );
+        assert_eq!(e.state, st, "timers frozen while the pool is full");
     }
 
     #[test]
@@ -408,13 +513,8 @@ mod tests {
         let mut pool = Pool::new(100, false, false, false);
         let mut rng = Rng::seeded(3);
         let over = InstanceOverride::default();
-        let ctx = SpawnCtx {
-            cps: &cps,
-            over: &over,
-            time: 0.0,
-            perspective: true,
-        };
-        e.emit(0.01, &mut pool, &mut [], &ctx, &mut rng);
+        let ctx = SpawnCtx::basic(&cps, &over, 0.0, true);
+        e.emit(0, 0.01, &mut pool, &mut [], &ctx, &mut rng);
         assert_eq!(pool.len, 50);
         let mut any_neg_z = false;
         for i in 0..50 {
@@ -438,5 +538,60 @@ mod tests {
             1.0,
         );
         assert_eq!(r.rate_eff, 10.0);
+    }
+
+    #[test]
+    fn sphere_gets_delay_duration_and_periodic_cap() {
+        let cps = [ControlPoint::default(); 8];
+        // A6.1-c: delay then duration apply to the sphere too.
+        let d = def(json!({"name": "sphererandom", "rate": 10, "delay": 0.15, "duration": 0.35}));
+        let mut e = EmitterRt::new(d, false, 1.0, 1.0);
+        let mut pool = Pool::new(100, false, false, false);
+        let mut rng = Rng::seeded(1);
+        let got: Vec<usize> = (0..7)
+            .map(|_| run(&mut e, &mut pool, &cps, 0.1, &mut rng))
+            .collect();
+        assert_eq!(got, [0, 0, 1, 1, 1, 0, 0]);
+        assert!(!e.can_emit());
+        // maxtoemitperperiod: windows of 1 s (rate 100) capped to 32 particles.
+        let d = def(
+            json!({"name": "boxrandom", "rate": 100, "flags": 4, "maxtoemitperperiod": 32,
+            "minperiodicduration": 1, "maxperiodicduration": 1, "minperiodicdelay": 1, "maxperiodicdelay": 1}),
+        );
+        let mut e = EmitterRt::new(d, false, 1.0, 1.0);
+        let mut pool = Pool::new(1000, false, false, false);
+        let total: usize = (0..10)
+            .map(|_| run(&mut e, &mut pool, &cps, 0.1, &mut rng))
+            .sum();
+        assert_eq!(total, 32, "one window of 1 s, capped");
+        assert_eq!(e.state.epoch, 1);
+    }
+
+    #[test]
+    fn layer_image_emitter() {
+        let cps = [ControlPoint::default(); 8];
+        let d = def(json!({"name": "layerimage", "rate": 100}));
+        let mut e = EmitterRt::new(d, false, 1.0, 1.0);
+        let mut pool = Pool::new(100, false, false, false);
+        let mut rng = Rng::seeded(1);
+        // Without an image: nothing, and the emitter cannot emit.
+        assert_eq!(run(&mut e, &mut pool, &cps, 0.1, &mut rng), 0);
+        assert!(!e.can_emit());
+        // 4×2 bitmap where only texel (3, 1) is opaque; uv mapped to a 400×200 rect at (1000, 500).
+        let mut alpha = [0u8; 8];
+        alpha[7] = 255;
+        let uv_to_scene = glam::Mat4::from_translation(Vec3::new(1000.0, 500.0, 0.0))
+            * glam::Mat4::from_scale(Vec3::new(400.0, 200.0, 1.0));
+        let img = EmitterImage::from_alpha(4, 2, &alpha, uv_to_scene);
+        assert_eq!(img.len(), 1);
+        e.image = Some(Box::new(img));
+        assert_eq!(run(&mut e, &mut pool, &cps, 0.1, &mut rng), 10);
+        for i in 0..pool.len {
+            let p = pool.pos[i];
+            assert!(
+                (1300.0..1400.0).contains(&p.x) && (600.0..700.0).contains(&p.y) && p.z == 0.0,
+                "{p}"
+            );
+        }
     }
 }

@@ -213,6 +213,22 @@ fn channel4(pts: [Vec3; 4], c: usize) -> [f32; 4] {
     }
 }
 
+/// Fractal sum of the vector noise (A6.2.2):
+/// `Σ_{o<O} 0.5^o N(2^o p) / Σ_{o<O} 0.5^o`, with `O >= 1` octaves.
+pub fn fbm3(p: Vec3, octaves: u32) -> Vec3 {
+    let mut sum = Vec3::ZERO;
+    let mut norm = 0.0f32;
+    let mut amp = 1.0f32;
+    let mut freq = 1.0f32;
+    for _ in 0..octaves.max(1) {
+        sum += noise3(p * freq) * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    sum / norm
+}
+
 const EPS: f32 = 1e-4;
 
 /// Curl of the vector noise by `f32` central differences with `ε = 1e-4`.

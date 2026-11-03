@@ -80,6 +80,24 @@ fn bench(c: &mut Criterion) {
             "typical+turbulence",
             typical_definition(&[json!({"name": "turbulence"})]),
         ),
+        (
+            "typical+boids50",
+            typical_definition(&[json!({"name": "boids", "neighborthreshold": 50,
+                "separationthreshold": 20, "cohesionfactor": 4, "alignmentfactor": 5})]),
+        ),
+        (
+            "typical+collisions",
+            typical_definition(&[
+                json!({"name": "collisionplane", "distance": -400, "bouncefactor": 0.7}),
+                json!({"name": "collisionsphere", "collisionbehavior": "slide", "radius": 150}),
+                json!({"name": "collisionbounds"}),
+            ]),
+        ),
+        (
+            "typical+blended_cap",
+            typical_definition(&[json!({"name": "capvelocity", "maxspeed": 30,
+                "blendinstart": 0.2, "blendinend": 0.6})]),
+        ),
     ];
     for (name, def) in &cases {
         let (mut sys, mut t) = warmed(def);
@@ -167,5 +185,40 @@ fn real_rain(g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallT
     g.throughput(Throughput::Elements(COUNT as u64));
 }
 
-criterion_group!(benches, bench);
+/// Boids at the size WE presets use it (the boids preview scene: 250 particles).
+fn bench_boids_small(c: &mut Criterion) {
+    let def = ParticleDefinition::from_json(&json!({
+        "maxcount": 250,
+        "emitter": [{"name": "sphererandom", "rate": 100, "distancemax": 400}],
+        "initializer": [{"name": "lifetimerandom", "min": 3, "max": 4},
+                        {"name": "velocityrandom", "min": "-40 -40 0", "max": "40 40 0"}],
+        "operator": [{"name": "movement"}, {"name": "boids", "neighborthreshold": 150,
+            "separationfactor": 25, "cohesionfactor": 4, "alignmentfactor": 5}]
+    }));
+    let opts = SystemOptions {
+        width: 1920.0,
+        height: 1080.0,
+        seed: Some(7),
+        ..SystemOptions::default()
+    };
+    let mut sys = ParticleSystem::new(&def, &ParticleObject::default(), &opts);
+    let mut t = 1.0;
+    for _ in 0..300 {
+        t += DT;
+        sys.update(&frame(t));
+    }
+    let mut g = c.benchmark_group("particles_250");
+    g.throughput(Throughput::Elements(sys.len() as u64));
+    let mut vertices = Vec::with_capacity(sys.max_quads() * sys.quad_floats());
+    g.bench_function("update+vertices/boids150", |b| {
+        b.iter(|| {
+            t += DT;
+            sys.update(black_box(&frame(t)));
+            black_box(sys.write_vertices_vec(&mut vertices));
+        });
+    });
+    g.finish();
+}
+
+criterion_group!(benches, bench, bench_boids_small);
 criterion_main!(benches);
