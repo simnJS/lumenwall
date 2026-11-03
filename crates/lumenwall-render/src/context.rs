@@ -203,13 +203,14 @@ impl GpuInstance {
                 )
             })
             .ok_or(RenderError::NoAdapter(self.backends))?;
-        GpuContext::from_adapter(self.instance, adapter, options)
+        GpuContext::from_adapter(self.instance, self.backends, adapter, options)
     }
 }
 
 /// The GPU context shared by every scene and output.
 pub struct GpuContext {
     instance: wgpu::Instance,
+    backends: wgpu::Backends,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -221,6 +222,8 @@ pub struct GpuContext {
     /// Shared samplers by `(key, volume)`.
     samplers: Mutex<HashMap<(SamplerKey, bool), wgpu::Sampler>>,
     video: Option<crate::video_device::VideoQueues>,
+    /// [`ContextOptions::video_decode`] of the creation.
+    video_requested: bool,
 }
 
 impl GpuContext {
@@ -231,6 +234,7 @@ impl GpuContext {
 
     fn from_adapter(
         instance: wgpu::Instance,
+        backends: wgpu::Backends,
         adapter: wgpu::Adapter,
         options: &ContextOptions,
     ) -> Result<Self> {
@@ -305,6 +309,7 @@ impl GpuContext {
 
         let mut ctx = Self {
             instance,
+            backends,
             adapter,
             device,
             queue,
@@ -315,6 +320,7 @@ impl GpuContext {
             resources: AtomicU64::new(0),
             samplers: Mutex::new(HashMap::new()),
             video,
+            video_requested: options.video_decode,
         };
         if caps.pipeline_cache
             && let Some(dir) = &options.pipeline_cache_dir
@@ -368,6 +374,17 @@ impl GpuContext {
         &self.instance
     }
 
+    /// Drops the device and keeps the instance, so that another device (other options) is
+    /// created without enumerating the drivers again. Every surface, texture and buffer of
+    /// this device must be dropped first.
+    #[must_use]
+    pub fn into_instance(self) -> GpuInstance {
+        let Self {
+            instance, backends, ..
+        } = self;
+        GpuInstance { instance, backends }
+    }
+
     #[must_use]
     pub fn adapter(&self) -> &wgpu::Adapter {
         &self.adapter
@@ -400,6 +417,13 @@ impl GpuContext {
     #[must_use]
     pub fn video_queues(&self) -> Option<&crate::video_device::VideoQueues> {
         self.video.as_ref()
+    }
+
+    /// Whether the device was created with [`ContextOptions::video_decode`] (whatever the
+    /// adapter allowed): a device created without it may gain decode queues when recreated.
+    #[must_use]
+    pub fn video_decode_requested(&self) -> bool {
+        self.video_requested
     }
 
     #[must_use]

@@ -84,3 +84,13 @@ Facts measured while the GPU release was written; they size the next optimisatio
 | Render targets (headless) | 3463520581: 452 MiB of targets, 388 MiB of image composites, of which 121 MiB (B) and 10 MiB (A) are never written; 1960765686: 253 MiB of targets, 190 MiB of composites never written |
 | GPU time | Headless at full clocks: 0.35–0.80 ms/frame for the heaviest scenes (3840×2160). In a 480×270 window the scene still renders at its own size: 5.8–7.3 ms/frame at the low clocks the driver keeps |
 | Web 3044696375, Chromium switches (`--renderer-process-limit=1`, `--disable-background-networking`, `--num-raster-threads=1`, `--js-flags=--lite-mode`, `--enable-low-end-device-mode`) | 6.1–7.6 % CPU and 445–463 MiB PSS against 6.6 % and 459 MiB without: no gain beyond noise |
+
+### Optimisations from the baseline (same machine and method)
+
+Each line was measured before and after its own change, the others already in place for the
+later lines. Headless renders of every installed scene (Workshop and `defaultprojects`, 1920×1080,
+particles off, frames 0 and 44) stay identical to the pixel after each change.
+
+| Change | Before | After |
+|---|---|---|
+| Video applied to a scene device: device recreated with the decode queues (GPU release mechanism, Vulkan instance kept). Scene 3018340632 → video 3655057993 → scene over IPC | switch 187–257 ms; video by NVDEC + copy: 9.7 % CPU, 1280–1870 wake-ups/s, RSS 570–582 MiB, VRAM 675–683 MiB; back to the scene: RSS 305 MiB, VRAM 258 MiB | switch 188–191 ms; zero copy: 1.7–2.0 % CPU, 520 wake-ups/s, RSS 261 MiB, VRAM 222 MiB (= the video started alone); back to the scene: RSS 251 MiB, VRAM 174 MiB |

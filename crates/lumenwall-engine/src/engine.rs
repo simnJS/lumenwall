@@ -410,7 +410,7 @@ impl Engine {
                 _ => None,
             })
             .ok_or("no output")?;
-        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first) {
+        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first, None) {
             Ok(b) => b,
             Err(e) => {
                 self.waker.detach();
@@ -475,14 +475,16 @@ impl Engine {
         Ok(running)
     }
 
-    /// Instance, device and the GPU surface of `first`, whose adapter must present it.
+    /// Instance (`instance`, or a new one), device and the GPU surface of `first`, whose
+    /// adapter must present it.
     fn open_gpu(
         &self,
         surfaces: &dyn WallpaperSurface,
         first: OutputId,
+        instance: Option<GpuInstance>,
     ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
         let t0 = Instant::now();
-        let instance = GpuInstance::new(None);
+        let instance = instance.unwrap_or_else(|| GpuInstance::new(None));
         let t1 = Instant::now();
         let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
         let t2 = Instant::now();
@@ -796,6 +798,20 @@ impl Engine {
             .filter(|s| matches!(s, Staged::New(..)))
             .count();
         let released = used.iter().filter(|u| !**u).count();
+        // A new video on a device without decode queues: the device is recreated after the
+        // commit (zero copy) and every renderer built then.
+        let recreate = running.as_ref().is_some_and(|r| {
+            Self::wants_video_device(
+                r,
+                &new,
+                staged.iter().enumerate().filter_map(|(i, s)| match s {
+                    Staged::New(wp, _) if wp.kind() == lumenwall_scene::ProjectKind::Video => {
+                        Some(i)
+                    }
+                    _ => None,
+                }),
+            )
+        });
 
         // 2. Build the new renderers for the outputs already there, and open the new
         // surfaces when the layout changes: a failure here changes nothing.
@@ -806,6 +822,9 @@ impl Engine {
                 let Staged::New(wp, renderer) = s else {
                     continue;
                 };
+                if recreate {
+                    break;
+                }
                 let size = r
                     .outputs
                     .iter()
@@ -949,7 +968,8 @@ impl Engine {
                         r.platform = config;
                         tracing::info!("surfaces reopened: {:?}", r.surfaces.backend());
                     }
-                    None if targets_changed => self.rebind_outputs(r),
+                    // The recreated device rebuilds every target below.
+                    None if targets_changed && !recreate => self.rebind_outputs(r),
                     None => {}
                 }
                 let a = (&old_plan.audio, &self.plan.audio);
@@ -969,6 +989,9 @@ impl Engine {
                     w.set_audio(&self.plan.audio);
                 }
                 sync_video_pause(r);
+            }
+            if recreate {
+                self.recreate_for_video(running);
             }
         }
         for (what, changed) in [
@@ -1260,6 +1283,10 @@ impl Engine {
         let Some(info) = r.surfaces.output(id).cloned() else {
             return Ok(());
         };
+        // Already added by a GPU restore that ran before the platform's own event.
+        if r.outputs.iter().any(|o| o.id == id) {
+            return Ok(());
+        }
         let Some(target) = target_for(&self.plan, &info.name) else {
             tracing::debug!("output {} has no wallpaper", info.name);
             return Ok(());

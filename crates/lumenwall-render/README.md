@@ -58,6 +58,11 @@ let mut output = OutputSurface::new(&ctx, surface, (w, h))?;
 // after loading a wallpaper: ctx.save_pipeline_cache()?;
 ```
 
+`ctx.into_instance()` drops the device (after every surface and resource made from it) and
+keeps the instance, to create another device with other options without enumerating the drivers
+again: lumenwall-engine recreates the device with video decode queues
+(`ContextOptions::video_decode`, `ctx.video_decode_requested()`) when a video replaces a scene.
+
 ### Textures (`lumenwall-formats` → `TextureUpload`)
 
 | `.tex` format | `TexelFormat` |
