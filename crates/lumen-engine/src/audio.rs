@@ -135,6 +135,21 @@ impl Audio {
         self.player.set_object_playing(id, playing);
     }
 
+    /// Changes one object's gain (video sound track after a volume change).
+    pub fn set_object_volume(&self, id: lumen_audio::playback::ObjectId, volume: f32) {
+        self.player.set_object_volume(id, volume);
+    }
+
+    /// Global volume, 0..=128.
+    pub fn set_volume(&self, volume: u8) {
+        self.player.set_volume(i32::from(volume.min(128)));
+    }
+
+    /// Paused by the user: the output stream closes until resumed.
+    pub fn set_paused(&self, paused: bool) {
+        self.player.set_paused(paused);
+    }
+
     /// Starts the capture (first frame, resume).
     pub fn resume(&mut self) {
         if let Some(c) = &mut self.capture {

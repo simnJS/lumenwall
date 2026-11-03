@@ -6,7 +6,7 @@
 //! empty queue (engine waker). While every output of a video is paused, the clock stops,
 //! the decoder blocks on its full queue and nothing wakes up.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,7 @@ const QUEUE_FRAMES: usize = 3;
 /// A running video wallpaper.
 pub(crate) struct VideoSlot {
     pub player: VideoPlayer,
+    path: PathBuf,
     sound: Option<ObjectId>,
     /// Loop iteration of the last update (outputs sharing the video update it once).
     pub updated_at: u64,
@@ -38,12 +39,11 @@ pub(crate) struct VideoSlot {
 }
 
 impl VideoSlot {
-    /// Opens the video of `wp` and starts its sound track (unless `--silent`).
+    /// Opens the video of `wp` (no sound: see [`VideoSlot::attach_sound`]).
     pub fn open(
         ctx: &GpuContext,
         wp: &Wallpaper,
         plan: &EnginePlan,
-        audio: &mut Audio,
         notify: Option<Notify>,
     ) -> Result<Self, String> {
         let path = wp.video_path()?;
@@ -58,18 +58,37 @@ impl VideoSlot {
             notify,
         )
         .map_err(|e| e.to_string())?;
-        let sound = if player.info().has_audio && !plan.audio.silent {
-            add_sound(audio, &path, plan.audio.volume)
-        } else {
-            None
-        };
         Ok(Self {
             player,
-            sound,
+            path,
+            sound: None,
             updated_at: u64::MAX,
             serial: 0,
             paused: false,
         })
+    }
+
+    /// Starts the sound track in `audio` (a new player after an audio change), unless the
+    /// plan is silent or the video has none. Keeps the pause state.
+    pub fn attach_sound(&mut self, audio: &mut Audio, plan: &EnginePlan) {
+        self.sound = if self.player.info().has_audio && !plan.audio.silent {
+            add_sound(audio, &self.path, plan.audio.volume)
+        } else {
+            None
+        };
+        if self.paused
+            && let Some(id) = self.sound
+        {
+            audio.set_object_playing(id, false);
+        }
+    }
+
+    /// Global volume changed: the track carries the `(v/128)²` part of the cubic curve.
+    pub fn set_volume(&self, audio: &Audio, volume: u8) {
+        if let Some(id) = self.sound {
+            let v = f32::from(volume.min(128)) / 128.0;
+            audio.set_object_volume(id, v * v);
+        }
     }
 
     /// Pauses or resumes the picture and the sound together.

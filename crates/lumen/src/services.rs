@@ -2,9 +2,11 @@
 //! crates (assets, platform, rendering, audio...). Only the contracts live here; the
 //! implementations are plugged in by `main`.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use crate::plan::{ExecutionPlan, PlanChange};
 use crate::settings::WallpaperSource;
@@ -40,6 +42,8 @@ pub enum StopReason {
     Signal(i32),
     /// The output driver asked to stop: window closed, compositor connection lost (§1.2).
     Driver,
+    /// An IPC client asked the daemon to stop.
+    Client,
 }
 
 impl std::fmt::Display for StopReason {
@@ -47,6 +51,7 @@ impl std::fmt::Display for StopReason {
         match self {
             Self::Signal(n) => write!(f, "stop requested by signal {n}"),
             Self::Driver => f.write_str("stop requested by the output driver"),
+            Self::Client => f.write_str("stop requested by a client"),
         }
     }
 }
@@ -56,12 +61,98 @@ impl std::fmt::Display for StopReason {
 pub enum Control {
     /// Leave the main loop cleanly.
     Stop(StopReason),
-    /// The configuration file changed: switch to `plan`. `changes` says what differs from
-    /// the previous plan so the engine only redoes that work.
+    /// The configuration changed (file edited, or a client chose something): switch to
+    /// `plan` without restarting. `changes` says what differs from the previous plan. When
+    /// `done` is set, the engine reports whether the plan applied (`Err`: nothing changed).
     Reload {
         plan: Arc<ExecutionPlan>,
         changes: Vec<PlanChange>,
+        done: Option<mpsc::SyncSender<Result<(), String>>>,
     },
+    /// Live property values (preview), the complete set of overrides: properties left out
+    /// go back to their default.
+    Properties(BTreeMap<String, String>),
+    /// User pause of every output.
+    Pause(bool),
+}
+
+/// What the engine shows, for the daemon. Read without waking the engine.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EngineSnapshot {
+    /// Surfaces open (false while idle without wallpaper).
+    pub active: bool,
+    /// Known outputs, sorted by name.
+    pub outputs: Vec<OutputSnapshot>,
+    pub targets: Vec<TargetSnapshot>,
+}
+
+impl EngineSnapshot {
+    pub fn target_of(&self, output: &str) -> Option<&TargetSnapshot> {
+        self.outputs
+            .iter()
+            .find(|o| o.info.id == output)
+            .and_then(|o| o.target)
+            .and_then(|t| self.targets.get(t))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputSnapshot {
+    pub info: lumen_ipc::Output,
+    /// Has a surface in the current layout.
+    pub shown: bool,
+    pub target: Option<usize>,
+    /// Platform pause (fullscreen, lock, hidden).
+    pub paused: Option<lumen_ipc::PauseReason>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetSnapshot {
+    pub key: String,
+    pub wallpaper: PathBuf,
+    pub title: String,
+    pub scaling: lumen_ipc::Scaling,
+    /// `Err` holds the error of a renderer that could not be built.
+    pub status: TargetStatus,
+    pub properties: lumen_ipc::PropertyMap,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TargetStatus {
+    Loading,
+    Running,
+    Error(String),
+}
+
+/// Frame counters since the previous [`Monitor::take_counters`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameCounters {
+    pub elapsed: Duration,
+    /// `(output, frames, CPU time)`.
+    pub outputs: Vec<(String, u32, Duration)>,
+    pub gpu: Duration,
+    pub gpu_samples: u32,
+    pub gpu_memory: u64,
+}
+
+/// Part of the snapshot that changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorChange {
+    Outputs,
+    State,
+    Properties,
+}
+
+pub type MonitorListener = Arc<dyn Fn(MonitorChange) + Send + Sync>;
+
+/// Engine status for the IPC daemon.
+pub trait Monitor: Send + Sync {
+    fn snapshot(&self) -> EngineSnapshot;
+    /// Called on the engine thread after a change; must not block.
+    fn set_listener(&self, listener: Option<MonitorListener>);
+    /// Frame counters on/off (only while a client looks at statistics).
+    fn set_sampling(&self, on: bool);
+    fn take_counters(&self) -> FrameCounters;
 }
 
 /// Sending half of the control channel: queues a message, then wakes the engine.
@@ -103,6 +194,11 @@ pub fn control_channel(waker: Arc<dyn Waker>) -> (ControlSender, mpsc::Receiver<
 pub trait Engine {
     /// Waker for the event loop that [`run`](Self::run) will block on.
     fn waker(&self) -> Arc<dyn Waker>;
+
+    /// Status for the IPC daemon; `None`: the daemon only forwards controls.
+    fn monitor(&self) -> Option<Arc<dyn Monitor>> {
+        None
+    }
 
     /// Reads every wallpaper of the plan (`project.json`), applies the property overrides,
     /// prepares playlists. Must not open windows, audio devices or the web engine when
@@ -163,5 +259,6 @@ mod tests {
             StopReason::Driver.to_string(),
             "stop requested by the output driver"
         );
+        assert_eq!(StopReason::Client.to_string(), "stop requested by a client");
     }
 }

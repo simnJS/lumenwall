@@ -5,7 +5,8 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use super::*;
-use crate::plan::PlanChange;
+use crate::plan::{ExecutionPlan, PlanChange};
+use crate::services::Control;
 use crate::services::{ServiceError, StopReason, Waker};
 use crate::settings::WallpaperSource;
 
@@ -119,6 +120,7 @@ fn launch(args: &[&str], fail_at: Option<&'static str>, script: Option<RunScript
             fail_at,
             run: script,
         }),
+        ipc: None,
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let args = std::iter::once("lumen")
@@ -295,8 +297,8 @@ fn next_reload(
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         match control.recv_timeout(left).ok()? {
-            Control::Reload { plan, changes } => return Some((plan, changes)),
-            Control::Stop(_) => {}
+            Control::Reload { plan, changes, .. } => return Some((plan, changes)),
+            Control::Stop(_) | Control::Properties(_) | Control::Pause(_) => {}
         }
     }
 }

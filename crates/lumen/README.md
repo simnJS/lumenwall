@@ -37,7 +37,8 @@ signals (SIGINT/SIGTERM, console events) ─────────────
 | `watch` | Event-driven file watcher (`notify`) |
 | `signals` | SIGINT/SIGTERM (`signal-hook`), Windows console control events |
 | `console` | Windows GUI subsystem: reattach to the parent terminal |
-| `app` | Lifecycle (§1.1 order), exit codes |
+| `daemon` | IPC daemon (`lumen-ipc` `Handler`): reads from engine snapshots, client choices written atomically to the configuration file (`toml_edit`, comments kept) and applied live, statistics sampled only while subscribed |
+| `app` | Lifecycle (§1.1 order), exit codes, single instance |
 
 `main.rs` plugs placeholder services until the other crates are wired: paths resolve as is,
 Workshop IDs, the Wallpaper Engine installation lookup and the engine report "not integrated
@@ -169,6 +170,21 @@ rebuilds the plan and sends `Control::Reload { plan, changes }` to the engine wi
 input, particles, hwdec, layer, assets, properties, screenshot). An invalid file is logged
 and the running settings stay; a removed file means defaults. The log level is reloaded;
 log file settings apply at next start. The directory must exist at startup to be watched.
+
+## IPC daemon (Lumen extension)
+
+- `lumen` serves `lumen-ipc` on `$XDG_RUNTIME_DIR/lumen/ipc.sock` (`LUMEN_IPC_ENDPOINT` overrides).
+  Single instance: a second `lumen` sends its wallpaper (`apply`) to the running one, or prints
+  "Lumen is already running"; exit 0.
+- `lumen` with no argument and no configured wallpaper starts idle (no surface, no GPU device)
+  and waits for a client (deviation: the reference exits with "no wallpaper").
+- Client choices (wallpaper per output or for all, scaling, saved properties, fps, fullscreen
+  pause, automute, mute, volume) go into the configuration file (`wallpaper`, `scaling`,
+  `[[screen]]`, `[properties]`, `fps`, `silent`, `volume`…), written atomically, and replace the
+  command-line values they concern for the rest of the session. Pause and property previews are
+  not saved. Property overrides stay keyed by name (shared by wallpapers with the same name).
+- Reads never wake the engine; statistics (fps, CPU ms/frame, GPU busy %, process CPU, RSS,
+  GPU memory) are measured only while a client subscribes. `examples/lumenctl.rs` drives a daemon.
 
 ## Logging and exit codes
 

@@ -141,6 +141,9 @@ impl Default for EnginePlan {
     }
 }
 
+/// Receives the outcome of an [`EngineControl::Reload`] (`Err`: nothing changed).
+pub type ReloadDone = std::sync::mpsc::SyncSender<Result<(), String>>;
+
 /// Messages from the application to a running engine.
 #[derive(Clone, Debug)]
 pub enum EngineControl {
@@ -148,8 +151,20 @@ pub enum EngineControl {
     Stop(Option<i32>),
     /// New frame-rate cap.
     SetFps(u32),
-    /// Property overrides changed (configuration reload): re-applied to every wallpaper.
+    /// The complete set of property overrides (configuration reload, live preview): every
+    /// wallpaper takes these values, and its own defaults for the properties left out.
     SetProperties(BTreeMap<String, String>),
+    /// Pause (`true`) or resume every output, whatever the platform says.
+    SetPaused(bool),
+    /// Switch to a new plan without restarting: wallpapers are loaded or released, outputs
+    /// rebound, audio, fps, pause and surfaces updated, only where the plan differs. Either
+    /// the whole plan applies, or `done` receives the error and the engine is unchanged.
+    /// `assets_dir`, `hwdec`, input, particles and debug switches apply to the wallpapers
+    /// loaded afterwards; `screenshot`, `list_properties` and `dump_structure` are ignored.
+    Reload {
+        plan: Box<EnginePlan>,
+        done: Option<ReloadDone>,
+    },
 }
 
 /// Why [`crate::Engine::run`] returned.

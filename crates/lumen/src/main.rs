@@ -8,9 +8,13 @@ use std::process::ExitCode;
 use std::sync::{Arc, mpsc};
 
 use lumen::app::{self, Console, Services};
-use lumen::plan::{ExecutionPlan, OutputMode, PlanChange};
+use lumen::plan::{ExecutionPlan, OutputMode};
 use lumen::playlist::{PathStyle, RealFs, WeConfigCatalog};
-use lumen::services::{Control, Engine, ServiceError, StopReason, Waker, WallpaperResolver};
+use lumen::services::{
+    Control, Engine, EngineSnapshot, FrameCounters, Monitor, MonitorChange, MonitorListener,
+    OutputSnapshot, ServiceError, StopReason, TargetSnapshot, TargetStatus, Waker,
+    WallpaperResolver,
+};
 use lumen::settings::{Clamp, HwDecode, Layer, Scaling, WallpaperSource};
 use lumen_engine::{EngineControl, EnginePlan, Stopped};
 
@@ -30,6 +34,7 @@ fn main() -> ExitCode {
             PathStyle::native(),
         )),
         engine: Box::new(LumenEngine(lumen_engine::Engine::new(resolver))),
+        ipc: Some(lumen_ipc::Endpoint::for_current_user()),
     };
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     let console = Console {
@@ -152,9 +157,120 @@ fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
     }
 }
 
+/// The engine's status, in the daemon's terms.
+struct EngineMonitor(lumen_engine::EngineMonitor);
+
+fn ipc_scaling(s: lumen_engine::ScalingMode) -> lumen_ipc::Scaling {
+    match s {
+        lumen_engine::ScalingMode::Fit => lumen_ipc::Scaling::Fit,
+        lumen_engine::ScalingMode::Stretch => lumen_ipc::Scaling::Stretch,
+        // `default` (reference fitting) has no protocol name: reported as fill.
+        lumen_engine::ScalingMode::Fill | lumen_engine::ScalingMode::Default => {
+            lumen_ipc::Scaling::Fill
+        }
+    }
+}
+
+impl Monitor for EngineMonitor {
+    fn snapshot(&self) -> EngineSnapshot {
+        use lumen_engine::monitor::{PauseCause, PropertyValue as P, TargetState};
+        self.0.with_report(|r| EngineSnapshot {
+            active: r.active,
+            outputs: r
+                .outputs
+                .iter()
+                .map(|o| OutputSnapshot {
+                    info: lumen_ipc::Output {
+                        id: o.name.clone(),
+                        name: o.description.clone().unwrap_or_default(),
+                        x: o.position.0,
+                        y: o.position.1,
+                        width: o.size.0,
+                        height: o.size.1,
+                        scale: o.scale as f32,
+                        refresh_mhz: o.refresh_mhz.unwrap_or(0),
+                        primary: false,
+                    },
+                    shown: o.shown,
+                    target: o.target,
+                    paused: o.paused.map(|p| match p {
+                        PauseCause::Locked => lumen_ipc::PauseReason::Locked,
+                        PauseCause::Fullscreen => lumen_ipc::PauseReason::Fullscreen,
+                        PauseCause::Hidden => lumen_ipc::PauseReason::Hidden,
+                    }),
+                })
+                .collect(),
+            targets: r
+                .targets
+                .iter()
+                .map(|t| TargetSnapshot {
+                    key: t.key.clone(),
+                    wallpaper: t.wallpaper.clone(),
+                    title: t.title.clone(),
+                    scaling: ipc_scaling(t.scaling),
+                    status: match &t.state {
+                        TargetState::Loading => TargetStatus::Loading,
+                        TargetState::Running => TargetStatus::Running,
+                        TargetState::Error(e) => TargetStatus::Error(e.clone()),
+                    },
+                    properties: t
+                        .properties
+                        .iter()
+                        .map(|(k, v)| {
+                            let v = match v {
+                                P::Bool(b) => lumen_ipc::PropertyValue::Bool(*b),
+                                P::Number(n) => lumen_ipc::PropertyValue::Number(*n),
+                                P::Color(c) => lumen_ipc::PropertyValue::Color(*c),
+                                P::Text(s) => lumen_ipc::PropertyValue::Text(s.clone()),
+                            };
+                            (k.clone(), v)
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+    }
+
+    fn set_listener(&self, listener: Option<MonitorListener>) {
+        use lumen_engine::monitor::Change;
+        self.0.set_listener(listener.map(|l| {
+            Arc::new(move |c: Change| {
+                l(match c {
+                    Change::Outputs => MonitorChange::Outputs,
+                    Change::State => MonitorChange::State,
+                    Change::Properties => MonitorChange::Properties,
+                })
+            }) as lumen_engine::monitor::Listener
+        }));
+    }
+
+    fn set_sampling(&self, on: bool) {
+        self.0.set_sampling(on);
+    }
+
+    fn take_counters(&self) -> FrameCounters {
+        let c = self.0.take_counters();
+        FrameCounters {
+            elapsed: c.elapsed,
+            outputs: c
+                .outputs
+                .into_iter()
+                .map(|o| (o.name, o.frames, o.cpu))
+                .collect(),
+            gpu: c.gpu,
+            gpu_samples: c.gpu_samples,
+            gpu_memory: c.gpu_memory,
+        }
+    }
+}
+
 impl Engine for LumenEngine {
     fn waker(&self) -> Arc<dyn Waker> {
         Arc::new(EngineWaker(self.0.waker()))
+    }
+
+    fn monitor(&self) -> Option<Arc<dyn Monitor>> {
+        Some(Arc::new(EngineMonitor(self.0.monitor())))
     }
 
     fn load(&mut self, plan: &ExecutionPlan) -> Result<(), ServiceError> {
@@ -181,22 +297,24 @@ impl Engine for LumenEngine {
                     Control::Stop(StopReason::Signal(n)) => {
                         queue.push_back(EngineControl::Stop(Some(n)));
                     }
-                    Control::Stop(StopReason::Driver) => queue.push_back(EngineControl::Stop(None)),
-                    Control::Reload { plan, changes } => {
-                        for change in &changes {
-                            match change {
-                                PlanChange::Fps => {
-                                    queue.push_back(EngineControl::SetFps(plan.fps));
-                                }
-                                PlanChange::Properties => queue.push_back(
-                                    EngineControl::SetProperties(plan.properties.clone()),
-                                ),
-                                other => tracing::warn!(
-                                    "configuration change {other:?} applies at the next start"
-                                ),
-                            }
-                        }
+                    Control::Stop(StopReason::Driver | StopReason::Client) => {
+                        queue.push_back(EngineControl::Stop(None));
                     }
+                    Control::Reload {
+                        plan,
+                        changes,
+                        done,
+                    } => {
+                        tracing::debug!("applying {changes:?}");
+                        queue.push_back(EngineControl::Reload {
+                            plan: Box::new(engine_plan(&plan)),
+                            done,
+                        });
+                    }
+                    Control::Properties(values) => {
+                        queue.push_back(EngineControl::SetProperties(values));
+                    }
+                    Control::Pause(paused) => queue.push_back(EngineControl::SetPaused(paused)),
                 }
             }
             queue.pop_front()

@@ -46,7 +46,8 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
 | `script` | SceneScript (`lumen-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. |
 | `audio` | Scene sounds (`lumen-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
-| `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause, pointer, screenshots, statistics. |
+| `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device). |
+| `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
 | `puppet` | Spec 08 §9 as pure CPU math (public, unit tested with the §10 vectors): `Rig` (bones, inverse bind matrices, rest poses, attachments, animations), `Layer` (clock, loop/mirror/single, ramps), `Puppet::advance` / `evaluate` (sampling, additive/replace blending, `W`, `K`), `write_palette` (`g_Bones`), `skin_vertices` (CPU path), `decompose_attachment`. A module rather than a crate: its state is per-scene runtime state advanced by this crate's frame loop, which will also host the SceneScript bone API; it depends only on `lumen-formats` data and `glam`. |
 | `video` | Video wallpapers: one `lumen-video` player per target (zero-copy Vulkan Video on the render device when possible), its sound track through the `lumen-audio` player (mapped file, loop, cubic volume, automute), pause with its outputs, frame deadlines for the loop (`Wait::Until`, decoder wake-up through the engine waker). |
@@ -142,7 +143,7 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | `localStorage` | In memory (not persisted between runs). |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
 | Playlists | Only the first item is shown (no `PlaylistRunner` timer). |
-| Configuration reload | `fps` and properties apply live; other changes are logged for the next start. |
+| Plan reload | Wallpapers, layout, fps, audio, pause policy and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A video applied to a running scene-only device decodes through the copy path (the device is not recreated with video queues). |
 | Screenshot formats | PNG data whatever the extension. |
 
 ## SceneScript

@@ -8,12 +8,15 @@
 //! - [`ShaderProvider`]: WE shader + combos → render-ready shader (lumen-shader, or WGSL
 //!   stand-ins).
 //! - [`TextSink`]: receives the text that SceneScript computes for text layers.
+//! - [`EngineMonitor`]: outputs, wallpapers, properties and frame counters for the
+//!   application (IPC daemon), read without waking the engine.
 
 mod assets;
 mod audio;
 mod bloom;
 mod engine;
 mod headless;
+pub mod monitor;
 mod particles;
 pub mod plan;
 pub mod puppet;
@@ -30,8 +33,10 @@ use std::path::PathBuf;
 pub use assets::{SceneSource, VfsBytes, WallpaperResolver, open_vfs};
 pub use engine::{Engine, EngineWaker};
 pub use headless::{HeadlessOptions, HeadlessReport, render_headless};
+pub use monitor::{EngineMonitor, EngineReport};
 pub use plan::{
-    AudioPlan, DebugPlan, EngineControl, EnginePlan, OutputMode, PausePlan, Stopped, TargetPlan,
+    AudioPlan, DebugPlan, EngineControl, EnginePlan, OutputMode, PausePlan, ReloadDone, Stopped,
+    TargetPlan,
 };
 pub use scene::{FrameState, SceneOptions, SceneRuntime, SceneStats, ScreenState, build_scene};
 pub use script::TextSink;

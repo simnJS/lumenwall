@@ -8,11 +8,13 @@ use std::sync::Arc;
 
 use crate::cli::{self, CliArgs, CliOutcome};
 use crate::config::{self, LoadedConfig};
-use crate::logging::{self, LogFilterHandle, LogOptions};
-use crate::plan::{self, ExecutionPlan, PlanServices};
-use crate::services::{self, Control, ControlSender, Engine, PlaylistCatalog, WallpaperResolver};
+use crate::daemon::{Daemon, DaemonInit};
+use crate::logging::{self, LogOptions};
+use crate::plan::{self, PlanServices};
+use crate::services::{self, Engine, PlaylistCatalog, WallpaperResolver};
+use crate::settings::{Scaling, WallpaperRef};
 use crate::signals;
-use crate::watch::{self, FileChange, FileWatcher};
+use crate::watch::{self, FileWatcher};
 
 /// Process exit status (spec 07 §1.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +36,8 @@ pub struct Services {
     pub resolver: Arc<dyn WallpaperResolver>,
     pub playlists: Arc<dyn PlaylistCatalog>,
     pub engine: Box<dyn Engine>,
+    /// IPC endpoint of the daemon (`None`: no IPC, no single-instance check).
+    pub ipc: Option<lumen_ipc::Endpoint>,
 }
 
 /// Where user-facing text goes: help, "running with", property listing, argument errors.
@@ -97,11 +101,21 @@ pub fn run(args: Vec<OsString>, services: Services, console: Console<'_>) -> Exi
         tracing::info!("configuration read from {}", path.display());
     }
 
+    // Single instance: a second `lumen` hands its wallpaper to the running daemon.
+    if !cli.settings.list_properties
+        && let Some(endpoint) = &services.ipc
+        && let Ok(client) = lumen_ipc::Client::connect(endpoint, "lumen")
+    {
+        return forward(&cli, &client, &*services.resolver, console.out);
+    }
+
     let plan_services = PlanServices {
         resolver: &*services.resolver,
         playlists: &*services.playlists,
     };
-    let plan = match plan::build(&cli, loaded.config.as_ref(), plan_services) {
+    // `lumen` alone with nothing configured starts as an idle daemon, waiting for a client.
+    let idle_allowed = cli.raw.len() <= 1;
+    let plan = match plan::build_with(&cli, loaded.config.as_ref(), plan_services, idle_allowed) {
         Ok(plan) => plan,
         Err(e) => return fatal(e),
     };
@@ -128,32 +142,64 @@ pub fn run(args: Vec<OsString>, services: Services, console: Console<'_>) -> Exi
         .inspect_err(|e| tracing::warn!("cannot install the stop handlers: {e}"))
         .ok();
     let plan = Arc::new(plan);
-    let _watcher = watch_config(
-        &loaded,
-        Reloader {
-            cli,
-            resolver: services.resolver.clone(),
-            playlists: services.playlists.clone(),
-            current: plan.clone(),
-            control,
-            log_filter: logging.filter_handle(),
-            log_config: loaded
-                .config
-                .as_ref()
-                .map(|c| c.log.clone())
-                .unwrap_or_default(),
-        },
-    );
+    let daemon = Daemon::new(DaemonInit {
+        cli,
+        config_path: loaded.path.clone(),
+        config_bytes: loaded.bytes.clone(),
+        config: loaded.config.clone(),
+        plan: plan.clone(),
+        resolver: services.resolver.clone(),
+        playlists: services.playlists.clone(),
+        control,
+        monitor: engine.monitor(),
+        log_filter: logging.filter_handle(),
+        log_config: loaded
+            .config
+            .as_ref()
+            .map(|c| c.log.clone())
+            .unwrap_or_default(),
+    });
+    let server = match &services.ipc {
+        None => None,
+        Some(endpoint) => {
+            match lumen_ipc::Server::bind(
+                endpoint,
+                daemon.handler(),
+                "lumen",
+                env!("CARGO_PKG_VERSION"),
+            ) {
+                Ok(server) => {
+                    daemon.set_publisher(server.publisher());
+                    Some(server)
+                }
+                Err(lumen_ipc::Error::AlreadyRunning) => {
+                    // Lost a start-up race with another daemon.
+                    let _ = writeln!(console.out, "Lumen is already running");
+                    return Exit::Success;
+                }
+                Err(e) => {
+                    tracing::warn!("IPC unavailable ({e}): clients cannot control this instance");
+                    None
+                }
+            }
+        }
+    };
+    let _watcher = watch_config(&loaded, &daemon);
 
     if let Err(e) = engine.start() {
+        daemon.detach();
         return fatal(e);
     }
     if plan.dump_structure
         && let Err(e) = engine.write_structure(console.out)
     {
+        daemon.detach();
         return fatal(e);
     }
-    match engine.run(receiver) {
+    let result = engine.run(receiver);
+    daemon.detach();
+    drop(server);
+    match result {
         Ok(reason) => {
             tracing::info!("{reason}");
             tracing::info!("stopping");
@@ -161,6 +207,56 @@ pub fn run(args: Vec<OsString>, services: Services, console: Console<'_>) -> Exi
         }
         Err(e) => fatal(e),
     }
+}
+
+/// Another daemon runs: send it the wallpaper named on the command line, if any.
+fn forward(
+    cli: &CliArgs,
+    client: &lumen_ipc::Client,
+    resolver: &dyn WallpaperResolver,
+    out: &mut dyn Write,
+) -> Exit {
+    let scaling = |s: Option<Scaling>| match s {
+        Some(Scaling::Fit) => lumen_ipc::Scaling::Fit,
+        Some(Scaling::Stretch) => lumen_ipc::Scaling::Stretch,
+        _ => lumen_ipc::Scaling::Fill,
+    };
+    let mut requests: Vec<(Option<String>, &WallpaperRef, lumen_ipc::Scaling)> = cli
+        .layout
+        .screens
+        .iter()
+        .filter_map(|s| {
+            let w = s.settings.wallpaper.as_ref()?;
+            Some((Some(s.name.clone()), w, scaling(s.settings.scaling)))
+        })
+        .collect();
+    if requests.is_empty()
+        && let Some(w) = &cli.layout.default_wallpaper
+    {
+        requests.push((None, w, scaling(cli.layout.global_scaling)));
+    }
+    if requests.is_empty() {
+        let _ = writeln!(out, "Lumen is already running");
+        return Exit::Success;
+    }
+    for (output, reference, scaling) in requests {
+        let WallpaperRef::Source(source) = reference else {
+            tracing::warn!("playlists are not sent to the running daemon");
+            continue;
+        };
+        let path = match resolver.resolve(source) {
+            Ok(p) => p,
+            Err(e) => return fatal(e),
+        };
+        if let Err(e) = client.apply(output.as_deref(), &path, scaling) {
+            return fatal(format!(
+                "the running daemon refused {}: {e}",
+                path.display()
+            ));
+        }
+    }
+    let _ = writeln!(out, "Lumen is already running: wallpaper sent to it");
+    Exit::Success
 }
 
 fn fatal(error: impl std::fmt::Display) -> Exit {
@@ -175,84 +271,14 @@ fn shown_command_line(raw: &[OsString]) -> String {
         .join(" ")
 }
 
-/// Rebuilds the plan when the configuration file changes.
-struct Reloader {
-    cli: Box<CliArgs>,
-    resolver: Arc<dyn WallpaperResolver>,
-    playlists: Arc<dyn PlaylistCatalog>,
-    current: Arc<ExecutionPlan>,
-    control: ControlSender,
-    log_filter: Option<LogFilterHandle>,
-    log_config: config::LogConfig,
-}
-
-impl Reloader {
-    fn on_change(&mut self, path: &std::path::Path, change: FileChange) {
-        let config = match change {
-            FileChange::Contents(bytes) => match config::parse_bytes(path, &bytes) {
-                Ok(config) => Some(config),
-                Err(e) => {
-                    tracing::error!("{e}; keeping the current settings");
-                    return;
-                }
-            },
-            FileChange::Removed => {
-                tracing::info!(
-                    "configuration file {} removed; using the defaults",
-                    path.display()
-                );
-                None
-            }
-            FileChange::Unreadable(e) => {
-                tracing::warn!("cannot read the configuration file {}: {e}", path.display());
-                return;
-            }
-        };
-        let log = config.as_ref().map(|c| c.log.clone()).unwrap_or_default();
-        if log.level != self.log_config.level
-            && let Some(filter) = &self.log_filter
-        {
-            filter.set_level(log.level.as_deref());
-        }
-        if (&log.file, &log.directory, &log.max_files)
-            != (
-                &self.log_config.file,
-                &self.log_config.directory,
-                &self.log_config.max_files,
-            )
-        {
-            tracing::warn!("log file settings change on the next start");
-        }
-        self.log_config = log;
-
-        let services = PlanServices {
-            resolver: &*self.resolver,
-            playlists: &*self.playlists,
-        };
-        match plan::build(&self.cli, config.as_ref(), services) {
-            Ok(plan) => {
-                let changes = plan::diff(&self.current, &plan);
-                if changes.is_empty() {
-                    tracing::debug!("configuration reloaded, nothing to change");
-                    return;
-                }
-                tracing::info!("configuration reloaded: {changes:?}");
-                self.current = Arc::new(plan);
-                self.control.send(Control::Reload {
-                    plan: self.current.clone(),
-                    changes,
-                });
-            }
-            Err(e) => tracing::error!("configuration not applied: {e}"),
-        }
-    }
-}
-
-fn watch_config(loaded: &LoadedConfig, mut reloader: Reloader) -> Option<FileWatcher> {
+fn watch_config(loaded: &LoadedConfig, daemon: &Arc<Daemon>) -> Option<FileWatcher> {
     let path: PathBuf = loaded.path.clone()?;
     let watched = path.clone();
+    let daemon = Arc::downgrade(daemon);
     match watch::watch_file(&path, loaded.bytes.clone(), move |change| {
-        reloader.on_change(&watched, change)
+        if let Some(d) = daemon.upgrade() {
+            d.on_config_change(&watched, change);
+        }
     }) {
         Ok(watcher) => {
             tracing::debug!("watching {} for changes", path.display());

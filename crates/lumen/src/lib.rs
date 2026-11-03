@@ -9,6 +9,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod console;
+pub mod daemon;
 pub mod logging;
 pub mod plan;
 pub mod playlist;

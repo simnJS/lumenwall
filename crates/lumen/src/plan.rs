@@ -224,6 +224,17 @@ pub fn build(
     config: Option<&Config>,
     services: PlanServices<'_>,
 ) -> Result<ExecutionPlan, PlanError> {
+    build_with(cli, config, services, false)
+}
+
+/// [`build`]; with `allow_empty`, a target without any wallpaper is left out instead of
+/// being an error (the daemon then waits for a client to choose one).
+pub fn build_with(
+    cli: &CliArgs,
+    config: Option<&Config>,
+    services: PlanServices<'_>,
+    allow_empty: bool,
+) -> Result<ExecutionPlan, PlanError> {
     let no_config = Config::default();
     let file = config.unwrap_or(&no_config);
     let layout = &cli.layout;
@@ -388,7 +399,11 @@ pub fn build(
     }
     let mut targets = Vec::with_capacity(screens.len() + spans.len());
     for draft in screens.into_iter().chain(spans) {
-        let reference = draft.wallpaper.ok_or(PlanError::NoWallpaper)?;
+        let reference = match draft.wallpaper {
+            Some(r) => r,
+            None if allow_empty => continue,
+            None => return Err(PlanError::NoWallpaper),
+        };
         let path = resolve(&reference)?;
         targets.push(TargetPlan {
             key: draft.key,
