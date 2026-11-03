@@ -8,6 +8,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "particles"
+harness = false
 
 [lints]
 workspace = true
