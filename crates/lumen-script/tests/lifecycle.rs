@@ -594,3 +594,29 @@ fn audio_buffers() {
     e.tick(&mut h);
     assert_eq!(num(&eval(&mut e, &mut h, "shared.ab.average[0]")), 0.0);
 }
+
+#[test]
+fn init_value_is_a_copy_not_a_live_view() {
+    // Scripts keep the `init` value as their default and derive the result from it (the
+    // Porsche wallpapers mirror with `scale.x = -initial.x`); a live view would flip every frame.
+    let (mut e, mut h) = setup();
+    h.set_member(ObjectRef::Layer(1), "scale", Value::Vec3([1.0, 1.0, 1.0]));
+    let id = load(
+        &mut e,
+        &mut h,
+        1,
+        "scale",
+        "let initial;
+         export function init(value) { initial = value; }
+         export function update(value) { return new Vec3(-initial.x, initial.y, initial.z); }",
+    )
+    .unwrap();
+    for _ in 0..4 {
+        e.tick(&mut h);
+        assert!(e.is_active(id));
+        assert_eq!(
+            h.member(ObjectRef::Layer(1), "scale").cloned(),
+            Some(Value::Vec3([-1.0, 1.0, 1.0]))
+        );
+    }
+}

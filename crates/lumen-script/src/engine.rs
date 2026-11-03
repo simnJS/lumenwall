@@ -315,12 +315,19 @@ impl<'js> Atoms<'js> {
     }
 }
 
-/// `value` argument of `init`/`update`: the bound value, vectors as a cached live view.
-fn bound_arg<'js>(ctx: &Ctx<'js>, sh: &Shared, id: ScriptId) -> rquickjs::Result<JsValue<'js>> {
+/// `value` argument of `init`/`update`: the bound value, vectors as a cached live view for
+/// `update` and as a copy for `init` (scripts keep the `init` value as their default, so a live
+/// view would follow every later write and flip-flop scripts like `return -initial`).
+fn bound_arg<'js>(
+    ctx: &Ctx<'js>,
+    sh: &Shared,
+    id: ScriptId,
+    live: bool,
+) -> rquickjs::Result<JsValue<'js>> {
     let Some(v) = sh.read_target(ctx, Target::Bound(id))? else {
         return Ok(undefined(ctx));
     };
-    let Some(n) = v.vector_dim() else {
+    let Some(n) = v.vector_dim().filter(|_| live) else {
         return to_js(ctx, sh, &v, None);
     };
     let cached = sh.scripts.borrow()[id.0 as usize]
@@ -376,7 +383,7 @@ fn call_bound<'js>(ctx: &Ctx<'js>, sh: &Shared, id: ScriptId, ev: Event) -> Resu
     let run = || -> rquickjs::Result<JsValue<'js>> {
         let f = f.restore(ctx)?;
         let this = this.restore(ctx)?;
-        let arg = bound_arg(ctx, sh, id)?;
+        let arg = bound_arg(ctx, sh, id, !matches!(ev, Event::Init))?;
         f.call((This(this), arg))
     };
     let r = run().map_err(|e| error_message(ctx, sh, e))?;
