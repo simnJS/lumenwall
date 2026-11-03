@@ -45,6 +45,23 @@ pub fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
     )
 }
 
+/// Perspective projection of 3D scenes in the Wallpaper Engine convention (spec 09 §3.2.2):
+/// vertical field of view in degrees, right-handed, depth `[0, 1]` (0 at the near plane),
+/// `y_ndc = +1` at the top of the target. Used as is by 3D passes (no clip fix).
+#[must_use]
+pub fn perspective_we(fov_degrees: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    Mat4::perspective_rh(fov_degrees.to_radians(), aspect, near, far)
+}
+
+/// The same projection for passes that keep the upstream clip convention (images, particles
+/// in a perspective scene): `Sc(1, −1, 1) · P_GL`. After the clip fix of §24.2 it gives the
+/// pixels and depths of [`perspective_we`] (spec 09 §3.1, §3.2.2).
+#[must_use]
+pub fn perspective_upstream(fov_degrees: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
+        * Mat4::perspective_rh_gl(fov_degrees.to_radians(), aspect, near, far)
+}
+
 /// The wgpu clip-space correction of spec 04 §24.2, applied by the GPU at the
 /// end of every vertex stage: `(x, y, z, w) -> (x, -y, (z + w) / 2, w)`.
 /// This CPU copy exists for tests and for code that projects points on the CPU.
@@ -573,6 +590,52 @@ pub fn rect_quad(rect: &ImageRect, uv_max: Vec2) -> [Vertex; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perspective_vectors_vp_1_vp_2() {
+        // VP-1 (spec 09 §4.5).
+        let p = perspective_we(50.0, 16.0 / 9.0, 0.01, 10000.0);
+        let c = p.to_cols_array_2d();
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(close(c[0][0], 1.206285));
+        assert!(close(c[1][1], 2.144507));
+        assert!(close(c[2][2], -1.000001));
+        assert!(close(c[3][2], -0.0100000));
+        assert!(close(c[2][3], -1.0));
+        // VP-2: eye at the origin looking down -Z.
+        let vp = p * look_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
+        let ndc = |q: Vec3| {
+            let h = vp * q.extend(1.0);
+            h.truncate() / h.w
+        };
+        let a = ndc(Vec3::new(0.0, 0.5, -2.0));
+        assert!(
+            close(a.x, 0.0) && close(a.y, 0.536127) && close(a.z, 0.995001),
+            "{a}"
+        );
+        let b = ndc(Vec3::new(1.0, 0.0, -4.0));
+        assert!(
+            close(b.x, 0.301571) && close(b.y, 0.0) && close(b.z, 0.997501),
+            "{b}"
+        );
+        assert!(ndc(Vec3::new(0.0, 0.0, -0.01)).z.abs() < 1e-5);
+        assert!((ndc(Vec3::new(0.0, 0.0, -10000.0)).z - 1.0).abs() < 1e-5);
+        // Row of the first point on a 1080-pixel target: upper half.
+        assert!(((1.0 - a.y) / 2.0 * 1080.0 - 250.49).abs() < 0.01);
+        // The upstream variant gives the same pixels and depths after the clip fix.
+        let up = perspective_upstream(50.0, 16.0 / 9.0, 0.01, 10000.0)
+            * look_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
+        for q in [
+            Vec3::new(0.0, 0.5, -2.0),
+            Vec3::new(1.0, 0.3, -4.0),
+            Vec3::new(-2.0, -1.0, -50.0),
+        ] {
+            let w = vp * q.extend(1.0);
+            let f = clip_fix(up * q.extend(1.0));
+            let (w, f) = (w.truncate() / w.w, f.truncate() / f.w);
+            assert!((w - f).abs().max_element() < 1e-4, "{w} {f}");
+        }
+    }
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() <= 1e-5 * (1.0 + a.abs().max(b.abs()))

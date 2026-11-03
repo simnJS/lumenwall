@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::blend::{BlendMode, CullMode, FRONT_FACE, WriteMask};
 use crate::context::GpuContext;
+use crate::context::MemoryToken;
 use crate::dynbuf::{
     DynamicBuffer, DynamicBufferBuilder, FrameInputs, Patch, ScalarKind, Shadow, UniformBlock,
     UniformSlot, UniformType, VertexRange, frame_globals, patches_for,
@@ -99,6 +100,86 @@ pub enum Geometry {
         indices: IndexRange,
         skin: SkinRange,
     },
+    /// Every triangle of a static mesh ([`SceneBuilder::add_mesh`]): its own interleaved
+    /// vertex layout, 16-bit indices.
+    Mesh(MeshId),
+}
+
+/// Format of the depth buffers (spec 09 §3.1).
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Depth test and write of a pass whose target has a depth buffer ([`SceneBuilder::add_depth`],
+/// spec 09 §3.1). Ignored for targets without one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct DepthState {
+    /// Test "less or equal" against the buffer; `false` = always passes.
+    pub test: bool,
+    /// Write the fragment depth.
+    pub write: bool,
+}
+
+/// Handle of a static mesh of a scene ([`SceneBuilder::add_mesh`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshId(u32);
+
+/// One attribute of a static mesh, matched to shader inputs by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshAttribute {
+    pub name: String,
+    pub format: wgpu::VertexFormat,
+    /// Byte offset in the vertex.
+    pub offset: u32,
+}
+
+/// Interleaved vertex layout of a static mesh (3D model meshes, spec 09 §1.14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshLayout {
+    /// Bytes per vertex.
+    pub stride: u32,
+    pub attributes: Vec<MeshAttribute>,
+}
+
+/// Vertex and 16-bit index buffers of a static mesh, uploaded once.
+struct StaticMesh {
+    layout: MeshLayout,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+    _memory: MemoryToken,
+}
+
+/// Depth attachment of a render target (spec 09 §3.1).
+struct DepthBuffer {
+    target: RtId,
+    size: (u32, u32),
+    view: wgpu::TextureView,
+    _memory: MemoryToken,
+}
+
+fn create_depth(ctx: &GpuContext, target: RtId, size: (u32, u32)) -> DepthBuffer {
+    let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("lumenwall.depth"),
+        size: wgpu::Extent3d {
+            width: size.0.max(1),
+            height: size.1.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    ctx.note_resources(2);
+    DepthBuffer {
+        target,
+        size,
+        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        _memory: ctx
+            .memory()
+            .track(u64::from(size.0.max(1)) * u64::from(size.1.max(1)) * 4),
+    }
 }
 
 /// Records of the static skin buffer ([`SceneBuilder::add_skin`]).
@@ -171,6 +252,12 @@ pub struct PassDesc {
     pub blend: BlendMode,
     pub write_mask: WriteMask,
     pub cull: CullMode,
+    /// Winding of front faces in wgpu clip space: [`FRONT_FACE`] for passes in the upstream
+    /// convention, `Ccw` for 3D passes in the Wallpaper Engine convention (spec 09 §3.5.1),
+    /// `Cw` for their mirrored reflection (§3.7).
+    pub front_face: wgpu::FrontFace,
+    /// Depth test and write when the target has a depth buffer.
+    pub depth: DepthState,
     pub geometry: Geometry,
     /// Slots 0..8. A slot the shader samples without binding gets the default texture.
     pub slots: [Option<SlotBinding>; MAX_SLOTS],
@@ -195,6 +282,8 @@ impl PassDesc {
             blend: BlendMode::Normal,
             write_mask: WriteMask::All,
             cull: CullMode::None,
+            front_face: FRONT_FACE,
+            depth: DepthState::default(),
             geometry,
             slots: [None; MAX_SLOTS],
             slot0_variants: Vec::new(),
@@ -277,12 +366,88 @@ pub struct SceneBuilder<'c> {
     indices: Vec<u16>,
     skins: Vec<SkinVertex>,
     streams: Vec<VertexStream>,
+    meshes: Vec<StaticMesh>,
+    depth_targets: Vec<RtId>,
     passes: Vec<PassRecord>,
     ops: Vec<Op>,
     scene_size: (f32, f32),
 }
 
 impl<'c> SceneBuilder<'c> {
+    /// Uploads a static mesh (load time): interleaved `vertices` laid out as `layout`, 16-bit
+    /// triangle-list `indices`. Shader inputs are fed by attribute name; others read
+    /// (0, 0, 0, 1). Drawn whole by [`Geometry::Mesh`].
+    pub fn add_mesh(
+        &mut self,
+        label: &str,
+        layout: MeshLayout,
+        vertices: &[u8],
+        indices: &[u16],
+    ) -> MeshId {
+        let device = self.ctx.device();
+        let vsize = (vertices.len() as u64)
+            .max(16)
+            .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: vsize,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !vertices.is_empty() {
+            let len = vertices.len() - vertices.len() % 4;
+            self.ctx.queue().write_buffer(&vbuf, 0, &vertices[..len]);
+            if len < vertices.len() {
+                let mut tail = [0u8; 4];
+                tail[..vertices.len() - len].copy_from_slice(&vertices[len..]);
+                self.ctx.queue().write_buffer(&vbuf, len as u64, &tail);
+            }
+        }
+        // Even index count: buffer writes are 4-byte aligned.
+        let mut padded = indices.to_vec();
+        if padded.len() % 2 == 1 {
+            padded.push(0);
+        }
+        let ibytes: &[u8] = bytemuck::cast_slice(&padded);
+        let isize = (ibytes.len() as u64)
+            .max(16)
+            .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        let ibuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: isize,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !ibytes.is_empty() {
+            self.ctx.queue().write_buffer(&ibuf, 0, ibytes);
+        }
+        self.ctx.note_resources(2);
+        self.meshes.push(StaticMesh {
+            layout,
+            vertices: vbuf,
+            indices: ibuf,
+            index_count: indices.len() as u32,
+            _memory: self.ctx.memory().track(vsize + isize),
+        });
+        MeshId(self.meshes.len() as u32 - 1)
+    }
+
+    /// Gives `target` a depth buffer of its size (spec 09 §3.1), shared by every pass drawn
+    /// into it during a frame. It is cleared to 1 by the first render pass of the frame on
+    /// that target; passes into it test and write depth according to [`PassDesc::depth`].
+    /// Targets without one keep pipelines without depth (2D scenes are unchanged).
+    pub fn add_depth(&mut self, target: RtId) {
+        if !self.depth_targets.contains(&target) {
+            self.depth_targets.push(target);
+        }
+    }
+
+    /// Whether `target` has a depth buffer.
+    #[must_use]
+    pub fn has_depth(&self, target: RtId) -> bool {
+        self.depth_targets.contains(&target)
+    }
+
     /// Allocate a vertex stream of at most `max_vertices` vertices drawn with
     /// the constant 32-bit `indices` (load time). Feed it every frame with
     /// [`RenderScene::write_stream`].
@@ -352,6 +517,8 @@ impl<'c> SceneBuilder<'c> {
             indices: Vec::new(),
             skins: Vec::new(),
             streams: Vec::new(),
+            meshes: Vec::new(),
+            depth_targets: Vec::new(),
             passes: Vec::new(),
             ops: Vec::new(),
             scene_size,
@@ -458,6 +625,11 @@ impl<'c> SceneBuilder<'c> {
             && self.streams.get(s.0 as usize).is_none()
         {
             return Err(RenderError::BadHandle("vertex stream"));
+        }
+        if let Geometry::Mesh(m) = desc.geometry
+            && self.meshes.get(m.0 as usize).is_none()
+        {
+            return Err(RenderError::BadHandle("mesh"));
         }
         let uniform = shader
             .interface()
@@ -610,9 +782,16 @@ impl<'c> SceneBuilder<'c> {
             .iter()
             .any(|s| s.interface().volume_slots != 0)
             .then(|| default_volume(ctx));
+        let depths = self
+            .depth_targets
+            .iter()
+            .map(|&t| create_depth(ctx, t, self.targets.get(t).size()))
+            .collect();
         let mut scene = RenderScene {
             default_texture: default_texture(ctx),
             default_volume,
+            depths,
+            meshes: std::mem::take(&mut self.meshes),
             targets: std::mem::take(&mut self.targets),
             textures: std::mem::take(&mut self.textures),
             interfaces: self.shaders.iter().map(|s| s.interface().clone()).collect(),
@@ -702,6 +881,11 @@ struct PipelineKey {
     stream_layout: Option<usize>,
     /// Skin buffer bound in slot 1 (attribute layout differs).
     skinned: bool,
+    /// First mesh with the same vertex layout, for mesh passes.
+    mesh_layout: Option<usize>,
+    front_face: wgpu::FrontFace,
+    /// Depth state when the target has a depth buffer.
+    depth: Option<DepthState>,
 }
 
 struct CompiledPass {
@@ -734,6 +918,8 @@ enum Segment {
     Render {
         target: RtId,
         clear: Option<wgpu::Color>,
+        /// Depth attachment `(index in RenderScene::depths, clear to 1?)`.
+        depth: Option<(usize, bool)>,
         items: Vec<Item>,
     },
 }
@@ -802,6 +988,8 @@ pub struct RenderScene {
     index_buffer: Option<wgpu::Buffer>,
     skin_buffer: Option<wgpu::Buffer>,
     streams: Vec<VertexStream>,
+    meshes: Vec<StaticMesh>,
+    depths: Vec<DepthBuffer>,
     default_attrs: wgpu::Buffer,
     uniform_layout: wgpu::BindGroupLayout,
     uniform_bg: wgpu::BindGroup,
@@ -911,10 +1099,43 @@ impl RenderScene {
             ),
             _ => None,
         };
+        let mesh = match desc.geometry {
+            Geometry::Mesh(m) => Some(
+                self.meshes
+                    .get(m.0 as usize)
+                    .ok_or_else(|| err("unknown mesh".into()))?,
+            ),
+            _ => None,
+        };
         let mut main_attrs = Vec::new();
         let mut skin_attrs = Vec::new();
         let mut unfed_attrs = Vec::new();
         for input in &iface.vertex_inputs {
+            if let Some(mesh) = mesh {
+                let name = iface.vertex_input_name(input.location).unwrap_or("");
+                if let Some(a) = mesh.layout.attributes.iter().find(|a| a.name == name) {
+                    main_attrs.push(wgpu::VertexAttribute {
+                        format: a.format,
+                        offset: u64::from(a.offset),
+                        shader_location: input.location,
+                    });
+                    continue;
+                }
+                let (components, kind) = match input.attr {
+                    VertexAttr::Position => (3, ScalarKind::Float),
+                    VertexAttr::TexCoord => (2, ScalarKind::Float),
+                    VertexAttr::Unfed { components, kind } => (components, kind),
+                };
+                unfed_attrs.push((
+                    [wgpu::VertexAttribute {
+                        format: unfed_format(kind, components),
+                        offset: 0,
+                        shader_location: input.location,
+                    }],
+                    kind != ScalarKind::Float,
+                ));
+                continue;
+            }
             if skinned
                 && let Some((format, offset)) = iface
                     .vertex_input_name(input.location)
@@ -989,12 +1210,20 @@ impl RenderScene {
                 unfed_attrs.len()
             )));
         }
-        let stride = stream.map_or(u64::from(VERTEX_SIZE), |s| {
-            u64::from(s.layout.stride_floats) * 4
-        });
-        // Pipelines of streams with the same layout are shared.
+        let stride = match (stream, mesh) {
+            (Some(s), _) => u64::from(s.layout.stride_floats) * 4,
+            (_, Some(m)) => u64::from(m.layout.stride),
+            _ => u64::from(VERTEX_SIZE),
+        };
+        // Pipelines of streams (meshes) with the same layout are shared.
         let layout_key =
             stream.and_then(|s| self.streams.iter().position(|o| o.layout == s.layout));
+        let mesh_layout = mesh.and_then(|m| self.meshes.iter().position(|o| o.layout == m.layout));
+        let depth = self
+            .depths
+            .iter()
+            .any(|d| d.target == desc.target)
+            .then_some(desc.depth);
         let mut layouts = vec![Some(wgpu::VertexBufferLayout {
             array_stride: stride,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -1028,11 +1257,16 @@ impl RenderScene {
             cull: desc.cull,
             stream_layout: layout_key,
             skinned,
+            mesh_layout,
+            front_face: desc.front_face,
+            depth,
         };
         let pipeline = if let Some(p) = cache.get(&key) {
             p.clone()
         } else {
-            let unclipped = ctx.caps().unclipped_depth;
+            // Passes into a target with a depth buffer clip against the near and far planes like
+            // Wallpaper Engine's 3D passes; the others never discard geometry for its depth.
+            let unclipped = ctx.caps().unclipped_depth && depth.is_none();
             let (_, pl) = self.texture_layout(ctx, (iface.slots, iface.volume_slots));
             let pl = pl.clone();
             let scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1050,14 +1284,24 @@ impl RenderScene {
                     primitive: wgpu::PrimitiveState {
                         topology: wgpu::PrimitiveTopology::TriangleList,
                         strip_index_format: None,
-                        front_face: FRONT_FACE,
+                        front_face: desc.front_face,
                         cull_mode: desc.cull.face(),
-                        // No depth buffer exists: never discard geometry for its depth (spec 04 Q4).
+                        // Without a depth buffer, never discard geometry for its depth (spec 04 Q4).
                         unclipped_depth: unclipped,
                         polygon_mode: wgpu::PolygonMode::Fill,
                         conservative: false,
                     },
-                    depth_stencil: None,
+                    depth_stencil: depth.map(|d| wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(d.write),
+                        depth_compare: Some(if d.test {
+                            wgpu::CompareFunction::LessEqual
+                        } else {
+                            wgpu::CompareFunction::Always
+                        }),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
                         module: &shader.module,
@@ -1221,6 +1465,14 @@ impl RenderScene {
     /// Rebuild bind groups, hazard copies, segments and bundles. Call after
     /// any target reallocation or sampler change (event-driven, not per frame).
     pub fn rebuild_bindings(&mut self, ctx: &GpuContext) -> Result<()> {
+        // Depth buffers follow their target's size.
+        for i in 0..self.depths.len() {
+            let target = self.depths[i].target;
+            let size = self.targets.get(target).size();
+            if self.depths[i].size != size {
+                self.depths[i] = create_depth(ctx, target, size);
+            }
+        }
         // Hazards: a pass sampling its own destination reads a copy (spec 04 §24.6).
         for i in 0..self.passes.len() {
             let desc = &self.passes[i].desc;
@@ -1311,6 +1563,7 @@ impl RenderScene {
                 segments.push(Segment::Render {
                     target,
                     clear,
+                    depth: None,
                     items: passes.into_iter().map(Item::Pass).collect(),
                 });
             }
@@ -1357,6 +1610,16 @@ impl RenderScene {
             }
         }
         flush(&mut cur, &mut segments);
+        // Depth attachments: the first render pass of the frame on a target clears its depth.
+        let mut seen: Vec<usize> = Vec::new();
+        for seg in &mut segments {
+            if let Segment::Render { target, depth, .. } = seg
+                && let Some(d) = self.depths.iter().position(|d| d.target == *target)
+            {
+                *depth = Some((d, !seen.contains(&d)));
+                seen.push(d);
+            }
+        }
         self.segments = segments;
     }
 
@@ -1369,11 +1632,20 @@ impl RenderScene {
             },
             _ => None,
         };
+        let mesh = match pass.desc.geometry {
+            Geometry::Mesh(m) => match self.meshes.get(m.0 as usize) {
+                Some(m) if m.index_count > 0 => Some(m),
+                _ => return,
+            },
+            _ => None,
+        };
         r.pipeline(&pass.pipeline);
         r.bind_group(0, &self.uniform_bg, &[pass.uniform.map_or(0, |u| u.offset)]);
         r.bind_group(1, &pass.bind_groups[pass.variant], &[]);
         if let Some(s) = stream {
             r.vertex_buffer(0, s.vertices.slice(..));
+        } else if let Some(m) = mesh {
+            r.vertex_buffer(0, m.vertices.slice(..));
         } else if let Geometry::Skinned { vertices, skin, .. } = pass.desc.geometry {
             // Both buffers start at the mesh: its indices are relative to its first vertex.
             let start = self.dynbuf.vertex_offset() + vertices.first * VERTEX_SIZE;
@@ -1416,6 +1688,12 @@ impl RenderScene {
                     r.draw_indexed(0..s.index_count, 0);
                 }
             }
+            Geometry::Mesh(_) => {
+                if let Some(m) = mesh {
+                    r.index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint16);
+                    r.draw_indexed(0..m.index_count, 0);
+                }
+            }
         }
     }
 
@@ -1429,8 +1707,14 @@ impl RenderScene {
                 Segment::Render {
                     target,
                     clear,
+                    depth,
                     items,
                 } => {
+                    let depth_stencil = depth.map(|_| wgpu::RenderBundleDepthStencil {
+                        format: DEPTH_FORMAT,
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    });
                     let mut out = Vec::new();
                     let mut run: Vec<usize> = Vec::new();
                     let close_run =
@@ -1444,7 +1728,7 @@ impl RenderScene {
                                 &wgpu::RenderBundleEncoderDescriptor {
                                     label: Some("lumenwall.bundle"),
                                     color_formats: &[Some(RT_FORMAT)],
-                                    depth_stencil: None,
+                                    depth_stencil,
                                     sample_count: 1,
                                     multiview: None,
                                 },
@@ -1477,6 +1761,7 @@ impl RenderScene {
                     new_segments.push(Segment::Render {
                         target,
                         clear,
+                        depth,
                         items: out,
                     });
                 }
@@ -1628,9 +1913,23 @@ impl RenderScene {
                 Segment::Render {
                     target,
                     clear,
+                    depth,
                     items,
                 } => {
                     let rt = self.targets.get(*target);
+                    let depth_stencil_attachment =
+                        depth.map(|(d, clear)| wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.depths[d].view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: if clear {
+                                    wgpu::LoadOp::Clear(1.0)
+                                } else {
+                                    wgpu::LoadOp::Load
+                                },
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        });
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: None,
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1642,7 +1941,7 @@ impl RenderScene {
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
-                        depth_stencil_attachment: None,
+                        depth_stencil_attachment,
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
