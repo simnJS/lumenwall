@@ -294,9 +294,12 @@ impl TextSink for QueuedText {
 /// Inputs of one frame.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameState<'a> {
-    /// Seconds since start (kept in f64, spec 04 Q24).
+    /// Running time of the scene in seconds (`g_Time`, `engine.runtime`): counted from its first
+    /// frame, pauses excluded, kept in f64 (spec 04 Q24). The live engine takes it from
+    /// `crate::clock::SceneClock`.
     pub time: f64,
-    /// Seconds since the previous rendered frame.
+    /// Seconds since the previous rendered frame (`engine.frametime`); one frame for the first
+    /// one, never a pause.
     pub dt: f32,
     pub daytime: f32,
     pub pointer: Pointer,

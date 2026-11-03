@@ -24,7 +24,8 @@ pub struct HeadlessOptions {
     pub frames: u32,
     /// Simulated frame rate (time step `1/fps`).
     pub fps: f32,
-    /// `g_Time` of the first frame.
+    /// `g_Time` of the first frame: the scene behaves as if it had been running that long
+    /// (its first step is still `1/fps`).
     pub start_time: f64,
     /// Frames written as PNG (indices into `0..frames`); empty = only the last one.
     pub save: Vec<u32>,
@@ -209,7 +210,9 @@ pub fn render_headless(
             &mut wp.project,
             &FrameState {
                 time,
-                dt: if i == 0 { time as f32 } else { dt },
+                // One frame, the first one too: `start_time` stands for a scene that has been
+                // running that long (`crate::clock`), not for a first step of that length.
+                dt,
                 daytime: 0.5,
                 pointer: Pointer {
                     position: pointer.position,

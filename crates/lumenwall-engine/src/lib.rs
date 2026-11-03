@@ -14,6 +14,7 @@
 mod assets;
 mod audio;
 mod bloom;
+mod clock;
 mod engine;
 mod headless;
 mod model3d;

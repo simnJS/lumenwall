@@ -82,6 +82,14 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   keeps its image until the page's first frame).
 - One scene per target, updated and encoded once per loop iteration even when several outputs
   show it; each output then composes it with its own scaling and clamp.
+- Scene time (`clock.rs`, `SceneClock`, one per scene, read as `FrameState::time`/`dt`): the
+  running time of the wallpaper, started at one frame (`1/fps`) on its first frame, advanced by
+  the real time between frames capped at max(0.25 s, 2/fps), kept in f64 until upload. It feeds
+  `g_Time`, `engine.runtime`/`frametime`, timers, particles, puppets, animated textures and camera
+  paths. A wallpaper applied to a daemon that has been running for hours therefore starts at 0
+  with a one-frame first step (the engine-wide clock gave it the daemon's age as time and as first
+  `frametime`), pauses are not counted, and the same seconds give the same state at any frame
+  rate. A rebuild (GPU restore) starts a new clock, like everything else it restarts.
 - Scripts with per-frame work (`update`, timers, audio buffers, text layers, queued events) keep
   frames coming, but a frame is only redrawn when a script changed something: unchanged writes
   report no change, and the frame globals (`g_Time`, pointer, spectrum) are not rewritten when no
@@ -400,6 +408,16 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
 - Puppet layer clocks advance by at most 0.25 s per frame: the engine clock keeps running while
   an output is paused, and spec 08 §9.3 excludes the pause (QO-P18). Animations only slow down
   below 4 fps.
+- Scene time per wallpaper, pauses excluded (Frame loop, `clock.rs`; rule 5): spec 04 §2.1 and
+  spec 03 §13.1 describe the reference's process-wide clock (origin at video start, never reset on
+  a wallpaper change, `dt = g_Time` on the first frame, the pause included in the next `dt`).
+  Wallpaper Engine documents `engine.runtime` as the time the wallpaper has been running and
+  `frametime` as the duration of the last frame, and spec 06 §6.1 stops `t_g` during a pause. In
+  the reference one process runs one wallpaper, so its first `dt` is the load time; in a daemon it
+  was the uptime, and Dino Run's dinosaur (moved by `speed × frametime`) left the screen. No
+  rollover (spec 04 §2.1); the `f32` of `g_Time` only grows with the time the wallpaper is on
+  screen since its last build. Each step is capped at max(0.25 s, 2/fps): a scene that sleeps
+  between pointer events advances by at most that much per event.
 - Particles of a perspective scene (spec 09 §3.9): `lumenwall-particles` is unchanged and keeps
   the Y inversions of spec 05 §2.2 (QO-3D-33). The engine gives the system a zero-sized scene
   (no recentring of its origin) and a world matrix `T(origin)·Rz·Ry·Rx·S(scale)·Sc(1, −1, 1)`: the
@@ -538,7 +556,11 @@ previous build without particles (the clock text of 3044659344 aside).
   the blending contract between `lumenwall-scene` and `lumenwall-render` (`tests/blend_contract.rs`),
   SceneScript on in-memory scenes (`script::tests`: setting writes and change reports, no change
   for constant scripts, `applyUserProperties`, layer lookup, effect and constant scripts, text
-  sink, transforms, zero allocation per frame).
+  sink, transforms, zero allocation per frame), the scene clock (`clock::tests`: one-frame first
+  step whatever the uptime, pauses capped, same running time at 30 and 144 fps).
+- `cargo test -p lumenwall-engine -- --ignored` also runs `tests/scene_clock.rs`: Dino Run's
+  dinosaur, drawn alone, stands at the same place after one simulated second at 30 fps from
+  t = 1 and at 144 or 30 fps from t = 5000 and 100 000 (it was off screen from t = 30 on).
 - `cargo test -p lumenwall-engine -- --ignored` (GPU + content of `docs/TESTING.md`): the reference
   wallpaper renders with real shaders (0 stand-in, bloom included), 1 image, 4 particle systems,
   live rain; the colour LUTs of `materials/lut` load as 32³ volume textures (`tests/volume_lut.rs`);
@@ -556,7 +578,9 @@ previous build without particles (the clock text of 3044659344 aside).
   at the output size; corsair_o_tron loads with its quoted property values.
 - `cargo run -p lumenwall-engine --example render_png -- <ids>`: visual checks.
 - `cargo run -p lumenwall-engine --example render_png -- <ids>`: visual checks (`--start T` sets
-  the scene time, `--audio L` feeds a constant spectrum to audio-reactive scenes).
+  the scene time of the first frame, as if the scene had been running that long; every step
+  lasts `1/fps`, the first one too. `--audio L` feeds a constant spectrum to audio-reactive
+  scenes).
 - `model3d::tests`: vectors M-1, M-2, N-1, C-1 to C-3 and R-1 of spec 09 §4.5, camera fade
   ramps and shake determinism.
 - `tests/scene3d_content.rs` (`--ignored`, GPU + `LUMENWALL_WE_ASSETS`): the nine installed 3D

@@ -11,7 +11,8 @@ pub struct SpriteSheet {
     pub rows: u32,
     /// `F`.
     pub frames: u32,
-    /// `T_anim`, seconds per cycle.
+    /// `T_anim`, seconds per cycle as stored in the texture. Not used for timing: a particle
+    /// plays its sheet over its own lifetime (Wallpaper Engine documentation).
     pub duration: f32,
 }
 

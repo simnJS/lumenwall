@@ -5,7 +5,8 @@
 //!   --size WxH         output size (default 1920x1080)
 //!   --frames N         frames simulated (default 1)
 //!   --fps F            simulated frame rate (default 30)
-//!   --start T          scene time of the first frame in seconds (default 1)
+//!   --start T          scene time of the first frame in seconds (default 1); every step,
+//!                      the first one included, lasts 1/fps
 //!   --audio L          constant audio spectrum level in every band (default 0)
 //!   --save a,b,c       frames written (default: the last one)
 //!   --out DIR          output folder (default target/agent-integration/shots)

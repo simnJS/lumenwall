@@ -36,16 +36,16 @@ fn dino_run_coins_and_pickup_particles() {
         return;
     }
     // 686×386 = the 343×193 scene ×2; the pointer rests on the dinosaur, which jumps at
-    // frame 200 and meets the first coin (created at 3 s, 50 px/s from x = 360).
+    // frame 230 and meets the first coin (created after 3 s of frames, 50 px/s from x = 360).
     let opts = HeadlessOptions {
         width: 686,
         height: 386,
-        // The pickup happens around frame 212; its particles live 0.5 to 1 s.
-        frames: 225,
-        save: vec![130, 216],
+        // The pickup happens around frame 242; its particles live 0.5 to 1 s.
+        frames: 255,
+        save: vec![160, 246],
         out_dir: out("lumenwall-dino-run"),
         pointer: Some(Vec2::new(214.0, 340.0)),
-        clicks: vec![200],
+        clicks: vec![230],
         ..HeadlessOptions::default()
     };
     let r = render_headless(&dino, &assets, &opts).expect("render");

@@ -136,7 +136,8 @@ struct SceneSlot {
     runtime: SceneRuntime,
     /// Loop iteration of the last update/encode (shared by span outputs).
     updated_at: u64,
-    last_time: f64,
+    /// The scene's own time, started on its first frame (`crate::clock`).
+    clock: crate::clock::SceneClock,
 }
 
 /// The renderer of one target.
@@ -1413,13 +1414,10 @@ impl Engine {
         let wp = &mut self.wallpapers[target];
         let fresh = slot.updated_at != r.iteration;
         if fresh {
-            let time = r.clock.elapsed().as_secs_f64();
-            let dt = if slot.last_time == 0.0 {
-                time as f32
-            } else {
-                (time - slot.last_time) as f32
-            };
-            slot.last_time = time;
+            let (time, dt) = slot.clock.tick(
+                r.clock.elapsed().as_secs_f64(),
+                1.0 / f64::from(self.plan.fps.max(1)),
+            );
             r.audio.update(dt, false);
             let o = &r.outputs[oi];
             let mut screen = ScreenState {
@@ -1679,7 +1677,7 @@ fn build_renderer(
     Ok(Renderer::Scene(Box::new(SceneSlot {
         runtime,
         updated_at: u64::MAX,
-        last_time: 0.0,
+        clock: crate::clock::SceneClock::new(),
     })))
 }
 

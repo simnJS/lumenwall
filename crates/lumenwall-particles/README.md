@@ -10,7 +10,8 @@ Clean-room implementation built only from:
 - `specs/05-particules.md`, body and **amendments of 2026-11-03 (A1–A7)**, the single source of
   behaviour;
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`;
-- public Rust documentation (glam, serde_json, criterion).
+- public Rust documentation (glam, serde_json, criterion);
+- Wallpaper Engine's public particle documentation (sprite sheet timing, see Deviations).
 
 Real Wallpaper Engine files (`docs/TESTING.md`) are only read at run time by `#[ignore]` tests and
 by one bench case; nothing from them is copied into the repository.
@@ -96,7 +97,7 @@ Boids are quadratic inside a cluster by nature; WE presets use them on 16–250 
 
 ## Tests
 
-- `cargo test -p lumenwall-particles`: 82 unit tests (every initializer, operator, emitter mode,
+- `cargo test -p lumenwall-particles`: 84 unit tests (every initializer, operator, emitter mode,
   collision, blending, remap, sequence, child event kind, pre-simulation, pool rounding vectors,
   control point overrides/velocities, value forms, noise hand values), plus the allocation test.
 - `cargo test -p lumenwall-particles -- --ignored` (local content of `docs/TESTING.md`):
@@ -123,6 +124,14 @@ Boids are quadratic inside a cluster by nature; WE presets use them on 16–250 
   `false`; other property types ignore it (spec 02 Q8), a numeric condition reads like a combo
   value (Q30). Without it, `"visible": {"user": {"name": "style", "condition": "0"}}` read the
   combo text `"0"` as the number 0 and hid every system of shimmering_particles.
+- Sprite sheets in `sequence` mode (the default) play over each particle's lifetime,
+  `fmod(life × F × sequencemultiplier, F)`, whatever the sheet duration `T_anim` (rule 5). Spec 05
+  §10 times them by `T_anim`; Wallpaper Engine's particle documentation states that the whole
+  animation is stretched over the lifetime of each particle and that the duration has no effect
+  on particles. With `T_anim`, Desert at night (1960765686) looped its 64-frame, 1 s fog sheet every
+  second over 6 to 10 s lifetimes: the sand storm ran 6 to 10 times too fast.
+  `SpriteSheet::duration` is still read but no longer used for timing. `same_state_at_30_and_144_fps`
+  checks a system at both rates (age, sheet frame, position, alpha after the same seconds).
 
 ## Choices where the amendments leave room
 
@@ -148,7 +157,8 @@ Boids are quadratic inside a cluster by nature; WE presets use them on 16–250 
    A7.5 every provisional default (`defaults.rs`), A7.6 system flags bits 1/2, A7.7 control point
    bits 4/16 and `parentcontrolpoint`, A7.9 oscillator frequency unit — all implemented as the
    amendments state, pending calibration on real Wallpaper Engine.
-3. `t_g` is taken as `f32` (`g_Time`): `dt` loses precision after long uptimes (≈ 8 ms resolution
-   after a day). Depends on the clock spec.
+3. `t_g` is taken as `f32` (`g_Time`): `dt` loses precision after long running times (≈ 8 ms
+   resolution after a day). The engine's scene clock (`lumenwall-engine`, `clock.rs`) starts with
+   each wallpaper and leaves pauses out, so this means a day on screen without a rebuild.
 4. Quad/ribbon expansion is done by the WE shaders `genericparticle` / `genericropeparticle`
    (§16.1 item 18); the renderer must translate them, or a spec of the expansion is needed.

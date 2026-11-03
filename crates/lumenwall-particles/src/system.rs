@@ -793,17 +793,13 @@ impl ParticleSystem {
                 }
             }
             AnimationMode::Sequence => {
-                let t = self.sheet.duration;
-                if t > 0.0 {
-                    for (frame, &age) in p.frame.iter_mut().zip(p.age.iter()) {
-                        *frame = ((age * speed) % t / t * f) % f;
-                    }
-                } else {
-                    for ((frame, &age), &lifetime) in
-                        p.frame.iter_mut().zip(p.age.iter()).zip(p.lifetime)
-                    {
-                        *frame = (life(age, lifetime) * f * speed) % f;
-                    }
+                // lumenwall: Wallpaper Engine documents that a particle plays its whole sheet over
+                // its own lifetime and that the sheet duration has no effect on particles (spec 05
+                // §10 timed it by `T_anim`: a 1 s, 64-frame fog sheet looped every second).
+                for ((frame, &age), &lifetime) in
+                    p.frame.iter_mut().zip(p.age.iter()).zip(p.lifetime)
+                {
+                    *frame = (life(age, lifetime) * f * speed) % f;
                 }
             }
         }
@@ -1169,14 +1165,20 @@ mod tests {
         };
         let base = json!({"emitter": [{"name": "boxrandom", "rate": 0, "instantaneous": 1}],
                           "initializer": [{"name": "lifetimerandom", "min": 4, "max": 4}]});
-        // sequence with T_anim = 2: frame = fmod(fmod(age·k, 2) / 2 · 4, 4).
+        // sequence: fmod(life · F · k, F), the sheet duration (2 s) plays no part.
         let mut def = base.clone();
         def["sequencemultiplier"] = json!(2.0);
         let mut s = system(def, json!({}), sheet);
         s.update(&frame(1.0));
-        s.update(&frame(1.1)); // age 0.1
+        s.update(&frame(1.1)); // age 0.1, life 0.025
         let f = s.particles().frames[0];
-        assert!((f - (0.2f32 % 2.0) / 2.0 * 4.0).abs() < 1e-6, "{f}");
+        assert!((f - 0.025 * 4.0 * 2.0).abs() < 1e-6, "{f}");
+        for k in 2..=26 {
+            s.update(&frame(1.0 + k as f32 * 0.1));
+        }
+        // age 2.6, life 0.65: 5.2 frames → wrapped to 1.2.
+        let f = s.particles().frames[0];
+        assert!((f - 1.2).abs() < 1e-4, "{f}");
         // once: min(life · F · k, F - 1).
         let mut def = base.clone();
         def["animationmode"] = json!("once");
@@ -1210,6 +1212,48 @@ mod tests {
         assert!((0.0..4.0).contains(&f0) && f0.fract() == 0.0);
         s.update(&frame(1.2));
         assert_eq!(s.particles().frames[0], f0);
+    }
+
+    /// The same simulated duration at 30 and 144 frames per second ends in the same state: a
+    /// 64-frame, 1 s sheet (Desert at night's fog) is spread over the 8 s lifetime, and motion,
+    /// drag, fades and oscillators follow seconds, not frames.
+    #[test]
+    fn same_state_at_30_and_144_fps() {
+        let sheet = SpriteSheet {
+            columns: 8,
+            rows: 8,
+            frames: 64,
+            duration: 1.0,
+        };
+        let def = json!({
+            "emitter": [{"name": "boxrandom", "rate": 0, "instantaneous": 1}],
+            "initializer": [{"name": "lifetimerandom", "min": 8, "max": 8},
+                            {"name": "velocityrandom", "min": "100 50 0", "max": "100 50 0"}],
+            "operator": [{"name": "movement", "drag": 0.5, "gravity": "0 -20 0"},
+                         {"name": "alphafade", "fadeintime": 0.5, "fadeouttime": 0.5},
+                         {"name": "oscillatealpha", "frequencymin": 3, "frequencymax": 3}]});
+        let run = |fps: f32| {
+            let mut s = system(def.clone(), json!({}), sheet);
+            let n = (4.0 * fps).round() as u32;
+            for i in 0..=n {
+                s.update(&frame(1.0 + i as f32 / fps));
+            }
+            let p = s.particles();
+            (p.ages[0], p.frames[0], p.positions[0], p.alphas[0])
+        };
+        let (a30, f30, p30, al30) = run(30.0);
+        let (a144, f144, p144, al144) = run(144.0);
+        // The particle is born on the first simulated frame: one frame of age apart at most.
+        assert!((a30 - a144).abs() < 1.0 / 30.0, "{a30} {a144}");
+        assert!((a144 - 4.0).abs() < 1.0 / 30.0, "{a144}");
+        // Half its life: frame 32, not 4 s × 64 frames per second.
+        assert!((f144 - 32.0).abs() < 0.5, "{f144}");
+        assert!(
+            (f30 - f144).abs() < 64.0 / 8.0 / 30.0 + 1e-3,
+            "{f30} {f144}"
+        );
+        assert!((p30 - p144).length() < 5.0, "{p30} {p144}");
+        assert!((al30 - al144).abs() < 0.1, "{al30} {al144}");
     }
 
     #[test]
