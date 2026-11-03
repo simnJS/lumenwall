@@ -1,4 +1,5 @@
-//! FFmpeg demuxing and decoding (feature `ffmpeg`), raw `ffmpeg-sys-next` FFI.
+//! FFmpeg demuxing and decoding (feature `ffmpeg`), raw `ffmpeg-sys-next` FFI through [`sys`]
+//! (FFmpeg's libraries are opened at the first video on Linux).
 //!
 //! [`Source`] owns the demuxer and the decoder and runs on the decoding thread (it is opened
 //! on the caller's thread, which decodes the first frame to size the GPU resources). It
@@ -8,6 +9,7 @@
 
 pub(crate) mod hw;
 mod io;
+pub(crate) mod sys;
 pub(crate) mod vulkan;
 
 use std::ffi::{CStr, CString};
@@ -17,8 +19,8 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Once, PoisonError};
 
-use ffmpeg_sys_next as ff;
 use lumenwall_render::yuv::{ChromaPlanes, PlaneDepth, YuvColor, YuvLayout, YuvMatrix, YuvRange};
+use sys as ff;
 
 use crate::pacing::LoopTimeline;
 use crate::select::AdapterHint;
@@ -957,6 +959,32 @@ pub(crate) fn display_size(w: u32, h: u32, sar: f64) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every FFmpeg function this crate calls goes through the run-time table of `sys`: a call
+    /// to a function missing there would link FFmpeg to the executable again.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_ffmpeg_call_is_loaded_at_run_time() {
+        sys::same_signatures();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, _) in text.match_indices("ff::") {
+                let name: String = text[i + 4..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let function = name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && text[i + 4 + name.len()..].trim_start().starts_with('(');
+                if function && !sys::LOADED.contains(&name.as_str()) {
+                    missing.push(format!("{}: {name}", path.display()));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "not in sys's table: {missing:?}");
+    }
 
     fn fmt(f: ff::AVPixelFormat) -> c_int {
         f as c_int

@@ -98,3 +98,13 @@ particles off, frames 0 and 44) stay identical to the pixel after each change.
 | `malloc_trim(0)` (glibc) after a wallpaper is unloaded and after the GPU release, 0.8–2.6 ms each | back to the scene after the video: RSS 249 MiB; GPU released: 3018340632 117 MiB, 3463520581 131 MiB | 219–220 MiB; 101 MiB and 110 MiB |
 | Image composites A/B at the image size only when the chain writes them or a material names them, 1×1 otherwise (pixels identical on the 24 installed scenes) | tracked GPU memory, headless 1920×1080: 3463520581 515 MiB, 1960765686 380 MiB, 3372348904 316 MiB, 3089056751 253 MiB, razer_bedroom 206 MiB; VRAM in the window (nvidia-smi): 3463520581 642 MiB, 1960765686 438 MiB, 3372348904 415 MiB, 3018340632 170 MiB | 384, 190, 194, 141, 141 MiB; 514, 247, 257, 170 MiB |
 | Vulkan loader restricted to the driver of the GPU used last time (`VK_LOADER_DRIVERS_SELECT` set by `main` from `~/.cache/lumenwall/vulkan-driver`; every driver again when it finds no adapter or another one). Launch of 3018340632 | instance 71–75 ms, adapter + device 146–183 ms, exec → scene loaded 347–401 ms, RSS 194 MiB, 176 shared objects; GPU released: RSS 101 MiB | instance 47–49 ms, adapter + device 102–123 ms, exec → scene loaded 308–374 ms, RSS 144–145 MiB, 167 shared objects; GPU released: RSS 54–55 MiB |
+| FFmpeg opened with `dlopen` at the first video (Linux; no `DT_NEEDED` left, 40 functions through a table), 13–15 ms then | `ldd`: 148 libraries; `--version` 17.8–20.3 ms (median); scene 3018340632: RSS 144–145 MiB, 167 shared objects mapped | `ldd`: 26 libraries; `--version` 2.2–2.5 ms; RSS 120 MiB, 49 shared objects; video hot switch and video start unchanged (zero copy) |
+
+The five together, baseline build against the last one, runs interleaved:
+
+| Situation | Baseline | Now |
+|---|---|---|
+| Launch of 3018340632 | instance 71–78 ms, adapter + device 124–199 ms, exec → scene loaded 333–424 ms, RSS 192–193 MiB, 176 shared objects, `--version` 17.7 ms | 36–39 ms, 109–142 ms, 282–370 ms, RSS 119–120 MiB, 49 shared objects, 2.2 ms |
+| Scene → video → scene over IPC | video: 9.7–10.3 % CPU, 1780–1960 wake-ups/s, RSS 568 MiB, VRAM 675 MiB; scene again: RSS 304 MiB, VRAM 258 MiB; switch 185–208 ms | 2.2–2.3 %, 610–830 wake-ups/s, RSS 203 MiB, VRAM 222 MiB; RSS 165–172 MiB, VRAM 174 MiB; 231 ms (the first video of a process loads FFmpeg, 13–15 ms) |
+| GPU released after a pause | 3018340632 RSS 117 MiB (163 shared objects), 3463520581 130 MiB | 30 MiB (35), 38 MiB |
+| VRAM in the window | 3463520581 642 MiB, 1960765686 436 MiB | 514 MiB, 245 MiB |

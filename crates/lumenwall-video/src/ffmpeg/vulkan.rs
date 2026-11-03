@@ -21,8 +21,8 @@
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::mem::offset_of;
 
+use super::sys as ff;
 use ash::vk;
-use ffmpeg_sys_next as ff;
 use lumenwall_render::GpuContext;
 
 use super::av_err;

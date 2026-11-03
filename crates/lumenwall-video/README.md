@@ -30,10 +30,22 @@ No upstream code, fork or third-party Wallpaper Engine reimplementation was read
 
 Every hardware path needs raw FFI (the safe wrappers of either crate do not cover them), so
 Lumenwall uses the raw `ffmpeg-sys-next` crate alone (not the `ffmpeg-next` wrapper), with RAII
-wrappers of its own. FFmpeg is linked **dynamically** (`ldd lumenwall`: `libavcodec.so.62`,
-`libavformat.so.62`, `libavutil.so.60`, `libswscale.so.9`); `build.rs` also rejects
+wrappers of its own. FFmpeg stays a separate shared library; `build.rs` also rejects
 `FFMPEG_STATIC`/`PKG_CONFIG_ALL_STATIC`. The WTFPL exception was already prepared in
 `deny.toml` (legal confirmation still pending there).
+
+**Loaded at the first video (Linux).** FFmpeg's libraries pull ≈ 135 other libraries; linked to
+the executable they were mapped at every start, scenes included (24.9 MiB RSS, 12–18 ms of
+start-up). `ffmpeg::sys` re-exports the types and constants of `ffmpeg-sys-next` and replaces
+its 40 functions with wrappers over a table that `dlopen`/`dlsym` (libc, no new crate) fill on
+the first call of `load_decoder` (`VideoPlayer::open`, and lumenwall-engine's support check of
+a video wallpaper): `libavutil.so.60`, `libswscale.so.9`, `libavcodec.so.62`,
+`libavformat.so.62`, the majors of the headers the bindings come from, never closed. The
+executable has no `DT_NEEDED` on FFmpeg (`readelf -d lumenwall`: libasound, libpulse, libgcc_s,
+libm, libc), so it also starts where FFmpeg is missing (video wallpapers then fail with the
+loader's message). Loading takes 13–15 ms at the first video. The wrappers have the bindings'
+signatures (checked at compile time by a test) and a test fails if a call bypasses the table.
+On Windows the functions stay linked through the import libraries of the DLLs.
 
 ## Decoding paths (chosen at open, automatic fallback)
 
@@ -120,7 +132,8 @@ RGB, gray, big-endian) are converted to 8-bit 4:4:4 by libswscale (warning logge
   more reason to prefer zero copy.
 - Offline throughput (decode + convert as fast as possible): zero copy and NVDEC 4.0× real
   time (decoder-bound), FFmpeg Vulkan + copy 3.8×, software 2.6×.
-- Open time: 65–81 ms (zero copy), 200–240 ms (CUDA context creation).
+- Open time: 65–81 ms (zero copy), 200–240 ms (CUDA context creation); the first video of a
+  process also loads FFmpeg (13–15 ms).
 - Colors: PSNR 58.5 dB against libswscale's accurate BT.709 limited → RGB conversion of the
   same frame (identical for zero copy and copy paths); AMD RADV zero copy 57.5 dB.
 

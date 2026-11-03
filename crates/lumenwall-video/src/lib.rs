@@ -184,3 +184,18 @@ pub fn map_file(path: &Path) -> std::io::Result<VideoBytes> {
 pub fn is_supported() -> bool {
     cfg!(feature = "ffmpeg")
 }
+
+/// Loads the decoder: on Linux the FFmpeg shared libraries are opened at the first video,
+/// not at start-up (they pull ≈ 135 libraries, see `ffmpeg::sys`). Done by
+/// [`VideoPlayer::open`]; callers may do it earlier to report a missing FFmpeg before
+/// releasing anything. Later calls return the first outcome.
+pub fn load_decoder() -> Result<(), VideoError> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        ffmpeg::sys::load().map_err(VideoError::Libraries)
+    }
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        Err(VideoError::Unsupported)
+    }
+}

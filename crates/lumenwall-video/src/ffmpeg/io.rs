@@ -5,7 +5,7 @@
 use std::ffi::{c_int, c_void};
 use std::ptr;
 
-use ffmpeg_sys_next as ff;
+use super::sys as ff;
 
 use crate::VideoBytes;
 
