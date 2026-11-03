@@ -1,5 +1,5 @@
 //! What the updater remembers between runs: when it last asked, the ETag of each
-//! answer (so an unchanged one costs no request quota), GitHub's rate-limit deadline,
+//! answer (an unchanged one comes back as an empty `304`), GitHub's rate-limit deadline,
 //! and the update just installed. A small JSON file in the cache directory; deleting
 //! it only means the next start checks again.
 

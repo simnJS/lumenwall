@@ -7,7 +7,7 @@
 //!    (Flatpak, Snap, a distribution, Scoop, winget…) installed it, when its folder is
 //!    read-only, for development builds, or when the build has no release key.
 //! 2. [`check`]: one request to the GitHub Releases API, with `If-None-Match` so an
-//!    unchanged answer costs no quota. [`State::due`] limits automatic checks to one
+//!    unchanged answer is an empty `304`. [`State::due`] limits automatic checks to one
 //!    every [`CHECK_INTERVAL`]; nothing here runs on a timer.
 //! 3. [`download`]: the archive for this platform, its minisign signature and the signed
 //!    `SHA256SUMS`, verified with the public key compiled into the binary
