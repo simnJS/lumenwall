@@ -39,4 +39,8 @@ See [docs/CI.md](docs/CI.md) for the full set of checks and [docs/TESTING.md](do
 
 ## License
 
-Proprietary, all rights reserved. See [LICENSE](LICENSE).
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Lumen by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+Contributors must follow the clean-room rules in [CLEANROOM.md](CLEANROOM.md): never copy or adapt code from GPL or AGPL Wallpaper Engine reimplementations.

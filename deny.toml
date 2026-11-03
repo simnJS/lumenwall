@@ -1,4 +1,4 @@
-# cargo-deny policy for Lumen (proprietary, closed-source, sold).
+# cargo-deny policy for Lumen (open source, MIT OR Apache-2.0). Dependencies must stay permissive so the whole binary can ship under those terms.
 # Run: `cargo deny check` (CI runs the same, see docs/CI.md).
 # Reference: https://embarkstudios.github.io/cargo-deny/
 
@@ -88,7 +88,7 @@ exceptions = [
     { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
-# Workspace crates are `publish = false` with `license = "LicenseRef-Proprietary"`.
+# Workspace crates are `publish = false` with `license = "MIT OR Apache-2.0"`.
 [licenses.private]
 ignore = true
 
