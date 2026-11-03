@@ -353,16 +353,16 @@ fn install_kind<'js, const K: u8>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> Result
         let sh = shared.clone();
         let get = move |p: Params<'_, 'js>| -> Result<JsValue<'js>> {
             let obj = this_ref::<K>(&sh, &p)?;
+            // we-doc: a layer member read is a copy (`let o = layer.origin; o.x += 1;
+            // layer.origin = o;`). Wallpaper Engine's own Dino Run keeps `initialPosition =
+            // thisLayer.origin` fixed while it moves the layer; a live view (spec 06 §6.4)
+            // would follow the layer and break its jump.
+            let view = (K != LAYER).then_some(Target::Member {
+                obj,
+                name: host_name,
+            });
             match sh.host_get(p.ctx(), obj, host_name)? {
-                Some(v) => to_js(
-                    p.ctx(),
-                    &sh,
-                    &v,
-                    Some(Target::Member {
-                        obj,
-                        name: host_name,
-                    }),
-                ),
+                Some(v) => to_js(p.ctx(), &sh, &v, view),
                 None => Ok(undefined(p.ctx())),
             }
         };

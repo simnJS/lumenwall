@@ -92,8 +92,8 @@ Orchestrator decisions (`// lumenwall:`):
 | `IInput`, `IConsole`, `ILocalStorage`, `shared`, `renderContext`, `thisObject`, `thisLayer` | ✅ |
 | `createScriptProperties` (`addSlider/Checkbox/Combo/Text/Color` + `addFile/Directory/TextInput`) | ✅ |
 | `IScene` properties; `getLayer`, `getLayerByID`, `getLayerCount`, `enumerateLayers`, `getLayerIndex` | ✅ |
-| `IScene.createLayer`, `destroyLayer`, `sortLayer`, `getInitialLayerConfig`, `get/setCameraTransforms`, `getAnimation`, `createModelData`, `destroyModelData` | 🔌 |
-| `ILayer` properties (all interfaces it extends, `instance`) | 🔌 live vectors |
+| `IScene.createLayer`, `destroyLayer`, `sortLayer`, `getInitialLayerConfig`, `get/setCameraTransforms`, `getAnimation`, `createModelData`, `destroyModelData` | 🔌 (layers: implemented by `lumenwall-engine`) |
+| `ILayer` properties (all interfaces it extends, `instance`) | 🔌 copies (sub-objects: live vectors) |
 | `ILayer` methods: transforms, `lookAt*`, parenting, attachments, bones, blend shapes, animation layers, effects, sound and particle playback | 🔌 |
 | `IEffect`, `IMaterial`, `IAnimation`, `IAnimationLayer`, `ITextureAnimation`, `IVideoTexture`, `IParticleSystemInstance`, `IModelData`, `IAssetHandle` | 🔌 handle objects |
 | `CursorEvent`, `Media*Event` | ✅ built from host data |
@@ -128,6 +128,12 @@ brief:
 - `WEColor.rgb2hsv`/`hsv2rgb` use a normalized hue (see above); the spec uses degrees (Q-COL-1).
 - `thisScene` members and layer properties are writable through the host (Réf: read-only / ignored).
   Writes use the true member name. Unknown names on layer objects become ordinary properties.
+- A layer member read gives a copy (Réf §6.4: a live view): `let o = layer.origin; o.x += 1;`
+  changes nothing until `layer.origin = o`. Wallpaper Engine's Dino Run relies on it
+  (`initialPosition = thisLayer.origin` stays fixed while the dinosaur jumps). Members of
+  sub-objects (`instance.controlpointN`…), `thisScene` colours and `scriptProperties` stay live.
+- `ScriptEngine::handles_cursor(layer)` tells the host which layers have cursor handlers, so a
+  layer without them does not catch the cursor (see `lumenwall-engine`).
 - `engine.openUserShortcut` returns a boolean; `localStorage` follows `ILocalStorage` (any JSON
   value, `delete`, locations, persistence, 100 KB quota) and keeps `remove` and `null` for missing
   keys.

@@ -459,7 +459,14 @@ fn layer_objects() {
         Value::String("first".into())
     );
     assert_eq!(eval(&mut e, &mut h, "shared.l.size"), Value::Undefined);
+    // Member reads are copies (Wallpaper Engine): a component write needs a write-back.
     eval(&mut e, &mut h, "shared.l.origin.y = 5");
+    assert_eq!(h.member(l, "origin"), Some(&Value::Vec3([1.0, 2.0, 3.0])));
+    eval(
+        &mut e,
+        &mut h,
+        "let o = shared.l.origin; o.y = 5; shared.l.origin = o;",
+    );
     assert_eq!(h.member(l, "origin"), Some(&Value::Vec3([1.0, 5.0, 3.0])));
     eval(
         &mut e,

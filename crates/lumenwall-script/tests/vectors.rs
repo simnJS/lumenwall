@@ -551,26 +551,26 @@ fn text_form() {
 #[test]
 fn live_views_track_the_host_value() {
     let (mut e, mut h) = setup();
-    h.set_member(ObjectRef::Layer(1), "origin", Value::Vec3([1.0, 2.0, 3.0]));
+    h.set_member(ObjectRef::Scene, "clearcolor", Value::Vec3([1.0, 2.0, 3.0]));
     load(
         &mut e,
         &mut h,
         2,
         "alpha",
-        "shared.o = thisScene.getLayer(1).origin;",
+        "shared.o = thisScene.clearcolor;",
     )
     .unwrap();
     // Reads follow the host.
-    h.set_member(ObjectRef::Layer(1), "origin", Value::Vec3([4.0, 5.0, 6.0]));
+    h.set_member(ObjectRef::Scene, "clearcolor", Value::Vec3([4.0, 5.0, 6.0]));
     assert_vec(&v(&mut e, &mut h, "shared.o.copy()"), &[4.0, 5.0, 6.0]);
     // Component writes go to the host with the vector type.
     v(&mut e, &mut h, "shared.o.z = 9");
     assert_eq!(
-        h.member(ObjectRef::Layer(1), "origin"),
+        h.member(ObjectRef::Scene, "clearcolor"),
         Some(&Value::Vec3([4.0, 5.0, 9.0]))
     );
     // The view keeps its dimension; a Float value reads as a splat projection.
-    h.set_member(ObjectRef::Layer(1), "origin", Value::Float(2.0));
+    h.set_member(ObjectRef::Scene, "clearcolor", Value::Float(2.0));
     assert_vec(&v(&mut e, &mut h, "shared.o.copy()"), &[2.0, 2.0, 2.0]);
     assert_eq!(
         v(&mut e, &mut h, "shared.o.toString()"),
@@ -578,6 +578,41 @@ fn live_views_track_the_host_value() {
     );
     // A vanished target throws instead of crashing.
     h.members
-        .remove(&(ObjectRef::Layer(1), "origin".to_owned()));
+        .remove(&(ObjectRef::Scene, "clearcolor".to_owned()));
     assert_eq!(throws(&mut e, &mut h, "shared.o.x"), "TypeError");
+}
+
+#[test]
+fn layer_members_read_as_copies() {
+    // Wallpaper Engine's Dino Run keeps `initialPosition = thisLayer.origin` while it moves
+    // the layer through another copy, then writes it back.
+    let (mut e, mut h) = setup();
+    h.set_member(ObjectRef::Layer(1), "origin", Value::Vec3([1.0, 2.0, 3.0]));
+    load(
+        &mut e,
+        &mut h,
+        2,
+        "alpha",
+        "shared.initial = thisScene.getLayer(1).origin;
+         shared.moving = thisScene.getLayer(1).origin;
+         shared.moving.y += 10;",
+    )
+    .unwrap();
+    assert_eq!(
+        h.member(ObjectRef::Layer(1), "origin"),
+        Some(&Value::Vec3([1.0, 2.0, 3.0]))
+    );
+    v(
+        &mut e,
+        &mut h,
+        "thisScene.getLayer(1).origin = shared.moving",
+    );
+    assert_eq!(
+        h.member(ObjectRef::Layer(1), "origin"),
+        Some(&Value::Vec3([1.0, 12.0, 3.0]))
+    );
+    assert_vec(
+        &v(&mut e, &mut h, "shared.initial.copy()"),
+        &[1.0, 2.0, 3.0],
+    );
 }

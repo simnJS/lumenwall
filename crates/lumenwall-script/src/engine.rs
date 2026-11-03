@@ -880,6 +880,28 @@ impl ScriptEngine {
         self.dispatch(host, ev, layer, &Payload::Cursor(event));
     }
 
+    /// Whether an active property script of `layer` handles a cursor event (`cursorEnter`,
+    /// `cursorLeave`, `cursorMove`, `cursorDown`, `cursorUp` or `cursorClick`). The host hit
+    /// tests such layers only. No allocation.
+    pub fn handles_cursor(&self, layer: LayerId) -> bool {
+        let scripts = self.shared.scripts.borrow();
+        self.m1_keys.values().any(|id| {
+            let s = &scripts[id.0 as usize];
+            s.active
+                && s.layer == layer
+                && [
+                    Event::CursorEnter,
+                    Event::CursorLeave,
+                    Event::CursorMove,
+                    Event::CursorDown,
+                    Event::CursorUp,
+                    Event::CursorClick,
+                ]
+                .iter()
+                .any(|&e| s.handler(e).is_some())
+        })
+    }
+
     /// `mediaStatusChanged({enabled})`.
     pub fn media_status_changed(&mut self, host: &mut dyn SceneHost, enabled: bool) {
         self.dispatch(
