@@ -708,6 +708,50 @@ impl Project {
     }
 }
 
+/// An object added to a built scene by [`Project::add_object`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddedObject {
+    /// Its index in [`Scene::objects`].
+    pub index: ObjectIndex,
+    /// Positions of the settings it created, contiguous (see [`crate::Settings::values_in`]).
+    pub settings: std::ops::Range<usize>,
+}
+
+impl Project {
+    /// Adds an object after the scene was built (SceneScript `thisScene.createLayer`, which
+    /// Wallpaper Engine documents as taking a `scene.json` object configuration). `json` is
+    /// one object of the `objects` array; its models, materials and effects are loaded like
+    /// the file's (`file` names it in warnings and errors). The object is appended to
+    /// [`Scene::objects`], not registered by id (like the bloom object), and keeps no parent
+    /// link to the file's objects. Its render passes come from [`Project::image_passes`].
+    pub fn add_object(
+        &mut self,
+        src: &dyn AssetSource,
+        file: &str,
+        json: &[u8],
+    ) -> Result<AddedObject, LoadError> {
+        let raw: crate::raw::RawObject<'_> = crate::raw::parse_doc(file, json)?;
+        let first = self.settings.len();
+        let object =
+            self.loader_run(src, |l| l.object(file, raw).map_err(|e| e.into_load(file)))?;
+        let settings = first..self.settings.len();
+        let Some(scene) = self.scene.as_mut() else {
+            return Err(LoadError::NotAScene);
+        };
+        scene.objects.push(object);
+        Ok(AddedObject {
+            index: ObjectIndex(scene.objects.len() as u32 - 1),
+            settings,
+        })
+    }
+
+    /// Why an object cannot be set up by the default rules (§13.1-4, Q27), `None` when it can.
+    pub fn set_up_error(&self, idx: ObjectIndex, opts: &BuildOptions) -> Option<&'static str> {
+        let scene = self.scene.as_ref()?;
+        default_set_up(scene, scene.objects.get(idx.index())?, opts).err()
+    }
+}
+
 /// Set-up rules known to the model (§13.1-4, §13.4, Q27, Q31).
 fn default_set_up(scene: &Scene, obj: &Object, opts: &BuildOptions) -> Result<(), &'static str> {
     match &obj.kind {

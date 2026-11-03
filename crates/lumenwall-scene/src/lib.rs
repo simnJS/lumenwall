@@ -34,7 +34,7 @@ mod value;
 
 pub use asset::{AssetError, AssetSource};
 pub use build::{
-    BLOOM_MATERIALS, BloomInfo, BuildOptions, MAX_PARENT_DEPTH, PASSTHROUGH_MATERIAL,
+    AddedObject, BLOOM_MATERIALS, BloomInfo, BuildOptions, MAX_PARENT_DEPTH, PASSTHROUGH_MATERIAL,
     RenderTargetDesc, SceneBuild, TINT_MATERIAL, TargetFormat, Transform,
 };
 pub use error::{DataError, Expected, JsonPath, LoadError, NotAWallpaper, Segment, Warning};

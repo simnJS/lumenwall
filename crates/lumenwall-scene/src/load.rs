@@ -265,7 +265,7 @@ impl<'s> Loader<'s, '_> {
     // -----------------------------------------------------------------------------------------
     // objects (§7)
 
-    fn object(&mut self, file: &str, mut raw: RawObject<'_>) -> Result<Object, Fail> {
+    pub(crate) fn object(&mut self, file: &str, mut raw: RawObject<'_>) -> Result<Object, Fail> {
         require_object(raw.kind)?;
         let (id, name) = match (req_i32(&raw.id), req_str(&raw.name)) {
             (Ok(id), Ok(name)) => (id, name.to_owned()),
