@@ -107,7 +107,7 @@ pub struct App {
     pub previews: Previews,
     anim_tick: Option<Duration>,
     pub daemon: DaemonLink,
-    endpoint: Endpoint,
+    pub(crate) endpoint: Endpoint,
     pub targets: BTreeSet<String>,
     pub edits: HashMap<PathBuf, PropertyMap>,
     save_at: Option<(Instant, PathBuf)>,
@@ -138,11 +138,14 @@ pub struct App {
     _keep_alive: Option<Box<dyn std::any::Any + Send>>,
     pub ws: crate::workshop::state::WorkshopState,
     pub chrome: crate::chrome::Chrome,
+    pub updater: crate::updater::Updater,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Ws(crate::workshop::state::WsMsg),
+    /// Update checks, download, installation (`updater.rs`).
+    Updater(crate::updater::Msg),
     Scan(Arc<ScanEvent>),
     Thumb(ThumbEvent),
     Daemon(DaemonEvent),
@@ -298,6 +301,7 @@ impl App {
             _keep_alive: launch.keep_alive.take(),
             ws: crate::workshop::state::WorkshopState::new(&cfg),
             chrome: crate::chrome::Chrome::default(),
+            updater: crate::updater::Updater::new(),
             cfg,
         };
         // Engine stats are wanted while the window exists; the daemon samples
@@ -313,7 +317,8 @@ impl App {
             crate::platform::reduce_motion_async(),
             Message::ReduceMotion,
         );
-        (app, Task::batch([scan, theme, motion]))
+        let updates = app.updater_start();
+        (app, Task::batch([scan, theme, motion, updates]))
     }
 
     pub fn own_rss(&self) -> Option<u64> {
@@ -807,6 +812,7 @@ impl App {
             // Only there to keep frames coming while a micro-animation runs.
             Message::Frame => {}
             Message::Ws(m) => return self.ws_update(m),
+            Message::Updater(m) => return self.updater_update(m),
             Message::Housekeeping(now) => {
                 self.expire_toasts(now);
                 let ws_task = self.ws_housekeeping(now);
@@ -839,10 +845,12 @@ impl App {
                         // Event-driven reconnect: the user came back to the window.
                         self.daemon.reconnect();
                         // The system setting may have changed while the user was away.
-                        Task::perform(
+                        let motion = Task::perform(
                             crate::platform::reduce_motion_async(),
                             Message::ReduceMotion,
-                        )
+                        );
+                        // An update check, if one is due (at most every 12 hours).
+                        Task::batch([motion, self.updater_focus()])
                     }
                     window::Event::Unfocused => {
                         self.focused = false;

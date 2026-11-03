@@ -27,6 +27,7 @@ impl App {
             self.workshop_section(t),
             self.library_section(t),
             self.appearance_section(t),
+            self.updates_section(t),
             self.about_section(t),
             space().height(sp::XL),
         ]

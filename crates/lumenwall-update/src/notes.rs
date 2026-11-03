@@ -5,41 +5,78 @@
 //! repository's pull-request and compare URLs shrink to `#12` and `v0.1.0…v0.2.0`.
 //! The text is shown as text, never interpreted.
 
-/// Plain-text version of `markdown`, at most `max_lines` lines (an ellipsis line marks
-/// the cut).
-pub fn plain_text(markdown: &str, max_lines: usize) -> String {
+/// One line of release notes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    Heading(String),
+    /// A list item; `depth` 0 for top-level items.
+    Item {
+        depth: usize,
+        text: String,
+    },
+    Text(String),
+    /// Paragraph break (never first, last, or repeated).
+    Blank,
+}
+
+impl std::fmt::Display for Line {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Line::Heading(t) | Line::Text(t) => f.write_str(t),
+            Line::Item { depth, text } => write!(f, "{}• {text}", "  ".repeat(*depth)),
+            Line::Blank => Ok(()),
+        }
+    }
+}
+
+/// The lines of `markdown`, at most `max_lines` of them (then a `…` line marks the cut).
+pub fn lines(markdown: &str, max_lines: usize) -> Vec<Line> {
     let text = strip_comments(markdown);
-    let mut lines: Vec<String> = Vec::new();
+    let mut out: Vec<Line> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim_end();
         let indent = line.len() - line.trim_start().len();
         let body = line.trim_start();
         if body.is_empty() {
-            if lines.last().is_some_and(|l| !l.is_empty()) {
-                lines.push(String::new());
+            if out.last().is_some_and(|l| *l != Line::Blank) {
+                out.push(Line::Blank);
             }
             continue;
         }
         if body.chars().all(|c| matches!(c, '-' | '*' | '_' | ' ')) && body.len() >= 3 {
             continue;
         }
-        let out = if let Some(h) = heading(body) {
-            inline(h)
+        out.push(if let Some(h) = heading(body) {
+            Line::Heading(inline(h))
         } else if let Some(item) = ["* ", "- ", "+ "].iter().find_map(|m| body.strip_prefix(m)) {
-            format!("{}• {}", "  ".repeat((indent / 2).min(3)), inline(item))
+            Line::Item {
+                depth: (indent / 2).min(3),
+                text: inline(item),
+            }
         } else {
-            inline(body)
-        };
-        lines.push(out);
+            Line::Text(inline(body))
+        });
     }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+    while out.last() == Some(&Line::Blank) {
+        out.pop();
     }
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-        lines.push("…".into());
+    if out.len() > max_lines {
+        out.truncate(max_lines);
+        while out.last() == Some(&Line::Blank) {
+            out.pop();
+        }
+        out.push(Line::Text("…".into()));
     }
-    lines.join("\n")
+    out
+}
+
+/// Plain-text version of `markdown` (see [`lines`]).
+pub fn plain_text(markdown: &str, max_lines: usize) -> String {
+    lines(markdown, max_lines)
+        .iter()
+        .map(Line::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn strip_comments(s: &str) -> String {
@@ -170,6 +207,16 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(plain_text(&md, 20), want);
+        let l = lines(&md, 20);
+        assert_eq!(l[0], Line::Heading("What's Changed".into()));
+        assert_eq!(
+            l[4],
+            Line::Item {
+                depth: 1,
+                text: "nested detail".into()
+            }
+        );
+        assert_eq!(l[5], Line::Blank);
     }
 
     #[test]

@@ -3022,6 +3022,7 @@ dependencies = [
  "iced",
  "image",
  "lumenwall-ipc",
+ "lumenwall-update",
  "lz4_flex",
  "notify",
  "rfd",

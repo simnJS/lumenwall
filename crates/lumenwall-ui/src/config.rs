@@ -67,6 +67,8 @@ pub struct UiConfig {
     pub workshop_mature: bool,
     /// End of the previous session (Unix seconds), for "New" badges.
     pub last_session: Option<u64>,
+    /// Automatic update checks and the pre-release channel.
+    pub updates: crate::updater::Prefs,
 }
 
 impl Default for UiConfig {
@@ -86,6 +88,7 @@ impl Default for UiConfig {
             workshop_questionable: false,
             workshop_mature: false,
             last_session: None,
+            updates: crate::updater::Prefs::default(),
         }
     }
 }

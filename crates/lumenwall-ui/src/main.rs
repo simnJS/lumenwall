@@ -26,6 +26,7 @@ mod previews;
 mod theme;
 mod thumbs;
 mod tray;
+mod updater;
 mod view;
 mod workshop;
 

@@ -26,6 +26,7 @@ Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screensho
 | `daemon.rs` | IPC worker thread and the UI's view of the daemon |
 | `workshop/` | Steam Workshop: public Web API client (allow-listed hosts, TTL disk cache), BBCode renderer, API key storage (0600), folder watcher (`notify`), page state, fake Steam server (`--fake-steam`) |
 | `tray/` | StatusNotifierItem + dbusmenu over zbus (Linux), `tray-icon` (Windows) |
+| `updater.rs` | Self-update through `lumenwall-update`: "Lumenwall X.Y.Z is available" banner above the pages (release notes, progress, errors), Updates card in the Settings, engine and app restart |
 | `config.rs`, `i18n.rs`, `picker.rs`, `platform.rs` | Preferences and autostart, EN/FR strings, file chooser portal / dialog, OS helpers |
 | `fake.rs`, `demo.rs` | Fake daemon and generated demo library for development and screenshots |
 
@@ -40,6 +41,8 @@ The catalog lives here behind `catalog::Discovery` until `lumenwall-assets` / `l
 ## Network
 
 Only the Workshop page talks to the network, only while it is displayed, only to Steam's hosts, with a generic `Lumenwall/<version>` User-Agent and the user's own key (never bundled, never logged). Details in [`docs/UI.md`](../../docs/UI.md#workshop).
+
+Update checks ask `api.github.com` at most every 12 hours (at start or when the window gets focus, only if due; "Check now" in the Settings), with the same generic User-Agent and nothing else; downloads happen only when the user clicks "Update and restart". Off in the Settings (`"updates": {"auto_check": false}` in `ui.json`), with `LUMENWALL_NO_UPDATE=1`, and automatically for package-managed copies. Details in [`crates/lumenwall-update`](../lumenwall-update/README.md).
 
 ## Deviations
 
