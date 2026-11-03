@@ -118,6 +118,9 @@ pub enum DataError {
     /// `type` of `project.json` is not `scene`, `video` or `web`.
     #[error("unknown project type {0:?}")]
     ProjectType(String),
+    /// No `type`, and the extension of `file` names no known project type.
+    #[error("no project type, and none can be inferred from file {0:?}")]
+    ProjectFile(String),
     /// A combo property's `options` is not an array.
     #[error("combo options must be an array")]
     ComboOptions,
@@ -161,6 +164,38 @@ pub enum LoadError {
     /// [`crate::Project::build`] was called on a video or web project.
     #[error("project has no scene")]
     NotAScene,
+    /// The folder holds Wallpaper Engine content that is not a wallpaper (a Workshop asset or
+    /// an editor template).
+    #[error("not a wallpaper: {0}")]
+    NotAWallpaper(NotAWallpaper),
+    /// A wallpaper type Lumenwall cannot run (`application`: a Windows program).
+    #[error("{kind} wallpapers (`{file}`) are not supported on this platform")]
+    Unsupported {
+        /// Project type, as Wallpaper Engine names it.
+        kind: &'static str,
+        /// `file` of the project.
+        file: String,
+    },
+}
+
+/// What a non-wallpaper project is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotAWallpaper {
+    /// Workshop item of category `Asset` (`assets.json`): objects for the editor.
+    WorkshopAsset,
+    /// Editor project template (`templateoptions`).
+    Template,
+}
+
+impl fmt::Display for NotAWallpaper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::WorkshopAsset => {
+                "Workshop asset (objects to add to wallpapers in the Wallpaper Engine editor)"
+            }
+            Self::Template => "Wallpaper Engine editor template",
+        })
+    }
 }
 
 impl LoadError {
@@ -295,6 +330,13 @@ pub(crate) trait At: Sized {
 
     fn at_idx(self, i: usize) -> Self {
         self.push_seg(Segment::Index(i))
+    }
+}
+
+impl At for DataErr {
+    fn push_seg(mut self, seg: Segment) -> Self {
+        self.rev_path.push(seg);
+        self
     }
 }
 

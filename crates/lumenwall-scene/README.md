@@ -28,7 +28,7 @@ Data model for `project.json`, user properties, `scene.json`, objects, models, m
 
 Not here: §7.9 particle files (`lumenwall-particles`), Annexes A/B (`lumenwall-formats` / `lumenwall-assets`; the tests contain a minimal test-only PKG reader).
 
-Tests: 17 unit, 42 on the spec examples and open-question edge cases, plus 2 `#[ignore]` tests on real content: wallpaper 3018340632 and every scene wallpaper of `$LUMENWALL_WE_WORKSHOP`. All 7 load and build with no warning (`cargo test -p lumenwall-scene -- --ignored`).
+Tests: 17 unit, 45 on the spec examples and open-question edge cases, plus 2 `#[ignore]` tests on real content: wallpaper 3018340632 and every scene wallpaper of `$LUMENWALL_WE_WORKSHOP`. All 7 load and build with no warning (`cargo test -p lumenwall-scene -- --ignored`).
 
 ## Open questions: decisions
 
@@ -72,6 +72,13 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 - Q2 (8-digit hex), Q5, Q6, Q7, Q9, Q10, Q12, Q13, Q16 (effects), Q17, Q18, Q19, Q27, Q29, Q30, Q31: see the table.
 - A UTF-8 byte order mark at the start of a JSON file is skipped.
+- `project.json` (parity rule 4, absent from spec 02 §2): without `type`, the type follows the
+  extension of `file` like Wallpaper Engine's own projects (`.json` scene, `.mp4`/`.webm`/… video,
+  `.html` web; audiophile, techno); `application` (`.exe`, sheep) is
+  `LoadError::Unsupported`; Workshop assets (`"category": "Asset"`, or `assets.json` without
+  `type`) and editor templates (`templateoptions` without `type`) are
+  `LoadError::NotAWallpaper` instead of a parsing error. Unknown extensions stay an error
+  (`DataError::ProjectFile`).
 - Material passes read `usershadervalues` (`{"<user property>": "<material constant>"}`, absent
   from spec 02): the constant becomes a setting bound to the property (live, like a
   `{"user": …}` constant) and replaces a `constantshadervalues` entry of the same name. Unknown

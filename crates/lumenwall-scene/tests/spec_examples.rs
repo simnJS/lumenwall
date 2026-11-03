@@ -264,6 +264,55 @@ fn project_header_rules() {
     );
     let e = p(r#"{"type": "gif", "title": "t", "file": "x"}"#).unwrap_err();
     assert_eq!(data_err(&e).2, DataError::ProjectType("gif".into()));
+    // Lumenwall: without `type`, the extension of `file` gives it (Wallpaper Engine's own
+    // projects: audiophile, techno, sheep).
+    for (file, kind) in [
+        ("v.WEBM", ProjectKind::Video),
+        ("dir/index.html", ProjectKind::Web),
+        ("v.mp4", ProjectKind::Video),
+    ] {
+        let json = format!(r#"{{"title": "t", "file": "{file}"}}"#);
+        assert_eq!(p(&json).unwrap().kind, kind, "{file}");
+    }
+    let e = p(r#"{"title": "t", "file": "x.dat"}"#).unwrap_err();
+    assert_eq!(
+        data_err(&e),
+        (
+            "project.json".into(),
+            "$.file".into(),
+            DataError::ProjectFile("x.dat".into())
+        )
+    );
+    let e = p(r#"{"title": "t"}"#).unwrap_err();
+    assert_eq!(data_err(&e).1, "$.file");
+    let e = p(r#"{"title": "Sheep", "file": "sheep.exe"}"#).unwrap_err();
+    assert!(
+        matches!(&e, LoadError::Unsupported { kind: "application", file } if file == "sheep.exe"),
+        "{e}"
+    );
+    let e = p(r#"{"type": "Application", "title": "t", "file": "a.exe"}"#).unwrap_err();
+    assert!(matches!(e, LoadError::Unsupported { .. }), "{e}");
+    // Not wallpapers: Workshop assets and editor templates.
+    let e = p(r#"{"category": "Asset", "title": "t", "file": "assets.json"}"#).unwrap_err();
+    assert!(
+        matches!(e, LoadError::NotAWallpaper(NotAWallpaper::WorkshopAsset)),
+        "{e}"
+    );
+    assert!(e.to_string().starts_with("not a wallpaper: "), "{e}");
+    let e = p(r#"{"title": "t", "file": "assets.json"}"#).unwrap_err();
+    assert!(matches!(e, LoadError::NotAWallpaper(_)), "{e}");
+    let e = p(r#"{"file": "scene.json", "templateoptions": []}"#).unwrap_err();
+    assert!(
+        matches!(e, LoadError::NotAWallpaper(NotAWallpaper::Template)),
+        "{e}"
+    );
+    // A wallpaper made from a template keeps its own type.
+    assert_eq!(
+        p(r#"{"type": "video", "title": "t", "file": "v.mp4", "templateoptions": []}"#)
+            .unwrap()
+            .kind,
+        ProjectKind::Video
+    );
     let e = p(r#"{"type": "web", "title": 3, "file": "x"}"#).unwrap_err();
     assert_eq!(data_err(&e).1, "$.title");
     let e = p(r#"{"type": "web", "title": "t", "file": "x",}"#).unwrap_err();

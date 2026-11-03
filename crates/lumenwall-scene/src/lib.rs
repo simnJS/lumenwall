@@ -37,7 +37,7 @@ pub use build::{
     BLOOM_MATERIALS, BloomInfo, BuildOptions, MAX_PARENT_DEPTH, PASSTHROUGH_MATERIAL,
     RenderTargetDesc, SceneBuild, TINT_MATERIAL, TargetFormat, Transform,
 };
-pub use error::{DataError, Expected, JsonPath, LoadError, Segment, Warning};
+pub use error::{DataError, Expected, JsonPath, LoadError, NotAWallpaper, Segment, Warning};
 pub use intern::{Interner, Sym};
 pub use passes::{
     ConstantSource, ImagePasses, MainTextureFormat, OverrideRef, PassDesc, PassKind,

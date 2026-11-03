@@ -782,6 +782,10 @@ raw_struct! {
         file: Json<'a> = "file",
         workshopid: Json<'a> = "workshopid",
         general: RawProjectGeneral<'a> = "general",
+        /// `"Asset"` for Workshop items made for the editor (not wallpapers).
+        category: Json<'a> = "category",
+        /// Present in the editor's project templates (`projects/templates`).
+        templateoptions: Json<'a> = "templateoptions",
     }
 }
 
