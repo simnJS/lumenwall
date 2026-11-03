@@ -21,6 +21,8 @@ lumen-script = { path = "crates/lumen-script" }
 lumen-web = { path = "crates/lumen-web" }
 lumen-particles = { path = "crates/lumen-particles" }
 lumen-assets = { path = "crates/lumen-assets" }
+lumen-ipc = { path = "crates/lumen-ipc" }
+lumen-ui = { path = "crates/lumen-ui" }
 
 thiserror = "2"
 anyhow = "1"
