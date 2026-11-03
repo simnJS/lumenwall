@@ -19,6 +19,7 @@ lumen-audio = { path = "crates/lumen-audio" }
 lumen-video = { path = "crates/lumen-video" }
 lumen-script = { path = "crates/lumen-script" }
 lumen-web = { path = "crates/lumen-web" }
+lumen-particles = { path = "crates/lumen-particles" }
 
 thiserror = "2"
 anyhow = "1"

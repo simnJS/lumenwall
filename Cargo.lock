@@ -164,6 +164,10 @@ name = "lumen-formats"
 version = "0.1.0"
 
 [[package]]
+name = "lumen-particles"
+version = "0.1.0"
+
+[[package]]
 name = "lumen-platform"
 version = "0.1.0"
 
