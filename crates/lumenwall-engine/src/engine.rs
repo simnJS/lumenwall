@@ -318,8 +318,9 @@ impl Engine {
             },
             layer: plan.layer,
             max_fps: plan.fps,
+            // Clicks too: scripts (`cursorDown`, `cursorClick`...) and web pages react to them.
             pointer: if plan.mouse {
-                PointerMode::Motion
+                PointerMode::MotionAndButtons
             } else {
                 PointerMode::Disabled
             },
@@ -342,7 +343,10 @@ impl Engine {
         let mut config = config.clone();
         config.backend = self.backend;
         match lumenwall_platform::open(&config) {
-            Ok(s) => Ok(s),
+            Ok(mut s) => {
+                s.set_input_paused(self.user_paused);
+                Ok(s)
+            }
             Err(e)
                 if config.mode == Mode::Desktop
                     && config.backend == BackendChoice::Auto
@@ -350,7 +354,8 @@ impl Engine {
             {
                 tracing::warn!("desktop surfaces unavailable ({e}); trying X11 desktop windows");
                 config.backend = BackendChoice::X11;
-                let s = lumenwall_platform::open(&config).map_err(|e| e.to_string())?;
+                let mut s = lumenwall_platform::open(&config).map_err(|e| e.to_string())?;
+                s.set_input_paused(self.user_paused);
                 self.backend = BackendChoice::X11;
                 Ok(s)
             }
@@ -721,6 +726,7 @@ impl Engine {
             if let Some(d) = &mut self.dormant {
                 // Released GPU: the restore resumes the sound if an output shows again.
                 d.audio().set_paused(paused);
+                d.surfaces_mut().set_input_paused(paused);
             }
             self.publish(None, Change::State);
             return;
@@ -728,6 +734,7 @@ impl Engine {
         for o in &mut r.outputs {
             o.held = paused;
         }
+        r.surfaces.set_input_paused(paused);
         r.audio.set_paused(paused);
         let all_platform_paused = r.outputs.iter().all(|o| o.paused);
         if paused {

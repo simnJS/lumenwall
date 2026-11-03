@@ -15,7 +15,10 @@
 //! * locked / screen off: MIT-SCREEN-SAVER notify and DPMS 1.2 `InfoNotify`;
 //! * pointer: one `QueryPointer` per rendered frame, pipelined (the reply is read one frame later, by which
 //!   time it has long arrived), never while paused. Clicks come from `ButtonPress` on our windows, i.e. only
-//!   on the visible desktop.
+//!   on the visible desktop. On GNOME, XWayland only knows the pointer above X11 windows and a desktop-icons
+//!   window takes the clicks: the Shell extension (version 2) then sends the position and the clicks that land
+//!   on the desktop, while at least one output runs (see [`super::gnome_shell`]); `QueryPointer` and our own
+//!   `ButtonPress` events are not used meanwhile.
 
 use std::ffi::c_void;
 use std::num::NonZeroU32;
@@ -39,7 +42,9 @@ use x11rb::protocol::{Event as XEvent, dpms, randr, screensaver};
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
-use super::gnome_shell::{self, FLAG_FULLSCREEN, FLAG_MAXIMIZED, ShellLink};
+use super::gnome_shell::{
+    self, FLAG_FULLSCREEN, FLAG_MAXIMIZED, ShellLink, WATCH_BUTTONS, WATCH_MOTION,
+};
 use super::loop_error;
 use crate::fullscreen::{RootChild, RootChildren, Verdict, X11Rules, apply_scope};
 use crate::geometry::{Rect, best_overlap};
@@ -124,7 +129,7 @@ struct X11Output {
     /// 1×1 pixmap of the XWayland probe (`NONE` when the probe is off).
     probe_pixmap: u32,
     starve: Starvation,
-    last_pointer: Option<(i32, i32)>,
+    last_pointer: Option<(f64, f64)>,
     info: OutputInfo,
 }
 
@@ -148,7 +153,8 @@ pub(crate) struct X11State {
     screensaver_on: bool,
     display_off: bool,
     pointer_seq: Option<SequenceNumber>,
-    cursor: Option<(i32, i32)>,
+    /// Pointer in root coordinates (`QueryPointer`, or the Shell extension).
+    cursor: Option<(f64, f64)>,
     queue: EventQueue,
     config: Config,
     max_fps: u32,
@@ -167,6 +173,14 @@ pub(crate) struct X11State {
     shell: Option<ShellLink>,
     /// The extension's arrival was logged once.
     shell_announced: bool,
+    /// `WATCH_*` bits the extension delivers (pointer from the Shell instead of XWayland).
+    shell_feed: u32,
+    /// Outputs that got a press from the extension, per button (left, middle, right): the release goes there.
+    shell_held: [Option<OutputId>; 3],
+    /// An extension without the pointer signals was logged once.
+    shell_old_logged: bool,
+    /// The engine shows nothing that reacts to input ([`WallpaperSurface::set_input_paused`]).
+    input_paused: bool,
 }
 
 /// The X11 backend.
@@ -254,7 +268,8 @@ impl X11Backend {
         let shell = if xwayland
             && (config.fullscreen.enabled
                 || config.pause_when_maximized
-                || config.pause_when_covered)
+                || config.pause_when_covered
+                || config.pointer != PointerMode::Disabled)
         {
             match ShellLink::connect() {
                 Ok(link) => Some(link),
@@ -302,6 +317,10 @@ impl X11Backend {
             candidates: Vec::new(),
             shell,
             shell_announced: false,
+            shell_feed: 0,
+            shell_held: [None; 3],
+            shell_old_logged: false,
+            input_paused: false,
         };
         state.refresh_outputs(true)?;
         state.process_dirty();
@@ -1081,6 +1100,151 @@ impl X11State {
             }
             o.paused = new;
         }
+        self.sync_pointer_watch();
+    }
+
+    /// Asks the Shell extension for the pointer while at least one output runs, and stops it otherwise
+    /// (nothing is sent when the subscription does not change).
+    fn sync_pointer_watch(&mut self) {
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        let running = !self.input_paused && self.outputs.iter().any(|o| o.paused.is_empty());
+        let flags = match self.config.pointer {
+            _ if !running => 0,
+            PointerMode::Disabled => 0,
+            PointerMode::Motion => WATCH_MOTION,
+            PointerMode::MotionAndButtons => WATCH_MOTION | WATCH_BUTTONS,
+        };
+        // The renderer never draws faster than the cap: more positions per second would be wasted wake-ups.
+        if let Err(e) = shell.set_pointer_watch(flags, self.max_fps) {
+            tracing::debug!("pointer subscription not sent: {e}");
+        }
+        self.shell_feed_changed();
+    }
+
+    /// Follows what the extension delivers: buttons it pressed are released when it stops, and the
+    /// `QueryPointer` pipeline is dropped while it sends the position.
+    fn shell_feed_changed(&mut self) {
+        let feed = self.shell.as_ref().map_or(0, ShellLink::pointer_feed);
+        if feed == self.shell_feed {
+            return;
+        }
+        if feed & WATCH_BUTTONS == 0 {
+            self.release_shell_buttons();
+        }
+        if feed & WATCH_MOTION != 0
+            && let Some(seq) = self.pointer_seq.take()
+        {
+            // Dropping the cookie discards its reply.
+            drop(Cookie::<XCBConnection, QueryPointerReply>::new(
+                &*self.conn,
+                seq,
+            ));
+        }
+        if feed != 0 && self.shell_feed == 0 {
+            tracing::debug!(feed, "pointer from the GNOME Shell extension");
+        } else if feed == 0 {
+            tracing::debug!("pointer feed of the GNOME Shell extension stopped");
+        }
+        self.shell_feed = feed;
+    }
+
+    /// Releases the buttons the extension pressed (it stopped, or will not send the releases).
+    fn release_shell_buttons(&mut self) {
+        for (slot, button) in [
+            PointerButton::Left,
+            PointerButton::Middle,
+            PointerButton::Right,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some(id) = self.shell_held[slot].take() else {
+                continue;
+            };
+            if let Some(o) = self.outputs.iter().find(|o| o.id == id) {
+                let (x, y) = o.last_pointer.unwrap_or_default();
+                self.queue.push(Event::Pointer(PointerEvent {
+                    output: id,
+                    x,
+                    y,
+                    kind: PointerKind::Button {
+                        button,
+                        pressed: false,
+                    },
+                }));
+            }
+        }
+    }
+
+    /// Converts the pointer signals of the extension into events of the outputs that run.
+    fn shell_pointer(&mut self) {
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        let (monitors, events) = shell.pointer_events();
+        let mut moved = false;
+        for ev in events {
+            let outputs = self.outputs.iter().map(|o| (o.info.name.as_str(), o.rect));
+            let (x, y) = gnome_shell::to_x11(monitors, &ev, outputs);
+            self.cursor = Some((x, y));
+            let Some((code, pressed)) = ev.button else {
+                moved = true;
+                continue;
+            };
+            let button = match code {
+                1 => PointerButton::Left,
+                2 => PointerButton::Middle,
+                3 => PointerButton::Right,
+                other => PointerButton::Other(other),
+            };
+            let slot = match button {
+                PointerButton::Left => Some(0),
+                PointerButton::Middle => Some(1),
+                PointerButton::Right => Some(2),
+                PointerButton::Other(_) => None,
+            };
+            let under = |o: &&mut X11Output| {
+                o.paused.is_empty()
+                    && x >= f64::from(o.rect.x)
+                    && y >= f64::from(o.rect.y)
+                    && x < f64::from(o.rect.right())
+                    && y < f64::from(o.rect.bottom())
+            };
+            // A release goes to the output that got the press, wherever the pointer went meanwhile.
+            let target = if pressed {
+                None
+            } else {
+                slot.and_then(|s| self.shell_held[s].take())
+            };
+            let output = match target {
+                Some(id) => self.outputs.iter_mut().find(|o| o.id == id),
+                None if pressed || slot.is_none() => self.outputs.iter_mut().find(under),
+                // Release of a press that was never delivered (paused output, other screen).
+                None => None,
+            };
+            let Some(o) = output else { continue };
+            // The script that reacts to the click sees the position of the click.
+            push_motion(o, (x, y), &mut self.queue);
+            let (lx, ly) = o.last_pointer.unwrap_or_default();
+            if pressed && let Some(s) = slot {
+                self.shell_held[s] = Some(o.id);
+            }
+            tracing::debug!(output = %o.info.name, ?button, pressed, x = lx, y = ly, "click on the desktop (GNOME Shell)");
+            self.queue.push(Event::Pointer(PointerEvent {
+                output: o.id,
+                x: lx,
+                y: ly,
+                kind: PointerKind::Button { button, pressed },
+            }));
+        }
+        if moved && let Some(c) = self.cursor {
+            // Right away rather than at the next frame: a scene that only redraws on input wakes up.
+            for o in self.outputs.iter_mut().filter(|o| o.paused.is_empty()) {
+                push_motion(o, c, &mut self.queue);
+            }
+        }
     }
 
     /// The session bus has data. Returns `false` when the link is gone (the event source is then removed).
@@ -1119,6 +1283,16 @@ impl X11State {
                     tracing::debug!(monitors = ?shell.monitors(), "GNOME Shell extension state");
                     self.pause_dirty = true;
                 }
+                if shell.pointer_supported() == Some(false) && !self.shell_old_logged {
+                    self.shell_old_logged = true;
+                    tracing::info!(
+                        "the Lumenwall GNOME Shell extension is older than version 2: install the new one \
+                         (packaging/gnome-extension) and log in again for the pointer above Wayland windows and \
+                         clicks on the desktop"
+                    );
+                }
+                self.shell_pointer();
+                self.shell_feed_changed();
                 true
             }
             Err(e) => {
@@ -1126,6 +1300,7 @@ impl X11State {
                 let had_state = !shell.monitors().is_empty();
                 self.shell = None;
                 self.pause_dirty |= had_state;
+                self.shell_feed_changed();
                 false
             }
         }
@@ -1242,6 +1417,9 @@ impl X11State {
                     self.pause_dirty = true;
                 }
             }
+            // The extension reports clicks on our windows too (desktop-type windows).
+            XEvent::ButtonPress(_) | XEvent::ButtonRelease(_)
+                if self.shell_feed & WATCH_BUTTONS != 0 => {}
             XEvent::ButtonPress(e) | XEvent::ButtonRelease(e) => {
                 let pressed = matches!(ev, XEvent::ButtonPress(_));
                 let button = match e.detail {
@@ -1290,7 +1468,9 @@ impl X11State {
         let conn = &*self.conn;
         if let Some(seq) = self.pointer_seq.take() {
             match Cookie::<XCBConnection, QueryPointerReply>::new(conn, seq).reply() {
-                Ok(r) if r.same_screen => self.cursor = Some((r.root_x.into(), r.root_y.into())),
+                Ok(r) if r.same_screen => {
+                    self.cursor = Some((r.root_x.into(), r.root_y.into()));
+                }
                 Ok(_) => {}
                 Err(e) => tracing::debug!("QueryPointer failed: {e}"),
             }
@@ -1304,7 +1484,8 @@ impl X11State {
 
     fn tick(&mut self, now: Instant) {
         let pointer = self.config.pointer != PointerMode::Disabled;
-        let mut sampled = false;
+        // The Shell extension sends the position when it changes: no query.
+        let mut sampled = self.shell_feed & WATCH_MOTION != 0;
         for i in 0..self.outputs.len() {
             let paused = !self.outputs[i].paused.is_empty();
             if !self.outputs[i].slot.fire_if_due(now, paused, true) {
@@ -1315,19 +1496,8 @@ impl X11State {
                     self.sample_pointer();
                     sampled = true;
                 }
-                let o = &mut self.outputs[i];
-                if let Some((cx, cy)) = self.cursor {
-                    // parity: position relative to the output, tracked over every window (§10.2, X11).
-                    let local = (cx - o.rect.x, cy - o.rect.y);
-                    if o.last_pointer != Some(local) {
-                        o.last_pointer = Some(local);
-                        self.queue.push(Event::Pointer(PointerEvent {
-                            output: o.id,
-                            x: local.0.into(),
-                            y: local.1.into(),
-                            kind: PointerKind::Motion,
-                        }));
-                    }
+                if let Some(c) = self.cursor {
+                    push_motion(&mut self.outputs[i], c, &mut self.queue);
                 }
             }
             self.queue.push(Event::Frame(self.outputs[i].id));
@@ -1356,6 +1526,24 @@ impl X11State {
             let _ = self.conn.destroy_window(w);
         }
         let _ = self.conn.flush();
+    }
+}
+
+/// Queues the cursor (root coordinates) for `o` when it moved relative to that output.
+fn push_motion(o: &mut X11Output, cursor: (f64, f64), queue: &mut EventQueue) {
+    // parity: position relative to the output, tracked over every window (§10.2, X11).
+    let local = (
+        cursor.0 - f64::from(o.rect.x),
+        cursor.1 - f64::from(o.rect.y),
+    );
+    if o.last_pointer != Some(local) {
+        o.last_pointer = Some(local);
+        queue.push(Event::Pointer(PointerEvent {
+            output: o.id,
+            x: local.0,
+            y: local.1,
+            kind: PointerKind::Motion,
+        }));
     }
 }
 
@@ -1414,6 +1602,13 @@ impl WallpaperSurface for X11Backend {
         for o in &mut self.state.outputs {
             o.slot.clock.set_max_fps(fps);
         }
+        self.state.sync_pointer_watch();
+    }
+
+    fn set_input_paused(&mut self, paused: bool) {
+        self.state.input_paused = paused;
+        self.state.sync_pointer_watch();
+        let _ = self.state.conn.flush();
     }
 
     fn pause_reasons(&self, id: OutputId) -> PauseReasons {

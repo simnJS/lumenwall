@@ -37,7 +37,7 @@ s.request_frame(id);  /* render */  s.pre_present(id);  /* present */
 | Maximised (`MAXIMIZED`) | — (covered surfaces stop getting frame callbacks) | `_NET_WM_STATE_MAXIMIZED_*` of windows over ≥ ½ an output (client inside WM frames); GNOME: Shell extension for Wayland windows | counted as covering (`OCCLUDED`) | — |
 | Covered / hidden | no frame callback for 500 ms | `VisibilityNotify` (no compositor); XWayland: Present frame timing (any window, Wayland-native included) | maximised / work-area-covering window | occluded, minimised |
 | Locked / screen off | via missing frame callbacks | MIT-SCREEN-SAVER, DPMS 1.2; XWayland: Present frame timing | WTS lock, `GUID_CONSOLE_DISPLAY_STATE` | — |
-| Pointer | surface events | pipelined `QueryPointer` per frame; clicks on our window | `GetCursorPos` per frame; Raw Input `RIDEV_INPUTSINK` for clicks on the desktop | winit |
+| Pointer | surface events | pipelined `QueryPointer` per frame; clicks on our window; GNOME: Shell extension (position above every window, clicks on the desktop and on desktop icons) | `GetCursorPos` per frame; Raw Input `RIDEV_INPUTSINK` for clicks on the desktop | winit |
 
 Pure logic is OS-independent and unit-tested: UVs and span slices (`uv`), mouse projection and focus rules
 (`mouse`), frame pacing (`sched`), toplevel relevance, the X11 root-window cache and the maximised rule
@@ -62,7 +62,58 @@ the root-children cache, `_NET_WM_STATE` and `VisibilityNotify`. Three signals a
    per-monitor "in fullscreen" state and maximised normal windows of the active workspace, published on the
    session bus (see `linux::gnome_shell` for the interface). Detected automatically (also when it is enabled
    or re-enabled later, e.g. after each unlock); without it the binary logs once that maximised Wayland
-   windows cannot pause.
+   windows cannot pause. Version 2 also sends the pointer (below).
+
+### Pointer and clicks on GNOME
+
+XWayland only knows where the pointer is while it is above an X11 window, and Ubuntu's Desktop Icons NG (DING)
+covers the desktop with a Wayland window that takes every click: without help, `QueryPointer` returns a stale
+position as soon as the pointer is above a Wayland window or the icons window, and our desktop windows never
+get a click (Dino Run cannot be played, parallax and cursor effects freeze). Version 2 of the extension
+publishes, only to the Lumenwall connection that asks for it (`WatchPointer`, unicast signals):
+
+- `PointerMotion(x, y, connector)`: the global position (Shell logical coordinates), above any window, at most
+  once per compositor frame and at most the frame cap of Lumenwall per second (`--fps`), only when it changed;
+- `PointerButton(x, y, connector, button, pressed)`: the presses that land on the desktop (no window under the
+  pointer, or a desktop-type window: Desktop Icons NG, icons included, and our own windows) and their
+  releases. Never presses on application windows, the top bar, docks, notifications, the overview, nor while
+  a Shell grab is active (a Shell menu or an application popup closing on that click). Left, middle and right
+  buttons; the right click also opens the desktop menu of DING (Wallpaper Engine seldom uses it).
+
+Input is only observed, never consumed: icons, rubber-band selection and the desktop menu keep working. The
+extension cannot see the events Mutter hands to Wayland clients (event filters and `captured-event` handlers
+are not called for them, measured on GNOME 50.1), so it reads the pointer state (`MetaCursorTracker`) when
+Mutter's idle monitor reports user activity: once per burst of input, then once per frame while input
+continues, then once more. A press is classified by picking the reactive actor under the pointer.
+
+The X11 backend converts the positions into output coordinates (connector, then geometry; scaled when the
+X11 output size differs from the logical one), queues `Motion` events for the outputs that run right away
+(a scene that only redraws on input wakes up), and `Button` events for the output under the pointer; the
+release goes to the output that got the press. Meanwhile it sends no `QueryPointer` and ignores the
+`ButtonPress` events of its own windows (the extension reports those clicks too). It asks for the pointer
+while at least one output runs and the user did not pause the wallpapers
+(`WallpaperSurface::set_input_paused`); otherwise it unsubscribes and the Shell stops watching the input
+altogether. If the extension stops (lock screen, disabled), held buttons are released and `QueryPointer`
+takes over; an extension older than version 2 is detected (`UnknownMethod`) and logged once.
+
+Measured in a nested headless GNOME Shell 50.1 (two 1280×720 virtual monitors, DING enabled, virtual pointer
+device, Dino Run on both outputs):
+
+| Check | Result |
+|---|---|
+| Click on the dinosaur | the dinosaur jumps on that output only (`cursorDown`); timed on a coin: coin picked up (pickup particles), debug and release builds |
+| Pointer above a native Wayland window (GTK 4) | the dinosaur follows it (global position) |
+| Click on an application window, on the top bar, while a Shell menu is open, the click that closes DING's menu | not delivered |
+| Click and drag from one monitor to the other | press and release on the first output (local x beyond its width) |
+| 25 clicks held 5 to 80 ms (no motion) | 25 presses and 25 releases, durations kept to ±0.5 ms |
+| DING with the pointer watched | icons, rubber-band selection and the right-click menu work; the same press/release are reported |
+| Right button | reported as 3: Mutter orders the button bits like evdev (`BUTTON2_MASK` is the right button) |
+| Motion, 30 fps cap | one signal per 33–35 ms while moving, none when still |
+| Lumenwall exits, fullscreen window (every output pauses), `lumenctl pause` | unsubscribed (name watcher, `WatchPointer(0)`): no observation in the Shell, no signal; back on resume |
+
+In that nested Shell the X11 desktop windows of Lumenwall (desktop type, `_NET_WM_STATE_BELOW`) stacked above
+DING's Wayland windows, hiding its icons; clicks then land on our windows, which the extension reports the same
+way (desktop type). Which one is on top in a real session was not checked.
 
 A maximised **Wayland** window has no other reliable signal: Mutter keeps painting the strip of desktop under
 the top bar (transparent with Blur my Shell), so the frame timing never starves, and no public interface lists
@@ -121,14 +172,19 @@ Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50
 | Present frame timing (kept) | exact per-output visibility, no extension, 1 wake-up/s while hidden; blind to maximised windows |
 | Own GNOME Shell extension (added, optional) | exact fullscreen and maximised state, 0 wake-ups; needs install + re-login and per-release care (feature-detected Mutter calls, tested on 50.1 only) |
 
-Install the extension (once per user; Wayland sessions only discover new extensions at login):
+Install or update the extension (once per user; a Wayland session only loads new or changed extension code
+at login, so an update needs a new login too):
 
 ```sh
 mkdir -p ~/.local/share/gnome-shell/extensions
+rm -rf ~/.local/share/gnome-shell/extensions/lumenwall@simnjs.github.io
 cp -r packaging/gnome-extension/lumenwall@simnjs.github.io ~/.local/share/gnome-shell/extensions/
-# log out and back in, then:
+# log out and back in, then (first install only; an update keeps it enabled):
 gnome-extensions enable lumenwall@simnjs.github.io
+gnome-extensions info lumenwall@simnjs.github.io   # "Version: 2", "State: ACTIVE"
 ```
+
+Lumenwall needs no restart: it subscribes again when the extension reappears.
 
 ## Performance
 
@@ -142,6 +198,21 @@ gnome-extensions enable lumenwall@simnjs.github.io
   only forwards `NameOwnerChanged` for the extension's name and its `MonitorsChanged` signal, which is sent
   only when a monitor's state changes: 0 wake-ups otherwise, with or without the extension. The handshake
   (≈1 ms) runs once at start-up.
+- GNOME pointer feed (extension version 2), measured in the nested headless Shell above with a 500 Hz virtual
+  mouse moving continuously over the desktop (release build, 8 s windows, `/proc/<pid>/task/*/schedstat` and
+  context switches):
+
+  | | gnome-shell | Lumenwall |
+  |---|---|---|
+  | Mouse still, watched | 0.09 → 0.12 % CPU, 3 wake-ups/s (unchanged) | same as `--disable-mouse`: Dino Run 344 wake-ups/s, static 3044659344 282 wake-ups/s (driver threads), 0 from the feed |
+  | Mouse moving, nobody watching (baseline) | 6.1–6.7 % (virtual device and cursor) | — |
+  | Mouse moving, watched at 30/s (`--fps 30`) | +0.4 to +1.4 % of a core; bus daemon +0.1 %, 30 wake-ups/s | +28 to +30 wake-ups/s, +0.1 to +0.3 % CPU (static scene that ignores the pointer: no frame drawn) |
+  | Mouse moving, watched once per frame (60 Hz monitors) | +1.5 % of a core; bus daemon +0.3 %, 61 wake-ups/s | — |
+
+  Inside the Shell one look at the pointer costs 1.7 µs, one signal ≈ 33 µs (variant + emission), one click
+  classification (pick) 12 µs. Lumenwall asks for at most its frame cap per second, so a 280 Hz monitor does
+  not multiply the signals; nothing is sent while the pointer is still, while every output is paused or while
+  the user paused the wallpapers.
 - No allocation per pointer event in this crate (events are `Copy`, queues reused). libxcb/libwayland
   allocate internally; Wayland's `wl_surface.frame` creates one protocol object per frame (inherent).
 - Windows Raw Input wakes the thread on every mouse report, so it is registered only in
@@ -176,10 +247,11 @@ gnome-extensions enable lumenwall@simnjs.github.io
 - X11 ran on XWayland only (GNOME), not on a real Xorg with a reparenting WM or a compositor (picom).
 - XWayland frame timing: tested with Mutter 50 and the NVIDIA driver only; not with Mesa, KWin's or other
   compositors' XWayland, nor on lock / DPMS off.
-- GNOME extension: GNOME 50.1 only, in a nested headless Shell (the real session needs a re-login to load
-  it); GNOME 45–49 are declared and use feature-detected calls (connectors fall back on geometry). Not
-  tested: workspace switches with maximised XWayland windows on the other workspace, mirrored monitors,
-  fractional scaling (geometry fallback only).
+- GNOME extension: GNOME 50.1 only, in a nested headless Shell with a virtual pointer (the real session
+  needs a re-login to load it); GNOME 45–49 are declared and use feature-detected calls (connectors fall back
+  on geometry). Not tested: workspace switches with maximised XWayland windows on the other workspace,
+  mirrored monitors, fractional scaling (geometry fallback only), real mice and touchpads (tap-to-click),
+  tablets and touch screens (touch is not reported), other desktop-icons extensions than DING.
 
 ### To check on Windows 11 24H2 / 25H2 (and once on Windows 10)
 
@@ -215,7 +287,9 @@ gnome-extensions enable lumenwall@simnjs.github.io
   which the reference does not have. A strip of desktop left visible by a transparent panel keeps the last
   frame.
 - Clicks are delivered on X11 and Windows too (on the visible desktop only); the reference never sees them
-  on X11 (QO-8).
+  on X11 (QO-8). On GNOME the Shell extension also delivers clicks on desktop icons, like Wallpaper Engine on
+  Windows. A press released before the next frame is still reported by `PointerTracker::state` for one
+  frame, so scripts get their `cursorDown`/`cursorClick` for short clicks.
 - Missing `XDG_SESSION_TYPE` falls back on `WAYLAND_DISPLAY` / `DISPLAY` instead of aborting.
 - Identity (layer-shell namespace, `WM_CLASS`, title) is `Config::identity`, default `lumenwall` (QO-4 open).
 - Windowed mode has no fullscreen detector and only tracks the pointer over the window.

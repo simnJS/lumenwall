@@ -4,6 +4,8 @@
 //! (origin bottom-left, Y up), then projects into scene space with the UVs of [`crate::uv`].
 //! Everything here is pure arithmetic and allocation-free per event.
 
+use std::cell::Cell;
+
 use crate::types::{OutputId, PointerButton, PointerEvent, PointerKind};
 use crate::uv::UvRect;
 
@@ -80,17 +82,24 @@ pub struct PointerState {
     pub right: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Entry {
     output: OutputId,
     gl: (f64, f64),
     left: bool,
     right: bool,
+    /// Presses not reported by [`PointerTracker::state`] yet (bit 0 left, bit 1 right).
+    unseen: Cell<u8>,
 }
+
+const UNSEEN_LEFT: u8 = 1;
+const UNSEEN_RIGHT: u8 = 2;
 
 /// Per-output pointer bookkeeping with the focus rules of §10.2.
 ///
-/// Feed it every [`PointerEvent`]; ask [`PointerTracker::state`] when rendering an output.
+/// Feed it every [`PointerEvent`]; ask [`PointerTracker::state`] when rendering an output. A press is reported
+/// by at least one `state` call even when its release came first (a click shorter than a frame still gives
+/// scripts their `cursorDown`, then `cursorUp`/`cursorClick`).
 #[derive(Clone, Debug)]
 pub struct PointerTracker {
     enabled: bool,
@@ -117,6 +126,7 @@ impl PointerTracker {
                     gl: (0.0, 0.0),
                     left: false,
                     right: false,
+                    unseen: Cell::new(0),
                 });
                 self.entries.len() - 1
             }
@@ -142,10 +152,19 @@ impl PointerTracker {
             }
             PointerKind::Button { button, pressed } => {
                 let e = self.entry_mut(event.output);
-                match button {
-                    PointerButton::Left => e.left = pressed,
-                    PointerButton::Right => e.right = pressed,
-                    PointerButton::Middle | PointerButton::Other(_) => {}
+                let bit = match button {
+                    PointerButton::Left => {
+                        e.left = pressed;
+                        UNSEEN_LEFT
+                    }
+                    PointerButton::Right => {
+                        e.right = pressed;
+                        UNSEEN_RIGHT
+                    }
+                    PointerButton::Middle | PointerButton::Other(_) => 0,
+                };
+                if pressed {
+                    e.unseen.set(e.unseen.get() | bit);
                 }
             }
         }
@@ -159,7 +178,8 @@ impl PointerTracker {
         }
     }
 
-    /// State for rendering `output` whose drawable is `physical_size` pixels.
+    /// State for rendering `output` whose drawable is `physical_size` pixels. A press released before this
+    /// call is still reported as held, once.
     pub fn state(&self, output: OutputId, physical_size: (u32, u32)) -> PointerState {
         if !self.enabled {
             return PointerState::default();
@@ -183,11 +203,12 @@ impl PointerTracker {
                 } else {
                     center
                 };
+                let unseen = e.unseen.replace(0);
                 PointerState {
                     x: pos.0,
                     y: pos.1,
-                    left: e.left,
-                    right: e.right,
+                    left: e.left || unseen & UNSEEN_LEFT != 0,
+                    right: e.right || unseen & UNSEEN_RIGHT != 0,
                 }
             }
         }
@@ -335,6 +356,52 @@ mod tests {
         t.handle(&ev(2, 10.0, 1080.0, PointerKind::Motion), 1080.0);
         assert_eq!(t.state(a, (1920, 1080)).x, 100.0);
         assert_eq!(t.state(b, (1920, 1080)).y, 0.0);
+    }
+
+    #[test]
+    fn short_click_is_seen_once() {
+        let mut t = PointerTracker::new(true);
+        let button = |pressed| PointerKind::Button {
+            button: PointerButton::Left,
+            pressed,
+        };
+        // Press and release between two frames: one frame with the button held, then released.
+        t.handle(&ev(1, 10.0, 10.0, button(true)), 1080.0);
+        t.handle(&ev(1, 10.0, 10.0, button(false)), 1080.0);
+        assert!(t.state(OutputId(1), (1920, 1080)).left);
+        assert!(!t.state(OutputId(1), (1920, 1080)).left);
+        // A press seen while held is not repeated after its release.
+        t.handle(&ev(1, 10.0, 10.0, button(true)), 1080.0);
+        assert!(t.state(OutputId(1), (1920, 1080)).left);
+        t.handle(&ev(1, 10.0, 10.0, button(false)), 1080.0);
+        assert!(!t.state(OutputId(1), (1920, 1080)).left);
+        // Right button too; the middle one is not tracked.
+        t.handle(
+            &ev(
+                1,
+                0.0,
+                0.0,
+                PointerKind::Button {
+                    button: PointerButton::Right,
+                    pressed: true,
+                },
+            ),
+            1080.0,
+        );
+        t.handle(
+            &ev(
+                1,
+                0.0,
+                0.0,
+                PointerKind::Button {
+                    button: PointerButton::Right,
+                    pressed: false,
+                },
+            ),
+            1080.0,
+        );
+        let s = t.state(OutputId(1), (1920, 1080));
+        assert!(s.right && !s.left);
     }
 
     #[test]

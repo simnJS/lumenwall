@@ -362,11 +362,13 @@ pub enum Layer {
 pub enum PointerMode {
     /// No pointer at all (`--disable-mouse`): Wayland surfaces get an empty input region (clicks go through).
     Disabled,
-    /// Position only. Scenes never react to clicks (spec 07 §10.3), so this is the cheap default.
+    /// Position only (the reference's scenes never react to clicks, spec 07 §10.3).
     #[default]
     Motion,
-    /// Position and left/right/middle buttons (web wallpapers). On Windows this registers Raw Input, which wakes
-    /// the thread on every mouse report while at least one output runs.
+    /// Position and left/right/middle buttons: scene scripts (`cursorDown`, `cursorClick`...) and web wallpapers
+    /// react to clicks; the engine asks for this. On Windows this registers Raw Input, which wakes the thread on
+    /// every mouse report while at least one output runs. On GNOME (XWayland) the Shell extension reports the
+    /// clicks that land on the desktop.
     MotionAndButtons,
 }
 

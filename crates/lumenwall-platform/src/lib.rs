@@ -146,6 +146,11 @@ pub trait WallpaperSurface {
     /// Changes the frame cap; 0 disables it.
     fn set_max_fps(&mut self, fps: u32);
 
+    /// Tells the backend that nothing on screen reacts to input (the user paused the wallpapers), or does
+    /// again. Backends whose pointer tracking costs wake-ups (the GNOME Shell extension link) stop it
+    /// meanwhile; outputs paused by the backend itself already do. Default: nothing to do.
+    fn set_input_paused(&mut self, _paused: bool) {}
+
     /// Current pause reasons of an output.
     fn pause_reasons(&self, id: OutputId) -> PauseReasons;
 
