@@ -4,12 +4,12 @@ Wallpaper Engine files are copyrighted by their authors and by the Wallpaper Eng
 
 ## Environment variables
 
-Tests that need real content are `#[ignore]` by default and read these variables:
+Tests that need real content are `#[ignore]` by default and read these variables. Set them to absolute paths: Rust does not expand `~`.
 
-| Variable | Value on the dev machine |
+| Variable | Example (Steam snap install, `~` = home directory) |
 |---|---|
-| `LUMEN_WE_ASSETS` | `/home/simnjs/snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets` |
-| `LUMEN_WE_WORKSHOP` | `/home/simnjs/snap/steam/common/.local/share/Steam/steamapps/workshop/content/431960` |
+| `LUMEN_WE_ASSETS` | `~/snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets` |
+| `LUMEN_WE_WORKSHOP` | `~/snap/steam/common/.local/share/Steam/steamapps/workshop/content/431960` |
 | `LUMEN_TEST_WALLPAPER` | `$LUMEN_WE_WORKSHOP/3018340632` |
 
 Run them with:
