@@ -17,7 +17,7 @@ pub enum Scaling {
     Fit,
     /// Cover the output, cropping the image.
     Fill,
-    /// Fit the width or the height depending on both orientations.
+    /// Same as `Fill` for desktop wallpapers (Wallpaper Engine covers the screen; the reference fit the width or the height).
     #[default]
     Default,
 }

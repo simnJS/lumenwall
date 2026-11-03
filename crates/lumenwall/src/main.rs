@@ -100,7 +100,10 @@ fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
                 Scaling::Stretch => ScalingMode::Stretch,
                 Scaling::Fit => ScalingMode::Fit,
                 Scaling::Fill => ScalingMode::Fill,
-                Scaling::Default => ScalingMode::Default,
+                // lumenwall: Wallpaper Engine covers the screen (every author preview shows the
+                // scene cropped, never with bands), so `default` behaves like `fill` instead of
+                // the reference's fit-to-width (PARITY-POLICY rule 5).
+                Scaling::Default => ScalingMode::Fill,
             },
             clamp: match t.clamp {
                 Clamp::Clamp => ClampMode::Clamp,
