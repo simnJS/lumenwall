@@ -19,6 +19,7 @@ doc = false
 [dependencies]
 lumen-formats.workspace = true
 lumen-scene.workspace = true
+lumen-engine.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

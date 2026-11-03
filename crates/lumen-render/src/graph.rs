@@ -85,6 +85,41 @@ pub enum Geometry {
         vertices: VertexRange,
         indices: IndexRange,
     },
+    /// Indexed triangles of a vertex stream (particles): its own vertex layout,
+    /// 32-bit indices, draw count set every frame by [`RenderScene::write_stream`].
+    Stream(StreamId),
+}
+
+/// Handle of a vertex stream of a scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StreamId(u32);
+
+/// One float attribute of a vertex stream, matched to shader inputs by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamAttribute {
+    pub name: String,
+    pub offset_floats: u32,
+    /// 1 to 4 floats.
+    pub components: u32,
+}
+
+/// Vertex layout of a stream (e.g. the 17-float sprite vertex of spec 05 §12.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamLayout {
+    pub stride_floats: u32,
+    pub attributes: Vec<StreamAttribute>,
+}
+
+/// Vertices rewritten every frame from the CPU (particles) with a constant
+/// index buffer, both allocated once at their maximum size.
+struct VertexStream {
+    layout: StreamLayout,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    max_floats: usize,
+    max_indices: u32,
+    index_count: u32,
+    _memory: crate::context::MemoryToken,
 }
 
 /// Render-ready description of a pass.
@@ -200,12 +235,60 @@ pub struct SceneBuilder<'c> {
     shaders: Vec<PassShader>,
     dynbuf: DynamicBufferBuilder,
     indices: Vec<u16>,
+    streams: Vec<VertexStream>,
     passes: Vec<PassRecord>,
     ops: Vec<Op>,
     scene_size: (f32, f32),
 }
 
 impl<'c> SceneBuilder<'c> {
+    /// Allocate a vertex stream of at most `max_vertices` vertices drawn with
+    /// the constant 32-bit `indices` (load time). Feed it every frame with
+    /// [`RenderScene::write_stream`].
+    pub fn add_stream(
+        &mut self,
+        label: &str,
+        layout: StreamLayout,
+        max_vertices: u32,
+        indices: &[u32],
+    ) -> StreamId {
+        let device = self.ctx.device();
+        let max_floats = max_vertices as usize * layout.stride_floats as usize;
+        let vsize = ((max_floats * 4) as u64)
+            .max(16)
+            .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: vsize,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ibytes: &[u8] = bytemuck::cast_slice(indices);
+        let isize = (ibytes.len() as u64)
+            .max(16)
+            .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: isize,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !ibytes.is_empty() {
+            self.ctx.queue().write_buffer(&index_buffer, 0, ibytes);
+        }
+        self.ctx.note_resources(2);
+        self.streams.push(VertexStream {
+            layout,
+            vertices,
+            indices: index_buffer,
+            max_floats,
+            max_indices: indices.len() as u32,
+            index_count: 0,
+            _memory: self.ctx.memory().track(vsize + isize),
+        });
+        StreamId(self.streams.len() as u32 - 1)
+    }
+
     /// `scene_size` = projection size `(W, H)`, used for `g_TexelSize`.
     #[must_use]
     pub fn new(ctx: &'c GpuContext, scene_size: (f32, f32)) -> Self {
@@ -226,6 +309,7 @@ impl<'c> SceneBuilder<'c> {
             shaders: Vec::new(),
             dynbuf,
             indices: Vec::new(),
+            streams: Vec::new(),
             passes: Vec::new(),
             ops: Vec::new(),
             scene_size,
@@ -309,6 +393,11 @@ impl<'c> SceneBuilder<'c> {
             .ok_or(RenderError::BadHandle("shader"))?;
         if self.targets.try_get(desc.target).is_none() {
             return Err(RenderError::BadHandle("render target"));
+        }
+        if let Geometry::Stream(s) = desc.geometry
+            && self.streams.get(s.0 as usize).is_none()
+        {
+            return Err(RenderError::BadHandle("vertex stream"));
         }
         let uniform = shader
             .interface()
@@ -450,6 +539,7 @@ impl<'c> SceneBuilder<'c> {
             interfaces: self.shaders.iter().map(|s| s.interface().clone()).collect(),
             dynbuf,
             index_buffer,
+            streams: std::mem::take(&mut self.streams),
             default_attrs,
             uniform_layout,
             uniform_bg,
@@ -476,6 +566,24 @@ impl<'c> SceneBuilder<'c> {
         scene.analyse_ops();
         scene.rebuild_bindings(ctx)?;
         Ok(scene)
+    }
+}
+
+/// Format of a default-fed vertex input.
+fn unfed_format(kind: ScalarKind, components: u8) -> wgpu::VertexFormat {
+    match (kind, components) {
+        (ScalarKind::Float, 1) => wgpu::VertexFormat::Float32,
+        (ScalarKind::Float, 2) => wgpu::VertexFormat::Float32x2,
+        (ScalarKind::Float, 3) => wgpu::VertexFormat::Float32x3,
+        (ScalarKind::Float, _) => wgpu::VertexFormat::Float32x4,
+        (ScalarKind::Sint, 1) => wgpu::VertexFormat::Sint32,
+        (ScalarKind::Sint, 2) => wgpu::VertexFormat::Sint32x2,
+        (ScalarKind::Sint, 3) => wgpu::VertexFormat::Sint32x3,
+        (ScalarKind::Sint, _) => wgpu::VertexFormat::Sint32x4,
+        (ScalarKind::Uint, 1) => wgpu::VertexFormat::Uint32,
+        (ScalarKind::Uint, 2) => wgpu::VertexFormat::Uint32x2,
+        (ScalarKind::Uint, 3) => wgpu::VertexFormat::Uint32x3,
+        (ScalarKind::Uint, _) => wgpu::VertexFormat::Uint32x4,
     }
 }
 
@@ -510,6 +618,8 @@ struct PipelineKey {
     blend: BlendMode,
     write_mask: WriteMask,
     cull: CullMode,
+    /// First stream with the same vertex layout, for stream passes.
+    stream_layout: Option<usize>,
 }
 
 struct CompiledPass {
@@ -551,7 +661,7 @@ trait Recorder<'a> {
     fn pipeline(&mut self, p: &'a wgpu::RenderPipeline);
     fn bind_group(&mut self, index: u32, bg: &'a wgpu::BindGroup, offsets: &[u32]);
     fn vertex_buffer(&mut self, slot: u32, s: wgpu::BufferSlice<'a>);
-    fn index_buffer(&mut self, s: wgpu::BufferSlice<'a>);
+    fn index_buffer(&mut self, s: wgpu::BufferSlice<'a>, format: wgpu::IndexFormat);
     fn draw(&mut self, v: std::ops::Range<u32>);
     fn draw_indexed(&mut self, i: std::ops::Range<u32>, base: i32);
 }
@@ -566,8 +676,8 @@ impl<'a> Recorder<'a> for wgpu::RenderPass<'_> {
     fn vertex_buffer(&mut self, slot: u32, s: wgpu::BufferSlice<'a>) {
         self.set_vertex_buffer(slot, s);
     }
-    fn index_buffer(&mut self, s: wgpu::BufferSlice<'a>) {
-        self.set_index_buffer(s, wgpu::IndexFormat::Uint16);
+    fn index_buffer(&mut self, s: wgpu::BufferSlice<'a>, format: wgpu::IndexFormat) {
+        self.set_index_buffer(s, format);
     }
     fn draw(&mut self, v: std::ops::Range<u32>) {
         wgpu::RenderPass::draw(self, v, 0..1);
@@ -587,8 +697,8 @@ impl<'a> Recorder<'a> for wgpu::RenderBundleEncoder<'a> {
     fn vertex_buffer(&mut self, slot: u32, s: wgpu::BufferSlice<'a>) {
         self.set_vertex_buffer(slot, s);
     }
-    fn index_buffer(&mut self, s: wgpu::BufferSlice<'a>) {
-        self.set_index_buffer(s, wgpu::IndexFormat::Uint16);
+    fn index_buffer(&mut self, s: wgpu::BufferSlice<'a>, format: wgpu::IndexFormat) {
+        self.set_index_buffer(s, format);
     }
     fn draw(&mut self, v: std::ops::Range<u32>) {
         wgpu::RenderBundleEncoder::draw(self, v, 0..1);
@@ -606,6 +716,7 @@ pub struct RenderScene {
     interfaces: Vec<ShaderInterface>,
     dynbuf: DynamicBuffer,
     index_buffer: Option<wgpu::Buffer>,
+    streams: Vec<VertexStream>,
     default_attrs: wgpu::Buffer,
     uniform_layout: wgpu::BindGroupLayout,
     uniform_bg: wgpu::BindGroup,
@@ -695,10 +806,49 @@ impl RenderScene {
             return Err(err("indexed geometry without indices".into()));
         }
 
-        // Vertex layouts: slot 0 = dynamic vertices, slots 1.. = defaults.
+        // Vertex layouts: slot 0 = dynamic vertices (or the stream), slots 1.. = defaults.
+        let stream = match desc.geometry {
+            Geometry::Stream(s) => Some(
+                self.streams
+                    .get(s.0 as usize)
+                    .ok_or_else(|| err("unknown vertex stream".into()))?,
+            ),
+            _ => None,
+        };
         let mut main_attrs = Vec::new();
         let mut unfed_attrs = Vec::new();
         for input in &iface.vertex_inputs {
+            if let Some(stream) = stream {
+                let name = iface.vertex_input_name(input.location).unwrap_or("");
+                if let Some(a) = stream.layout.attributes.iter().find(|a| a.name == name) {
+                    let format = match a.components {
+                        1 => wgpu::VertexFormat::Float32,
+                        2 => wgpu::VertexFormat::Float32x2,
+                        3 => wgpu::VertexFormat::Float32x3,
+                        _ => wgpu::VertexFormat::Float32x4,
+                    };
+                    main_attrs.push(wgpu::VertexAttribute {
+                        format,
+                        offset: u64::from(a.offset_floats) * 4,
+                        shader_location: input.location,
+                    });
+                    continue;
+                }
+                let (components, kind) = match input.attr {
+                    VertexAttr::Position => (3, ScalarKind::Float),
+                    VertexAttr::TexCoord => (2, ScalarKind::Float),
+                    VertexAttr::Unfed { components, kind } => (components, kind),
+                };
+                unfed_attrs.push((
+                    [wgpu::VertexAttribute {
+                        format: unfed_format(kind, components),
+                        offset: 0,
+                        shader_location: input.location,
+                    }],
+                    kind != ScalarKind::Float,
+                ));
+                continue;
+            }
             match input.attr {
                 VertexAttr::Position => main_attrs.push(wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32x3,
@@ -711,23 +861,9 @@ impl RenderScene {
                     shader_location: input.location,
                 }),
                 VertexAttr::Unfed { components, kind } => {
-                    let format = match (kind, components) {
-                        (ScalarKind::Float, 1) => wgpu::VertexFormat::Float32,
-                        (ScalarKind::Float, 2) => wgpu::VertexFormat::Float32x2,
-                        (ScalarKind::Float, 3) => wgpu::VertexFormat::Float32x3,
-                        (ScalarKind::Float, _) => wgpu::VertexFormat::Float32x4,
-                        (ScalarKind::Sint, 1) => wgpu::VertexFormat::Sint32,
-                        (ScalarKind::Sint, 2) => wgpu::VertexFormat::Sint32x2,
-                        (ScalarKind::Sint, 3) => wgpu::VertexFormat::Sint32x3,
-                        (ScalarKind::Sint, _) => wgpu::VertexFormat::Sint32x4,
-                        (ScalarKind::Uint, 1) => wgpu::VertexFormat::Uint32,
-                        (ScalarKind::Uint, 2) => wgpu::VertexFormat::Uint32x2,
-                        (ScalarKind::Uint, 3) => wgpu::VertexFormat::Uint32x3,
-                        (ScalarKind::Uint, _) => wgpu::VertexFormat::Uint32x4,
-                    };
                     unfed_attrs.push((
                         [wgpu::VertexAttribute {
-                            format,
+                            format: unfed_format(kind, components),
                             offset: 0,
                             shader_location: input.location,
                         }],
@@ -743,8 +879,14 @@ impl RenderScene {
                 unfed_attrs.len()
             )));
         }
+        let stride = stream.map_or(u64::from(VERTEX_SIZE), |s| {
+            u64::from(s.layout.stride_floats) * 4
+        });
+        // Pipelines of streams with the same layout are shared.
+        let layout_key =
+            stream.and_then(|s| self.streams.iter().position(|o| o.layout == s.layout));
         let mut layouts = vec![Some(wgpu::VertexBufferLayout {
-            array_stride: u64::from(VERTEX_SIZE),
+            array_stride: stride,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &main_attrs,
         })];
@@ -767,6 +909,7 @@ impl RenderScene {
             blend: desc.blend,
             write_mask: desc.write_mask,
             cull: desc.cull,
+            stream_layout: layout_key,
         };
         let pipeline = if let Some(p) = cache.get(&key) {
             p.clone()
@@ -1079,15 +1222,26 @@ impl RenderScene {
 
     fn record<'a, R: Recorder<'a>>(&'a self, r: &mut R, index: usize) {
         let pass = &self.passes[index];
+        let stream = match pass.desc.geometry {
+            Geometry::Stream(s) => match self.streams.get(s.0 as usize) {
+                Some(s) if s.index_count > 0 => Some(s),
+                _ => return,
+            },
+            _ => None,
+        };
         r.pipeline(&pass.pipeline);
         r.bind_group(0, &self.uniform_bg, &[pass.uniform.map_or(0, |u| u.offset)]);
         r.bind_group(1, &pass.bind_groups[pass.variant], &[]);
-        r.vertex_buffer(
-            0,
-            self.dynbuf
-                .buffer()
-                .slice(u64::from(self.dynbuf.vertex_offset())..),
-        );
+        if let Some(s) = stream {
+            r.vertex_buffer(0, s.vertices.slice(..));
+        } else {
+            r.vertex_buffer(
+                0,
+                self.dynbuf
+                    .buffer()
+                    .slice(u64::from(self.dynbuf.vertex_offset())..),
+            );
+        }
         for &(slot, int) in &pass.unfed {
             let off = if int { 16 } else { 0 };
             r.vertex_buffer(slot, self.default_attrs.slice(off..off + 16));
@@ -1096,11 +1250,17 @@ impl RenderScene {
             Geometry::Vertices(v) => r.draw(v.first..v.first + v.count),
             Geometry::Indexed { vertices, indices } => {
                 if let Some(ib) = &self.index_buffer {
-                    r.index_buffer(ib.slice(..));
+                    r.index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
                     r.draw_indexed(
                         indices.first..indices.first + indices.count,
                         vertices.first as i32,
                     );
+                }
+            }
+            Geometry::Stream(_) => {
+                if let Some(s) = stream {
+                    r.index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    r.draw_indexed(0..s.index_count, 0);
                 }
             }
         }
@@ -1150,7 +1310,10 @@ impl RenderScene {
                         let Item::Pass(p) = item else {
                             continue;
                         };
-                        if self.passes[p].bind_groups.len() == 1 {
+                        // Stream passes change their draw count every frame: never bundled.
+                        if self.passes[p].bind_groups.len() == 1
+                            && !matches!(self.passes[p].desc.geometry, Geometry::Stream(_))
+                        {
                             run.push(p);
                         } else {
                             close_run(&mut run, &mut out, &mut bundles);
@@ -1185,6 +1348,32 @@ impl RenderScene {
     /// Rewrite the vertices of a range (image rectangle moved).
     pub fn set_vertices(&mut self, range: VertexRange, v: &[Vertex]) {
         self.dynbuf.set_vertices(range, v);
+    }
+
+    /// Upload this frame's vertices of a stream and set how many of its
+    /// indices to draw (clamped to the buffer capacities). One
+    /// `write_buffer`, no allocation; an empty stream draws nothing.
+    pub fn write_stream(
+        &mut self,
+        ctx: &GpuContext,
+        id: StreamId,
+        vertices: &[f32],
+        index_count: u32,
+    ) {
+        let Some(s) = self.streams.get_mut(id.0 as usize) else {
+            return;
+        };
+        let floats = vertices.len().min(s.max_floats);
+        let count = index_count.min(s.max_indices);
+        if count == 0 && s.index_count == 0 {
+            return;
+        }
+        if floats > 0 && count > 0 {
+            ctx.queue()
+                .write_buffer(&s.vertices, 0, bytemuck::cast_slice(&vertices[..floats]));
+        }
+        s.index_count = count;
+        self.dirty = true;
     }
 
     /// Select the slot-0 variant of a pass (frame of an animated texture).

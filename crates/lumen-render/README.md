@@ -156,7 +156,8 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 
 ## Not done yet (wired later)
 
-- Text objects (R8 glyph texture, `text_matrix` is ready), particles (17/26-float vertex formats need a second vertex layout in the graph), puppet mesh parsing (indexed geometry and the puppet chain cases are ready), video and web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks).
+- Text objects (R8 glyph texture, `text_matrix` is ready), video and web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks).
+- Added for the integration (`lumen-engine`): vertex streams for particles (`SceneBuilder::add_stream`, `Geometry::Stream`, `RenderScene::write_stream`, inputs matched by name through `ShaderInterface::vertex_input_names`, never bundled) and rest-pose puppet meshes (`add_image_with_puppet`, `PuppetGeometry`).
 - Real WE shaders: depends on `lumen-shader` emitting the binding contract above.
 - Lazy allocation of image B composites when the chain never writes B (memory).
 - Load-op `Clear` instead of `Load` for passes that fully overwrite their target (saves bandwidth on tiled/integrated GPUs; needs a coverage guarantee to stay parity-safe).

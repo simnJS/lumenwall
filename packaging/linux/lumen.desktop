@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Lumen
+GenericName=Animated wallpaper
+Comment=Plays Wallpaper Engine scene wallpapers on the desktop
+# The wallpaper comes from ~/.config/lumen/config.toml (`wallpaper = "<workshop id or path>"`).
+# To pin one here instead: Exec=lumen 3018340632
+Exec=lumen
+Icon=preferences-desktop-wallpaper
+Terminal=false
+NoDisplay=true
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-KDE-autostart-after=panel

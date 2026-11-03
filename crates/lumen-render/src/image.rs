@@ -19,7 +19,7 @@ use crate::graph::{
     Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SlotBinding, TextureRef,
 };
 use crate::math::{
-    Alignment, NodeTransform, copy_matrix, copy_quad, copy_uv_max, image_rect, rect_quad,
+    Alignment, NodeTransform, Vertex, copy_matrix, copy_quad, copy_uv_max, image_rect, rect_quad,
     screen_matrix, unit_quad,
 };
 use crate::shader::MAX_SLOTS;
@@ -108,11 +108,21 @@ pub struct ImageFrame {
     pub scene_size: Vec2,
 }
 
+/// Static puppet mesh of an image (spec 04 §20, rest pose): positions in local image pixels
+/// (`(S.x/2 + x, S.y/2 − y, z)`, y from the top edge), texture coordinates as stored.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PuppetGeometry {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u16>,
+}
+
 /// Handle returned by [`add_image`] to update the image every frame.
 #[derive(Clone, Debug)]
 pub struct ImageHandle {
     pub passes: Vec<PassId>,
     pub plan: Vec<PlannedPass<RtId>>,
+    /// Single-pass puppet drawn into the scene: its screen matrix maps local pixels to RC.
+    puppet_scene: bool,
     size: Vec2,
     alignment: Alignment,
     uv_max: Vec2,
@@ -140,6 +150,19 @@ pub fn add_image(
     spec: &ImageSpec,
     passes: &[ImagePass],
 ) -> Result<ImageHandle> {
+    add_image_with_puppet(b, spec, passes, None)
+}
+
+/// [`add_image`] for an image whose first pass draws a puppet mesh (spec 04 §20.3): indexed
+/// mesh with `M_copie`, destination cleared first, first pass translucent; a single-pass chain
+/// draws the mesh into the scene with `M_ecran` (positions mapped to RC, spec 04 Q22).
+pub fn add_image_with_puppet(
+    b: &mut SceneBuilder<'_>,
+    spec: &ImageSpec,
+    passes: &[ImagePass],
+    puppet: Option<&PuppetGeometry>,
+) -> Result<ImageHandle> {
+    let puppet = puppet.filter(|m| !m.vertices.is_empty() && !m.indices.is_empty());
     let inputs: Vec<ChainPassInput<RtId>> = passes
         .iter()
         .map(|p| ChainPassInput {
@@ -153,7 +176,7 @@ pub fn add_image(
             final_to_scene: spec.final_to_scene,
             passthrough: spec.passthrough,
             fullscreen: spec.fullscreen,
-            puppet: false,
+            puppet: puppet.is_some(),
         },
     );
     let uv_max = copy_uv_max(
@@ -168,9 +191,11 @@ pub fn add_image(
     let mut unit_geom = None;
     let mut scene_geom = None;
     let mut passthrough_geom = None;
+    let mut mesh_geom = None;
     let mut handle = ImageHandle {
         passes: Vec::with_capacity(plan.len()),
         plan: plan.clone(),
+        puppet_scene: false,
         size: spec.size,
         alignment: spec.alignment,
         uv_max,
@@ -195,31 +220,40 @@ pub fn add_image(
             TextureRef::Target(t) => t,
             _ => spec.scene_target,
         };
-        let geometry = match q.geometry {
-            GeometryCase::Copy | GeometryCase::PuppetLocal => {
-                *copy_geom.get_or_insert_with(|| b.add_vertices(&copy_quad(spec.size, uv_max)))
+        let geometry = match (q.geometry, puppet) {
+            (GeometryCase::PuppetLocal | GeometryCase::PuppetScene, Some(mesh)) => {
+                handle.puppet_scene |= q.geometry == GeometryCase::PuppetScene;
+                *mesh_geom.get_or_insert_with(|| Geometry::Indexed {
+                    vertices: b.add_vertices(&mesh.vertices),
+                    indices: b.add_indices(&mesh.indices),
+                })
             }
-            GeometryCase::Unit => *unit_geom.get_or_insert_with(|| b.add_vertices(&unit_quad())),
-            GeometryCase::SceneRect | GeometryCase::SceneRectCopyUv | GeometryCase::PuppetScene => {
-                let copy_uv = q.geometry != GeometryCase::SceneRect;
-                let r = *scene_geom.get_or_insert_with(|| (b.add_vertices(&unit_quad()), copy_uv));
-                handle.scene_geometry = Some(r);
-                r.0
-            }
-            GeometryCase::Passthrough { fullscreen } => {
-                let r = *passthrough_geom
-                    .get_or_insert_with(|| (b.add_vertices(&unit_quad()), fullscreen));
-                handle.passthrough_geometry = Some(r);
-                r.0
-            }
+            (geometry, _) => Geometry::Vertices(match geometry {
+                GeometryCase::Copy | GeometryCase::PuppetLocal => {
+                    *copy_geom.get_or_insert_with(|| b.add_vertices(&copy_quad(spec.size, uv_max)))
+                }
+                GeometryCase::Unit => {
+                    *unit_geom.get_or_insert_with(|| b.add_vertices(&unit_quad()))
+                }
+                GeometryCase::SceneRect
+                | GeometryCase::SceneRectCopyUv
+                | GeometryCase::PuppetScene => {
+                    let copy_uv = q.geometry != GeometryCase::SceneRect;
+                    let r =
+                        *scene_geom.get_or_insert_with(|| (b.add_vertices(&unit_quad()), copy_uv));
+                    handle.scene_geometry = Some(r);
+                    r.0
+                }
+                GeometryCase::Passthrough { fullscreen } => {
+                    let r = *passthrough_geom
+                        .get_or_insert_with(|| (b.add_vertices(&unit_quad()), fullscreen));
+                    handle.passthrough_geometry = Some(r);
+                    r.0
+                }
+            }),
         };
 
-        let mut desc = PassDesc::new(
-            p.label.clone(),
-            p.shader,
-            target,
-            Geometry::Vertices(geometry),
-        );
+        let mut desc = PassDesc::new(p.label.clone(), p.shader, target, geometry);
         desc.blend = q.blend;
         desc.write_mask = q.write_mask;
         desc.cull = p.cull;
@@ -261,6 +295,12 @@ pub fn add_image(
             (MatrixKind::Identity, _) => write_matrix(b, id, Mat4::IDENTITY),
             (MatrixKind::Screen, _) => handle.screen_passes.push(dynamic(b)),
         }
+        if q.clear_before {
+            b.push(Op::Clear {
+                target,
+                color: [0.0; 4],
+            });
+        }
         b.push(Op::Draw(id));
         handle.passes.push(id);
     }
@@ -274,7 +314,15 @@ impl ImageHandle {
     pub fn update(&self, scene: &mut RenderScene, f: &ImageFrame) {
         let t = f.transform;
         let rect = image_rect(t.origin, t.scale, self.size, self.alignment, f.scene_size);
-        let screen = screen_matrix(f.view_projection, &rect, t.angle, f.parallax);
+        let mut screen = screen_matrix(f.view_projection, &rect, t.angle, f.parallax);
+        if self.puppet_scene {
+            // Mesh in local pixels → the image rectangle in RC (spec 04 Q22).
+            let sx = (rect.x1 - rect.x0) / self.size.x.max(f32::MIN_POSITIVE);
+            let sy = (rect.y_bottom - rect.y_top) / self.size.y.max(f32::MIN_POSITIVE);
+            screen = screen
+                * Mat4::from_translation(Vec3::new(rect.x0, rect.y_top, 0.0))
+                * Mat4::from_scale(Vec3::new(sx, sy, 1.0));
+        }
         if let Some((range, copy_uv)) = self.scene_geometry {
             let uv = if copy_uv { self.uv_max } else { Vec2::ONE };
             scene.set_vertices(range, &rect_quad(&rect, uv));

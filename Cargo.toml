@@ -23,6 +23,7 @@ lumen-particles = { path = "crates/lumen-particles" }
 lumen-assets = { path = "crates/lumen-assets" }
 lumen-ipc = { path = "crates/lumen-ipc" }
 lumen-ui = { path = "crates/lumen-ui" }
+lumen-engine = { path = "crates/lumen-engine" }
 
 thiserror = "2"
 anyhow = "1"

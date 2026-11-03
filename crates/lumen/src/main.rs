@@ -2,26 +2,34 @@
 // Logs go to a rotated file; a parent terminal is reattached when there is one.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, mpsc};
 
 use lumen::app::{self, Console, Services};
-use lumen::plan::ExecutionPlan;
+use lumen::plan::{ExecutionPlan, OutputMode, PlanChange};
 use lumen::playlist::{PathStyle, RealFs, WeConfigCatalog};
 use lumen::services::{Control, Engine, ServiceError, StopReason, Waker, WallpaperResolver};
-use lumen::settings::WallpaperSource;
+use lumen::settings::{Clamp, Layer, Scaling, WallpaperSource};
+use lumen_engine::{EngineControl, EnginePlan, Stopped};
 
 fn main() -> ExitCode {
     let attached = lumen::console::prepare();
+    let resolver = lumen_engine::WallpaperResolver::new();
+    let install = resolver.clone();
     let services = Services {
-        resolver: Arc::new(PendingResolver),
+        resolver: Arc::new(Resolver(resolver.clone())),
         playlists: Arc::new(WeConfigCatalog::new(
-            || Err("locating the Wallpaper Engine installation is not integrated yet".into()),
+            move || {
+                let dir = install.install_dir()?;
+                std::fs::read_to_string(dir.join("config.json"))
+                    .map_err(|e| format!("{}: {e}", dir.join("config.json").display()).into())
+            },
             RealFs,
             PathStyle::native(),
         )),
-        engine: Box::new(PendingEngine),
+        engine: Box::new(LumenEngine(lumen_engine::Engine::new(resolver))),
     };
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     let console = Console {
@@ -32,52 +40,165 @@ fn main() -> ExitCode {
     app::run(std::env::args_os().collect(), services, console).into()
 }
 
-// Placeholders until lumen-assets and the engine crates are wired in.
+// Adapters between the application's service traits and lumen-engine (which cannot depend on
+// this crate: the binary depends on it).
 
-struct PendingResolver;
+struct Resolver(lumen_engine::WallpaperResolver);
 
-impl WallpaperResolver for PendingResolver {
+impl WallpaperResolver for Resolver {
     fn resolve(&self, source: &WallpaperSource) -> Result<PathBuf, ServiceError> {
         match source {
-            WallpaperSource::Path(path) => Ok(path.clone()),
-            WallpaperSource::WorkshopId(id) => Err(format!(
-                "cannot look up Workshop item '{id}': Steam lookup is not integrated yet"
-            )
-            .into()),
+            WallpaperSource::Path(path) if path.exists() => Ok(path.clone()),
+            WallpaperSource::Path(path) => {
+                Err(format!("wallpaper folder '{}' not found", path.display()).into())
+            }
+            WallpaperSource::WorkshopId(id) => Ok(self.0.workshop_dir(id)?),
         }
     }
 }
 
-struct NoWaker;
+struct EngineWaker(lumen_engine::EngineWaker);
 
-impl Waker for NoWaker {
-    fn wake(&self) {}
+impl Waker for EngineWaker {
+    fn wake(&self) {
+        self.0.wake();
+    }
 }
 
-struct PendingEngine;
+struct LumenEngine(lumen_engine::Engine);
 
-impl Engine for PendingEngine {
+fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
+    use lumen_engine::{ClampMode, ScalingMode};
+    let mode = match plan.mode {
+        // Lumen: a wallpaper given without -w/-r covers every output as a desktop wallpaper
+        // (the reference opens a 640x480 window, kept behind LUMEN_WINDOWED=1 for debugging).
+        OutputMode::Window if std::env::var_os("LUMEN_WINDOWED").is_some_and(|v| v != "0") => {
+            lumen_engine::OutputMode::Window
+        }
+        OutputMode::Window => lumen_engine::OutputMode::Desktop,
+        OutputMode::ExplicitWindow(g) => lumen_engine::OutputMode::ExplicitWindow {
+            x: g.x,
+            y: g.y,
+            width: g.width.max(1) as u32,
+            height: g.height.max(1) as u32,
+        },
+        OutputMode::Desktop => lumen_engine::OutputMode::Desktop,
+    };
+    let targets = plan
+        .targets
+        .iter()
+        .map(|t| lumen_engine::TargetPlan {
+            key: t.key.to_string(),
+            outputs: t.outputs.clone(),
+            wallpaper: t.wallpaper.path.clone(),
+            scaling: match t.scaling {
+                Scaling::Stretch => ScalingMode::Stretch,
+                Scaling::Fit => ScalingMode::Fit,
+                Scaling::Fill => ScalingMode::Fill,
+                Scaling::Default => ScalingMode::Default,
+            },
+            clamp: match t.clamp {
+                Clamp::Clamp => ClampMode::Clamp,
+                Clamp::Border => ClampMode::Border,
+                Clamp::Repeat => ClampMode::Repeat,
+            },
+        })
+        .collect();
+    EnginePlan {
+        mode,
+        targets,
+        layer: match plan.layer {
+            Layer::Background => lumen_engine::plan::Layer::Background,
+            Layer::Bottom => lumen_engine::plan::Layer::Bottom,
+            Layer::Top => lumen_engine::plan::Layer::Top,
+            Layer::Overlay => lumen_engine::plan::Layer::Overlay,
+        },
+        fps: plan.fps.max(1),
+        audio: lumen_engine::AudioPlan {
+            silent: plan.audio.silent,
+            volume: plan.audio.volume,
+            automute: plan.audio.automute,
+            processing: plan.audio.processing,
+        },
+        pause: lumen_engine::PausePlan {
+            enabled: plan.fullscreen_pause.enabled,
+            only_active: plan.fullscreen_pause.only_active,
+            ignore_app_ids: plan.fullscreen_pause.ignore_app_ids.clone(),
+        },
+        mouse: plan.input.mouse,
+        parallax: plan.input.parallax,
+        particles: plan.particles,
+        assets_dir: plan.assets_dir.clone(),
+        properties: plan.properties.clone(),
+        screenshot: plan
+            .screenshot
+            .as_ref()
+            .map(|s| (s.path.clone(), s.delay_frames)),
+        list_properties: plan.list_properties,
+        dump_structure: plan.dump_structure,
+        debug: lumen_engine::DebugPlan {
+            base_only: plan.render_debug.base_only,
+            no_solid_final: plan.render_debug.no_solid_final,
+            pass_log: plan.render_debug.pass_log,
+            only_object: plan.render_debug.only_object,
+            skip_objects: plan.render_debug.skip_objects.clone(),
+            skip_effects: plan.render_debug.skip_effects.clone(),
+        },
+    }
+}
+
+impl Engine for LumenEngine {
     fn waker(&self) -> Arc<dyn Waker> {
-        Arc::new(NoWaker)
+        Arc::new(EngineWaker(self.0.waker()))
     }
 
-    fn load(&mut self, _plan: &ExecutionPlan) -> Result<(), ServiceError> {
-        Err("the rendering engine is not integrated yet".into())
+    fn load(&mut self, plan: &ExecutionPlan) -> Result<(), ServiceError> {
+        Ok(self.0.load(&engine_plan(plan))?)
     }
 
-    fn write_properties(&mut self, _out: &mut dyn std::io::Write) -> Result<(), ServiceError> {
-        Err("the rendering engine is not integrated yet".into())
+    fn write_properties(&mut self, out: &mut dyn std::io::Write) -> Result<(), ServiceError> {
+        Ok(self.0.write_properties(out)?)
     }
 
     fn start(&mut self) -> Result<(), ServiceError> {
-        Err("the rendering engine is not integrated yet".into())
+        Ok(self.0.start()?)
     }
 
-    fn write_structure(&mut self, _out: &mut dyn std::io::Write) -> Result<(), ServiceError> {
-        Err("the rendering engine is not integrated yet".into())
+    fn write_structure(&mut self, out: &mut dyn std::io::Write) -> Result<(), ServiceError> {
+        Ok(self.0.write_structure(out)?)
     }
 
-    fn run(&mut self, _control: mpsc::Receiver<Control>) -> Result<StopReason, ServiceError> {
-        Err("the rendering engine is not integrated yet".into())
+    fn run(&mut self, control: mpsc::Receiver<Control>) -> Result<StopReason, ServiceError> {
+        let mut queue: VecDeque<EngineControl> = VecDeque::new();
+        let mut next = || {
+            while queue.is_empty() {
+                match control.try_recv().ok()? {
+                    Control::Stop(StopReason::Signal(n)) => {
+                        queue.push_back(EngineControl::Stop(Some(n)));
+                    }
+                    Control::Stop(StopReason::Driver) => queue.push_back(EngineControl::Stop(None)),
+                    Control::Reload { plan, changes } => {
+                        for change in &changes {
+                            match change {
+                                PlanChange::Fps => {
+                                    queue.push_back(EngineControl::SetFps(plan.fps));
+                                }
+                                PlanChange::Properties => queue.push_back(
+                                    EngineControl::SetProperties(plan.properties.clone()),
+                                ),
+                                other => tracing::warn!(
+                                    "configuration change {other:?} applies at the next start"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+            queue.pop_front()
+        };
+        Ok(match self.0.run(&mut next)? {
+            Stopped::Signal(n) => StopReason::Signal(n),
+            Stopped::Requested | Stopped::Driver => StopReason::Driver,
+        })
     }
 }

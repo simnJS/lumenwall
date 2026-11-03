@@ -41,11 +41,14 @@ pub use context::{ContextOptions, GpuCaps, GpuContext, GpuInstance};
 pub use dynbuf::{FrameInputs, UniformSlot};
 pub use error::{RenderError, Result};
 pub use graph::{
-    Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SlotBinding, TextureId,
-    TextureRef,
+    Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SlotBinding,
+    StreamAttribute, StreamId, StreamLayout, TextureId, TextureRef,
 };
 pub use headless::HeadlessOutput;
-pub use image::{ImageFrame, ImageHandle, ImagePass, ImageSpec, SlotSource, add_image};
+pub use image::{
+    ImageFrame, ImageHandle, ImagePass, ImageSpec, PuppetGeometry, SlotSource, add_image,
+    add_image_with_puppet,
+};
 pub use math::{UvRange, Vertex};
 pub use shader::ShaderDesc;
 pub use surface::OutputSurface;

@@ -68,12 +68,24 @@ pub struct ShaderInterface {
     /// Bit N set = slot N sampled.
     pub slots: u8,
     pub vertex_inputs: Vec<VertexInput>,
+    /// `(location, name)` of every vertex input, for vertex streams that feed
+    /// attributes by name (particles, see `graph::StreamLayout`).
+    pub vertex_input_names: Vec<(u32, String)>,
 }
 
 impl ShaderInterface {
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&UniformField> {
         self.uniforms.iter().find(|f| f.name == name)
+    }
+
+    /// Name of the vertex input at `location`.
+    #[must_use]
+    pub fn vertex_input_name(&self, location: u32) -> Option<&str> {
+        self.vertex_input_names
+            .iter()
+            .find(|(l, _)| *l == location)
+            .map(|(_, n)| n.as_str())
     }
 
     #[must_use]
@@ -219,6 +231,9 @@ pub fn reflect(module: &Module, vertex_entry: &str, label: &str) -> Result<Shade
                 location: *location,
                 attr,
             });
+            if let Some(n) = name {
+                out.vertex_input_names.push((*location, n.clone()));
+            }
             Ok(())
         };
     for arg in &ep.function.arguments {
