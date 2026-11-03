@@ -277,6 +277,7 @@ cargo run --release -p lumenwall -- -w 0x0x1720x720 3018340632 # borderless wind
 LUMENWALL_WINDOWED=1 cargo run --release -p lumenwall -- 3018340632 # 640x480 window
 LUMENWALL_STATS=1 ...                                          # fps, CPU/GPU ms per frame, memory every 5 s
 cargo run -p lumenwall-engine --example render_png -- --size 1720x720 --frames 60 --save 0,30,59 3018340632
+cargo run -p lumenwall-engine --example render_png -- --no-particles --debug object=28 --debug pass-log <path>
 ```
 
 PNG files go to `target/agent-integration/shots/` by default (never into the repository: the
