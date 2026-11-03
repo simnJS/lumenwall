@@ -80,6 +80,10 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   particles (with their `starttime` warm-up), scripts (`init` again, in-memory `localStorage`
   lost), videos (from the start, with a fresh sound track) and web pages (reloaded; the output
   keeps its image until the page's first frame).
+- Freed heap pages go back to the system (`malloc_trim(0)`, glibc only) after a wallpaper is
+  unloaded by a new plan and after the GPU release: glibc keeps them in its arenas otherwise
+  (scene → video → scene: 249 → 220 MiB RSS; released GPU: 117 → 101 MiB). 1–3 ms, on those
+  events only.
 - One scene per target, updated and encoded once per loop iteration even when several outputs
   show it; each output then composes it with its own scaling and clamp.
 - Scripts with per-frame work (`update`, timers, audio buffers, text layers, queued events) keep

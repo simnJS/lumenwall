@@ -106,6 +106,7 @@ impl Engine {
     fn release_gpu(&mut self, r: Running) {
         let t0 = Instant::now();
         let (vram, _) = self.release_running(r, false);
+        super::trim_heap();
         tracing::info!(
             "every output paused for {} s: GPU released ({:.1} MiB) in {:.0} ms",
             self.plan.gpu_release.map_or(0, |d| d.as_secs()),
