@@ -21,6 +21,7 @@ lumen-render.workspace = true
 lumen-particles.workspace = true
 lumen-platform.workspace = true
 lumen-audio.workspace = true
+lumen-script.workspace = true
 lumen-shader = { workspace = true, optional = true }
 # Same versions as lumen-render: only used for command encoders and surfaces it hands out.
 wgpu = { version = "30.0.1", default-features = false, features = ["std"] }

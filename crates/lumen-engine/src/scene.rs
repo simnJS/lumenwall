@@ -14,7 +14,7 @@ use std::rc::Rc;
 use glam::{Mat4, Vec2, Vec3};
 use lumen_assets::Vfs;
 use lumen_particles::ParallaxInput;
-use lumen_render::dynbuf::{FrameInputs, UniformSlot};
+use lumen_render::dynbuf::{FrameInputs, UniformSlot, frame_globals};
 use lumen_render::image::composite_sampler;
 use lumen_render::math::{
     Alignment as RAlign, HAlign, NodeTransform, OrthoCamera, Parallax, ParallaxSmoothing, Pointer,
@@ -28,14 +28,16 @@ use lumen_render::{
     add_image_with_puppet,
 };
 use lumen_scene::{
-    BuildOptions, ConstantSource, ImagePasses, MainTextureFormat, ObjectIndex, ObjectKind,
-    ParticleSource, PassKind as ScenePassKind, Project, SceneBuild, SettingId, Value, ValueTag,
+    BuildOptions, ConstantSource, ImagePasses, MAX_PARENT_DEPTH, MainTextureFormat, ObjectIndex,
+    ObjectKind, ParticleSource, PassKind as ScenePassKind, Project, SceneBuild, SettingId,
+    Transform, Value, ValueTag,
 };
 use serde_json::Value as Json;
 
 use crate::assets::SceneSource;
 use crate::particles::{self, ParticleFrame, ParticleRuntime, PendingParticle};
 use crate::plan::DebugPlan;
+use crate::script::{SceneScripts, TextSink};
 use crate::shaders::{ConstantParam, PassKind, ShaderProvider, ShaderRequest};
 use crate::texture::{LoadedTexture, TextureCache};
 
@@ -99,6 +101,8 @@ struct ImageRuntime {
     /// Own `visible` then each created ancestor's (see [`visibility_chain`]).
     visible: Box<[SettingId]>,
     shown: bool,
+    /// Drawn size in pixels (script hit tests and `ILayer.size`).
+    size: Vec2,
 }
 
 /// A pass whose slot 0 is an animated texture (spec 04 §16.3).
@@ -161,6 +165,11 @@ pub struct SceneRuntime {
     /// The pointer changes the output (g_PointerPosition users, parallax).
     pub uses_pointer: bool,
     pointer_last: [f32; 2],
+    /// Some pass reads the frame globals (`g_Time`, pointer, spectrum…). When none does, they
+    /// are not rewritten, so a frame driven only by scripts that change nothing stays clean.
+    frame_inputs: bool,
+    /// SceneScript runtime; `None` (and no cost) for a scene without scripts.
+    scripts: Option<Box<SceneScripts>>,
 }
 
 /// Inputs of one frame.
@@ -175,6 +184,20 @@ pub struct FrameState<'a> {
     pub audio16: &'a [f32; 16],
     pub audio32: &'a [f32; 32],
     pub audio64: &'a [f32; 64],
+    /// Output-side inputs, read by scripts only.
+    pub screen: ScreenState,
+}
+
+/// The output a frame is rendered for, as scripts see it (`engine.screenResolution`,
+/// `input.cursorScreenPosition`, `input.cursorLeftDown`, `resizeScreen`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScreenState {
+    /// Output size in pixels; `(0, 0)` = unknown (the scene size is used).
+    pub size: (u32, u32),
+    /// Cursor in output pixels, origin at the bottom-left corner.
+    pub cursor: Vec2,
+    /// Left mouse button held.
+    pub left_down: bool,
 }
 
 fn align(a: lumen_scene::Alignment) -> RAlign {
@@ -469,6 +492,7 @@ pub fn build_scene(
     let mut live = Vec::new();
     let mut uses_time = false;
     let mut uses_pointer = false;
+    let mut frame_inputs = false;
     let render_order = build.render_order.clone();
     for idx in render_order {
         if let Some((bl, targets, composites)) = &bloom
@@ -513,6 +537,11 @@ pub fn build_scene(
                         uses_time |= iface.uses_frame_globals || iface.field("g_Time").is_some();
                         uses_pointer |=
                             iface.uses_frame_globals || iface.field("g_PointerPosition").is_some();
+                        frame_inputs |= iface.uses_frame_globals
+                            || iface
+                                .uniforms
+                                .iter()
+                                .any(|u| frame_globals::FIELDS.iter().any(|g| g.0 == u.name));
                     }
                     // Image values (§13.2): live (Q7).
                     let s = &project.settings;
@@ -616,6 +645,7 @@ pub fn build_scene(
                     parallax_depth: img.parallax_depth,
                     visible: visibility_chain(project, &build, img.object),
                     shown: true,
+                    size: img.spec.size,
                 });
             }
             Some(Pending::Particle(p)) => match p.finish(&mut b) {
@@ -646,12 +676,22 @@ pub fn build_scene(
     let parallax_on = opts.parallax && project.settings.value(general.camera_parallax).boolean();
     let camera = project.scene.as_ref().ok_or("not a scene project")?.camera;
     let fov = project.settings.value(camera.fov).float();
+    let animated = uses_time
+        || !particle_rts.is_empty()
+        || !animated_passes.is_empty()
+        || scene_rt.accumulates();
+    // Spec 06 §8.1: scripts load once every object exists; what they write at load reaches
+    // the renderer with the first update.
+    let sizes: Vec<(ObjectIndex, Vec2)> = images.iter().map(|i| (i.object, i.size)).collect();
+    let mut scripts = SceneScripts::load(project, &build, &sizes, size);
+    if let Some(s) = &mut scripts {
+        s.base_animated = animated;
+    }
+    // Particle and bloom shaders are not inspected: counted as readers.
+    let frame_inputs = frame_inputs || !particle_rts.is_empty() || bloom.is_some();
     Ok(SceneRuntime {
-        animated: uses_time
-            || !particle_rts.is_empty()
-            || !animated_passes.is_empty()
-            || scene_rt.accumulates(),
-        uses_pointer: uses_pointer || parallax_on || !particle_rts.is_empty(),
+        animated: animated || scripts.as_ref().is_some_and(|s| s.needs_frames()),
+        uses_pointer: uses_pointer || parallax_on || !particle_rts.is_empty() || scripts.is_some(),
         scene: scene_rt,
         full: st.full,
         logical,
@@ -672,6 +712,8 @@ pub fn build_scene(
         parallax_delay: general.camera_parallax_delay,
         parallax_influence: general.camera_parallax_mouse_influence,
         pointer_last: [0.0; 2],
+        frame_inputs,
+        scripts,
     })
 }
 
@@ -771,6 +813,37 @@ pub(crate) fn visibility_chain(
 /// Effective visibility of a chain from [`visibility_chain`].
 pub(crate) fn chain_visible(settings: &lumen_scene::Settings, chain: &[SettingId]) -> bool {
     chain.iter().all(|&s| settings.value(s).boolean())
+}
+
+/// [`Project::world_transform`] without allocation (per-frame use by scripts): the same parent
+/// walk, cut after [`MAX_PARENT_DEPTH`] parents, composed from the root down.
+pub(crate) fn world_transform(
+    project: &Project,
+    build: &SceneBuild,
+    idx: ObjectIndex,
+) -> Transform {
+    let Some(scene) = &project.scene else {
+        return Transform::default();
+    };
+    let mut chain = [idx; MAX_PARENT_DEPTH + 1];
+    let mut n = 1;
+    let mut cur = idx;
+    while let Some(p) = scene.objects.get(cur.index()).and_then(|o| o.parent) {
+        let Some(j) = build.created_object(p) else {
+            break;
+        };
+        if n > MAX_PARENT_DEPTH {
+            break;
+        }
+        chain[n] = j;
+        n += 1;
+        cur = j;
+    }
+    let mut acc = project.local_transform(chain[n - 1]);
+    for &i in chain[..n - 1].iter().rev() {
+        acc = acc.then(&project.local_transform(i));
+    }
+    acc
 }
 
 fn settings_float(project: &Project, id: SettingId) -> f32 {
@@ -1102,19 +1175,35 @@ fn prepare_image(
 }
 
 impl SceneRuntime {
-    /// Per-frame update: clocks, pointer, parallax, images, animated textures, particles.
-    /// Allocation-free; only marks the scene dirty when something changed.
-    pub fn update(&mut self, ctx: &GpuContext, project: &Project, f: &FrameState<'_>) {
+    /// Per-frame update: scripts, clocks, pointer, parallax, images, animated textures,
+    /// particles. Allocation-free (scripts too, for numeric and vector values); only marks the
+    /// scene dirty when something changed.
+    pub fn update(&mut self, ctx: &GpuContext, project: &mut Project, f: &FrameState<'_>) {
+        if let Some(s) = &mut self.scripts {
+            let changes = s.tick(project, &self.build, f, self.size);
+            if changes.transforms {
+                for img in &mut self.images {
+                    img.transform = node(world_transform(project, &self.build, img.object));
+                }
+            }
+            if changes.uniforms {
+                write_live(&mut self.scene, &self.live, project);
+            }
+            self.animated = s.base_animated || s.needs_frames();
+        }
+        let project = &*project;
         let time = f.time as f32;
-        self.scene.update_frame(&FrameInputs {
-            time,
-            daytime: f.daytime,
-            pointer: f.pointer.position.to_array(),
-            pointer_last: self.pointer_last,
-            audio16: f.audio16,
-            audio32: f.audio32,
-            audio64: f.audio64,
-        });
+        if self.frame_inputs {
+            self.scene.update_frame(&FrameInputs {
+                time,
+                daytime: f.daytime,
+                pointer: f.pointer.position.to_array(),
+                pointer_last: self.pointer_last,
+                audio16: f.audio16,
+                audio32: f.audio32,
+                audio64: f.audio64,
+            });
+        }
         self.pointer_last = f.pointer.position.to_array();
         let settings = &project.settings;
         let amount = settings.value(self.parallax_amount).float();
@@ -1199,25 +1288,22 @@ impl SceneRuntime {
         }
     }
 
-    /// A property changed: refresh transforms, live uniforms and particle bindings.
+    /// A property changed: refresh transforms, live uniforms and particle bindings; scripts
+    /// receive `applyUserProperties` at the next update.
     pub fn property_changed(&mut self, project: &Project, name: &str) {
         for img in &mut self.images {
             img.transform = node(project.world_transform(img.object, &self.build));
         }
-        let sh = self.scene.shadow_mut();
-        for l in &self.live {
-            let v = project.settings.value(l.setting);
-            if l.components == 0 {
-                sh.write_ints(&l.slot, &[v.int()]);
-            } else {
-                sh.write_floats(&l.slot, &value_floats(v, l.components));
-            }
-        }
+        write_live(&mut self.scene, &self.live, project);
         if let Some(id) = project.property(name) {
             let json = property_json(project.properties.get(id).value());
             for p in &mut self.particles {
                 p.set_property(name, &json);
             }
+        }
+        if let Some(s) = &mut self.scripts {
+            s.property_changed(project, name);
+            self.animated = true;
         }
         self.scene.mark_dirty();
     }
@@ -1225,6 +1311,66 @@ impl SceneRuntime {
     /// Live particles over every system (statistics).
     pub fn live_particles(&self) -> usize {
         self.particles.iter().map(ParticleRuntime::live).sum()
+    }
+
+    /// Registers the receiver of the text computed by scripts for text layers (see
+    /// [`TextSink`]). Does nothing for a scene without scripts.
+    pub fn set_text_sink(&mut self, sink: Box<dyn TextSink>) {
+        if let Some(s) = &mut self.scripts {
+            s.set_text_sink(sink);
+        }
+    }
+
+    /// Current text of a text object whose `text` is driven by a script (its initial text
+    /// until the script changes it); `None` for other objects.
+    pub fn script_text(&self, object: i32) -> Option<impl std::ops::Deref<Target = str> + '_> {
+        self.scripts.as_ref()?.text(object)
+    }
+
+    /// Script counters, and the mean time of the per-frame script work; `None` without
+    /// scripts.
+    pub fn script_stats(&self) -> Option<(lumen_script::ScriptStats, std::time::Duration)> {
+        self.scripts.as_ref().map(|s| (s.stats(), s.mean_tick()))
+    }
+
+    /// Media metadata or artwork changed (spec 06 §8.4): `mediaPropertiesChanged`,
+    /// `mediaPlaybackChanged`, `mediaTimelineChanged` and `mediaThumbnailChanged` run at the
+    /// next update. Entry point for a media source (none is wired yet).
+    pub fn media_changed(&mut self, media: lumen_script::MediaSnapshot) {
+        if let Some(s) = &mut self.scripts {
+            s.media_changed(media);
+            self.animated = true;
+        }
+    }
+
+    /// A media source appeared or vanished (`mediaStatusChanged`, next update).
+    pub fn media_status(&mut self, enabled: bool) {
+        if let Some(s) = &mut self.scripts {
+            s.media_status(enabled);
+            self.animated = true;
+        }
+    }
+
+    /// Runs `destroy()` of every script and writes `localStorage`. Call before dropping the
+    /// scene; the scripts are inert afterwards.
+    pub fn shutdown_scripts(&mut self, project: &mut Project) {
+        if let Some(s) = &mut self.scripts {
+            s.shutdown(project);
+        }
+        self.scripts = None;
+    }
+}
+
+/// Rewrites every uniform fed by a setting. Unchanged values do not mark the scene dirty.
+fn write_live(scene: &mut RenderScene, live: &[LiveUniform], project: &Project) {
+    let sh = scene.shadow_mut();
+    for l in live {
+        let v = project.settings.value(l.setting);
+        if l.components == 0 {
+            sh.write_ints(&l.slot, &[v.int()]);
+        } else {
+            sh.write_floats(&l.slot, &value_floats(v, l.components));
+        }
     }
 }
 
