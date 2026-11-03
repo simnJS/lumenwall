@@ -476,8 +476,23 @@ impl Project {
             },
             warnings: &mut self.warnings,
             arenas: &mut scene.arenas,
+            model_states: false,
         };
         f(&mut loader)
+    }
+
+    /// Loads the material of a 3D model mesh (spec 09 §1.11): a fresh copy with the state
+    /// defaults of model passes (§1.11.2: depth test and write enabled, back faces culled).
+    /// `Ok(None)` when the file is missing (the mesh is then not drawn).
+    pub fn load_model_material(
+        &mut self,
+        src: &dyn AssetSource,
+        path: &str,
+    ) -> Result<Option<MaterialId>, LoadError> {
+        self.loader_run(src, |l| {
+            l.model_states = true;
+            l.load_material(path)
+        })
     }
 
     /// Loads the compatibility materials once, when some image may need them (§12.6).
@@ -587,6 +602,7 @@ impl Project {
                     user_textures: TextureMap::default(),
                     combos: Vec::new(),
                     constants: Vec::new(),
+                    user_constants: Vec::new(),
                 }],
             };
             l.arenas.materials.push(material);

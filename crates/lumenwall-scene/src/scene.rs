@@ -77,6 +77,8 @@ index_type!(
 pub struct Scene {
     /// `camera`.
     pub camera: Camera,
+    /// `camera.paths` (spec 09 §1.2): camera trajectory files, in order.
+    pub camera_paths: Vec<Sym>,
     /// `general`.
     pub general: SceneGeneral,
     /// Objects in file order, followed by the synthetic bloom object once built (§14).
@@ -185,6 +187,14 @@ pub struct SceneGeneral {
     pub camera_shake_speed: SettingId,
     /// `None` for a perspective scene (no `orthogonalprojection`).
     pub orthogonal_projection: Option<OrthogonalProjection>,
+    /// `clearenabled` (spec 09 §1.2): clear the scene target each frame; `null` = true.
+    pub clear_enabled: SettingId,
+    /// `transparentsorting` (spec 09 §3.6), read once.
+    pub transparent_sorting: bool,
+    /// `hdr` (spec 09 §2.8), read once.
+    pub hdr: bool,
+    /// `perspectiveoverridefov` (2D scenes, spec 09 §3.12).
+    pub perspective_override_fov: Option<f32>,
 }
 
 /// `general.orthogonalprojection`.
@@ -273,8 +283,92 @@ pub enum ObjectKind {
     Particle(Box<ParticleObject>),
     /// `text`.
     Text(Box<TextObject>),
+    /// `model`: a 3D model object (spec 09 §1.5).
+    Model3d(Box<ModelObject>),
+    /// `light` of a known type (spec 09 §1.6).
+    Light(Box<LightObject>),
+    /// `sprite`: camera-facing billboard drawn by a material (spec 09 §1.7).
+    Sprite(Box<SpriteObject>),
     /// Group / transform node, or an unsupported type.
     Generic(GenericKind),
+}
+
+/// 3D model object (spec 09 §1.5). The `.mdl` is read by the renderer side; its materials are
+/// loaded with [`crate::Project::load_model_material`] (model state defaults, §1.11.2).
+#[derive(Debug)]
+pub struct ModelObject {
+    /// Path of the `.mdl`.
+    pub file: Sym,
+    /// `skin` (index into the material list of each mesh).
+    pub skin: i32,
+    /// `reflected`: also drawn into `_rt_Reflection` (§3.7).
+    pub reflected: bool,
+    /// `castshadow` (default true, §2.5).
+    pub cast_shadow: bool,
+    /// `perspective` (2D scenes only, §3.12).
+    pub perspective: bool,
+    /// `parallaxDepth`.
+    pub parallax_depth: SettingId,
+    /// `alpha` → `g_Alpha` (default 1).
+    pub alpha: SettingId,
+    /// `color` → `g_Color` / `g_Color4` (default white).
+    pub color: SettingId,
+    /// `brightness` → `g_Brightness` (default 1).
+    pub brightness: SettingId,
+}
+
+/// Type of a light (spec 09 §1.6, QO-3D-7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LightKind {
+    /// `point`, `lpoint`.
+    Point,
+    /// `spot`, `lspot`.
+    Spot,
+    /// `tube`, `ltube`.
+    Tube,
+    /// `directional`, `ldirectional`.
+    Directional,
+}
+
+impl LightKind {
+    /// Parses the `light` key; `None` for an unknown type.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "point" | "lpoint" => Self::Point,
+            "spot" | "lspot" => Self::Spot,
+            "tube" | "ltube" => Self::Tube,
+            "directional" | "ldirectional" => Self::Directional,
+            _ => return None,
+        })
+    }
+}
+
+/// Light object (spec 09 §1.6). Position and orientation are the object's `origin`/`angles`.
+#[derive(Debug)]
+pub struct LightObject {
+    /// Type.
+    pub kind: LightKind,
+    /// `color` (floats).
+    pub color: SettingId,
+    /// `intensity` (default 1).
+    pub intensity: SettingId,
+    /// `radius` (default 0: no reach).
+    pub radius: SettingId,
+    /// `exponent` (default 2, QO-3D-8).
+    pub exponent: SettingId,
+    /// `castshadow` (default false).
+    pub cast_shadow: bool,
+}
+
+/// Sprite object (spec 09 §1.7): a material drawn on a camera-facing quad.
+#[derive(Debug)]
+pub struct SpriteObject {
+    /// Material path (`sprite`).
+    pub file: Sym,
+    /// Material, loaded with the model state defaults; `None` when missing.
+    pub material: Option<MaterialId>,
+    /// `parallaxDepth`.
+    pub parallax_depth: SettingId,
 }
 
 /// Why an object is generic.
@@ -546,6 +640,9 @@ pub struct MaterialPass {
     pub user_textures: TextureMap,
     pub combos: Vec<Combo>,
     pub constants: Vec<Constant>,
+    /// `usershadervalues` (spec 09 §1.11.3): material aliases bound live to user
+    /// properties. They win over a [`Self::constants`] entry of the same alias.
+    pub user_constants: Vec<Constant>,
 }
 
 /// Slot → texture name, sorted by slot (§11.1).

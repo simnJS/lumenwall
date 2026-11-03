@@ -101,6 +101,7 @@ impl LoadContext {
                 },
                 warnings: &mut project.warnings,
                 arenas: &mut arenas,
+                model_states: false,
             };
             project.scene = Some(loader.load_scene(&file)?);
         }
@@ -127,7 +128,19 @@ fn project_doc(
             crate::error::Expected::Object,
         ));
     }
-    let ty = req_str(&raw.ty).at("type")?;
+    // Spec 09 §1.1 (QO-3D-1): a project without `type` whose `file` is a `.json` is a scene
+    // (`audiophile`, `techno`). Minimal deduction; anything else still fails.
+    let deduced = matches!(raw.ty, Json::Absent | Json::Null)
+        && matches!(&raw.file, Json::Str(f) if f.to_ascii_lowercase().ends_with(".json"));
+    let ty = if deduced {
+        warnings.push(
+            PROJECT_FILE,
+            "no `type`: `file` is a .json, loaded as a scene",
+        );
+        "scene"
+    } else {
+        req_str(&raw.ty).at("type")?
+    };
     let kind = if ty.eq_ignore_ascii_case("scene") {
         ProjectKind::Scene
     } else if ty.eq_ignore_ascii_case("video") {

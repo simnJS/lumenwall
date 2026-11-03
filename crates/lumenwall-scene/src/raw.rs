@@ -831,6 +831,7 @@ raw_struct! {
         nearz: RawSetting<'a> = "nearz",
         farz: RawSetting<'a> = "farz",
         fov: RawSetting<'a> = "fov",
+        paths: RawSeq<Json<'a>> = "paths",
     }
 }
 
@@ -856,6 +857,10 @@ raw_struct! {
         farz: RawSetting<'a> = "farz",
         fov: RawSetting<'a> = "fov",
         orthogonalprojection: RawOrtho<'a> = "orthogonalprojection",
+        clearenabled: RawSetting<'a> = "clearenabled",
+        transparentsorting: Json<'a> = "transparentsorting",
+        hdr: Json<'a> = "hdr",
+        perspectiveoverridefov: Json<'a> = "perspectiveoverridefov",
     }
 }
 
@@ -948,6 +953,15 @@ raw_struct! {
         particle: RawParticle<'a> = "particle",
         text: RawSetting<'a> = "text",
         light: Json<'a> = "light",
+        model: Json<'a> = "model",
+        sprite: Json<'a> = "sprite",
+        skin: Json<'a> = "skin",
+        reflected: Json<'a> = "reflected",
+        castshadow: Json<'a> = "castshadow",
+        perspective: Json<'a> = "perspective",
+        intensity: RawSetting<'a> = "intensity",
+        radius: RawSetting<'a> = "radius",
+        exponent: RawSetting<'a> = "exponent",
         shape: Json<'a> = "shape",
         solid: Json<'a> = "solid",
         alpha: RawSetting<'a> = "alpha",
@@ -1037,6 +1051,9 @@ raw_struct! {
         cullmode: Json<'a> = "cullmode",
         depthtest: Json<'a> = "depthtest",
         depthwrite: Json<'a> = "depthwrite",
+        depthtesting: Json<'a> = "depthtesting",
+        depthwriting: Json<'a> = "depthwriting",
+        usershadervalues: RawMap<'a, Json<'a>> = "usershadervalues",
         textures: RawSeq<RawTexEntry<'a>> = "textures",
         usertextures: RawSeq<RawTexEntry<'a>> = "usertextures",
         combos: RawMap<'a, Json<'a>> = "combos",

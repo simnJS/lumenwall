@@ -4,7 +4,8 @@ Data model for `project.json`, user properties, `scene.json`, objects, models, m
 
 ## Inputs (clean room)
 
-- `specs/02-modele-scene.md` (only behavioural source)
+- `specs/02-modele-scene.md` (main behavioural source)
+- `specs/09-scenes-3d.md` §1.1–§1.9, §1.11 (3D objects, camera keys, model material states)
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`, `docs/TESTING.md`
 - Public Rust / serde documentation. No upstream code, fork or `/tmp/claude-1000` content was read.
 
@@ -25,6 +26,14 @@ Data model for `project.json`, user properties, `scene.json`, objects, models, m
 ## Blending contract
 
 `ImagePasses` / `PassDesc::blending` carry each pass's **own** blending: the material pass's `blending` (copy passes `normal`). The last bullet of §12.6 (spec 04 §9.8: with more than one pass, the last pass takes the first pass's blending and the first pass becomes `normal`) is **not** applied here. `lumenwall-render`'s chain planner applies it exactly once, to the chain it actually draws (after the integration's debug filters, together with the puppet rule). Applying it in both crates made every multi-pass image opaque. `crates/lumenwall-engine/tests/blend_contract.rs` fails if the transfer happens zero or two times.
+
+## 3D scenes (spec 09)
+
+- Classification (§1.4, amends §7.1): after image, sound, particle and text, a non-empty `model` string is a `ObjectKind::Model3d` (`ModelObject`: `.mdl` path, `skin`, `reflected`, `castshadow`, `perspective`, `parallaxDepth`, `alpha`, `color`, `brightness`), a non-empty `light` a `ObjectKind::Light` (`LightKind` point/spot/tube/directional with their `l*` spellings, `color`, `intensity`, `radius`, `exponent` 2 by default, `castshadow`), a non-empty `sprite` a `ObjectKind::Sprite` (its material, loaded here). `null` and `""` count as absent. An unknown light type stays `Generic(Light)` with a warning.
+- Objects without any `id` key (§1.8, `audiophile`, `techno`) get distinct synthetic ids `-1000 - rank`, skipping ids of the file, so that every one of them is created; present but unreadable ids keep the §7.2 degraded mode.
+- `project.json` without `type` whose `file` ends in `.json` loads as a scene with a warning (QO-3D-1, minimal deduction; the parity branch has its own).
+- Perspective scenes (`orthogonalprojection` absent or `null`): `nearz`/`farz` default to 0.01/10000 (fov 50), and `bloom` without strength/threshold uses 2.0/0.65 (§3.10). 2D scenes keep 0/1000 and 0/0 (Q21 unchanged). `camera.paths` → `Scene::camera_paths`; `general.clearenabled` (live, `null` = true), `transparentsorting`, `hdr`, `perspectiveoverridefov`.
+- Model materials: `Project::load_model_material(src, path)` loads a fresh copy with the §1.11.2 pass defaults (depth test and write enabled, `cullmode` normal); sprite materials too. Every material reads the misspelt `depthtesting`/`depthwriting` when the real keys are absent (QO-3D-13), and `usershadervalues` into `MaterialPass::user_constants`: settings bound live to the user property (a missing property is skipped with a warning).
 
 Not here: §7.9 particle files (`lumenwall-particles`), Annexes A/B (`lumenwall-formats` / `lumenwall-assets`; the tests contain a minimal test-only PKG reader).
 
@@ -70,6 +79,7 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 ## Deviations
 
+- Spec 09: bloom defaults 2.0/0.65 only for perspective scenes (spec 09 §3.10 proposes them for every scene; 2D scenes keep Q21 until spec 02 is amended). The `.mdl` itself is not read here (no dependency on `lumenwall-formats`): the renderer side reads it and loads the mesh materials through `load_model_material`.
 - Q2 (8-digit hex), Q5, Q6, Q7, Q9, Q10, Q12, Q13, Q16 (effects), Q17, Q18, Q19, Q27, Q29, Q30, Q31: see the table.
 - A UTF-8 byte order mark at the start of a JSON file is skipped.
 - Object `dependencies` also accept objects `{ "id", "index", "type" }` (written by Wallpaper Engine for particle links, spec 05 A7.8): their `id` is used as the dependency (strict integer); `index` and `type` are not kept. Spec 02 §7.2 only describes integers.

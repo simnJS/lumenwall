@@ -4,6 +4,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use serde::Deserialize as _;
+
 use glam::{Vec2, Vec3, Vec4};
 
 use crate::asset::{AssetError, AssetSource};
@@ -35,6 +37,9 @@ pub(crate) struct Loader<'s, 'p> {
     pub b: Binder<'p>,
     pub warnings: &'p mut Warnings,
     pub arenas: &'p mut Arenas,
+    /// Materials loaded now belong to 3D models or sprites: their passes default to depth test
+    /// and write enabled and back-face culling (spec 09 §1.11.2).
+    pub model_states: bool,
 }
 
 fn require_object(kind: JsonKind) -> Result<(), DataErr> {
@@ -107,18 +112,26 @@ impl<'s> Loader<'s, '_> {
         } else {
             &cam.fov
         };
+        // Spec 09 §1.2: a perspective scene (no `orthogonalprojection`) defaults to the planes of
+        // Wallpaper Engine's 3D templates instead of the 2D ones.
+        let perspective = gen_.orthogonalprojection.kind.is_none();
+        let (near_default, far_default) = if perspective {
+            (0.01, 10000.0)
+        } else {
+            (0.0, 1000.0)
+        };
         let camera = Camera {
             center: req_vec3(&cam.center).at("center").at("camera")?,
             eye: req_vec3(&cam.eye).at("eye").at("camera")?,
             up: req_vec3(&cam.up).at("up").at("camera")?,
             nearz: self
                 .b
-                .setting(nearz_raw, Some(Value::from_float(0.0)), false)
+                .setting(nearz_raw, Some(Value::from_float(near_default)), false)
                 .at("nearz")
                 .at("camera")?,
             farz: self
                 .b
-                .setting(farz_raw, Some(Value::from_float(1000.0)), false)
+                .setting(farz_raw, Some(Value::from_float(far_default)), false)
                 .at("farz")
                 .at("camera")?,
             fov: self
@@ -127,6 +140,13 @@ impl<'s> Loader<'s, '_> {
                 .at("fov")
                 .at("camera")?,
         };
+        let mut camera_paths = Vec::new();
+        if cam.paths.kind == JsonKind::Array {
+            for (i, p) in cam.paths.items.iter().enumerate() {
+                let p = req_str(p).at_idx(i).at("paths").at("camera")?;
+                camera_paths.push(self.intern(p));
+            }
+        }
         let general = self.scene_general(gen_).at("general")?;
 
         let objects_raw = raw.objects;
@@ -135,9 +155,32 @@ impl<'s> Loader<'s, '_> {
             k => return Err(Fail::from(kind_error(k, Expected::Array))).at("objects"),
         }
         let mut objects = Vec::with_capacity(objects_raw.items.len());
+        let mut without_id = Vec::new();
         for (i, o) in objects_raw.items.into_iter().enumerate() {
+            if o.id == Json::Absent {
+                without_id.push(i);
+            }
             let obj = self.object(file, o).at_idx(i).at("objects")?;
             objects.push(obj);
+        }
+        // Spec 09 §1.8: objects of old projects have no `id` at all. Each gets its own synthetic
+        // id `-1000 - rank`, skipping ids of the file, so that all of them are created (the
+        // degraded mode of spec 02 §7.2 would merge them into one object of id -1).
+        if !without_id.is_empty() {
+            let mut taken: std::collections::HashSet<i32> = objects
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !without_id.contains(i))
+                .map(|(_, o)| o.id)
+                .collect();
+            for i in without_id {
+                let mut id = -1000 - i as i32;
+                while taken.contains(&id) {
+                    id -= 1;
+                }
+                taken.insert(id);
+                objects[i].id = id;
+            }
         }
         let mut by_id = HashMap::with_capacity(objects.len());
         for (i, o) in objects.iter().enumerate() {
@@ -146,6 +189,7 @@ impl<'s> Loader<'s, '_> {
         let file_objects = objects.len();
         Ok(Scene {
             camera,
+            camera_paths,
             general,
             objects,
             arenas: std::mem::take(self.arenas),
@@ -165,6 +209,13 @@ impl<'s> Loader<'s, '_> {
         let f = |v: f32| Some(Value::from_float(v));
         let b = |v: bool| Some(Value::from_bool(v));
         let ortho = &g.orthogonalprojection;
+        // Spec 09 §3.10: Wallpaper Engine's bloom defaults when `bloom` is set without strength
+        // or threshold. Applied to perspective scenes only; 2D scenes keep spec 02 Q21.
+        let (bloom_strength, bloom_threshold) = if ortho.kind.is_none() {
+            (2.0, 0.65)
+        } else {
+            (0.0, 0.0)
+        };
         // Lumenwall: a missing or null projection is a perspective scene instead of a load
         // failure (Q6).
         let orthogonal_projection = match ortho.kind {
@@ -220,11 +271,11 @@ impl<'s> Loader<'s, '_> {
             bloom: self.b.setting(&g.bloom, b(false), false).at("bloom")?,
             bloom_strength: self
                 .b
-                .setting(&g.bloomstrength, f(0.0), false)
+                .setting(&g.bloomstrength, f(bloom_strength), false)
                 .at("bloomstrength")?,
             bloom_threshold: self
                 .b
-                .setting(&g.bloomthreshold, f(0.0), false)
+                .setting(&g.bloomthreshold, f(bloom_threshold), false)
                 .at("bloomthreshold")?,
             camera_parallax: self
                 .b
@@ -259,6 +310,17 @@ impl<'s> Loader<'s, '_> {
                 .setting(&g.camerashakespeed, f(0.0), false)
                 .at("camerashakespeed")?,
             orthogonal_projection,
+            // `null` counts as true (spec 09 §1.2).
+            clear_enabled: self
+                .b
+                .setting(&g.clearenabled, b(true), false)
+                .at("clearenabled")?,
+            transparent_sorting: opt_bool(&g.transparentsorting, false).at("transparentsorting")?,
+            hdr: opt_bool(&g.hdr, false).at("hdr")?,
+            perspective_override_fov: match &g.perspectiveoverridefov {
+                Json::Absent | Json::Null => None,
+                j => Some(opt_f32(j, 0.0).at("perspectiveoverridefov")?),
+            },
         })
     }
 
@@ -269,6 +331,10 @@ impl<'s> Loader<'s, '_> {
         require_object(raw.kind)?;
         let (id, name) = match (req_i32(&raw.id), req_str(&raw.name)) {
             (Ok(id), Ok(name)) => (id, name.to_owned()),
+            // Spec 09 §1.8: objects of old projects have neither `id` nor `name`; the caller
+            // gives them a synthetic id.
+            _ if raw.id == Json::Absent && raw.name.kind().is_none() => (-1, String::new()),
+            _ if raw.id == Json::Absent => (-1, opt_str(&raw.name, "").unwrap_or("").to_owned()),
             _ => {
                 // §7.2 degraded mode.
                 let id = match &raw.id {
@@ -351,9 +417,23 @@ impl<'s> Loader<'s, '_> {
             ObjectKind::Particle(Box::new(self.particle(source, &mut raw)?))
         } else if !matches!(raw.text, RawSetting::Absent) {
             ObjectKind::Text(Box::new(self.text(file, &raw)?))
-        } else if raw.light != Json::Absent {
-            self.warn(file, format!("object {id}: lights are not supported"));
-            ObjectKind::Generic(GenericKind::Light)
+        } else if let Some(path) = non_empty(&raw.model) {
+            let path = path.to_owned();
+            ObjectKind::Model3d(Box::new(self.model_object(&raw, &path)?))
+        } else if let Some(kind) = non_empty(&raw.light) {
+            match LightKind::parse(kind) {
+                Some(kind) => ObjectKind::Light(Box::new(self.light(&raw, kind)?)),
+                None => {
+                    self.warn(
+                        file,
+                        format!("object {id}: unknown light type {kind:?}, ignored"),
+                    );
+                    ObjectKind::Generic(GenericKind::Light)
+                }
+            }
+        } else if let Some(path) = non_empty(&raw.sprite) {
+            let path = path.to_owned();
+            ObjectKind::Sprite(Box::new(self.sprite(&raw, &path)?))
         } else if raw.shape != Json::Absent {
             self.warn(
                 file,
@@ -382,6 +462,85 @@ impl<'s> Loader<'s, '_> {
             angles,
             visible,
             kind,
+        })
+    }
+
+    /// 3D model object (spec 09 §1.5). The `.mdl` and its materials are loaded later, by the
+    /// renderer side ([`crate::Project::load_model_material`]).
+    fn model_object(&mut self, raw: &RawObject<'_>, path: &str) -> Result<ModelObject, Fail> {
+        let skin = opt_i32(&raw.skin, 0).at("skin")?;
+        let reflected = opt_bool(&raw.reflected, false).at("reflected")?;
+        let cast_shadow = opt_bool(&raw.castshadow, true).at("castshadow")?;
+        let perspective = opt_bool(&raw.perspective, false).at("perspective")?;
+        let b = &mut self.b;
+        let parallax_depth = b
+            .setting(
+                &raw.parallax_depth,
+                Some(Value::from_vec2(Vec2::ZERO)),
+                false,
+            )
+            .at("parallaxDepth")?;
+        let alpha = b
+            .setting(&raw.alpha, Some(Value::from_float(1.0)), false)
+            .at("alpha")?;
+        let color = b
+            .setting(&raw.color, Some(Value::from_color(Vec4::ONE)), true)
+            .at("color")?;
+        let brightness = b
+            .setting(&raw.brightness, Some(Value::from_float(1.0)), false)
+            .at("brightness")?;
+        Ok(ModelObject {
+            file: self.intern(path),
+            skin,
+            reflected,
+            cast_shadow,
+            perspective,
+            parallax_depth,
+            alpha,
+            color,
+            brightness,
+        })
+    }
+
+    /// Light object (spec 09 §1.6).
+    fn light(&mut self, raw: &RawObject<'_>, kind: LightKind) -> Result<LightObject, Fail> {
+        let cast_shadow = opt_bool(&raw.castshadow, false).at("castshadow")?;
+        let b = &mut self.b;
+        Ok(LightObject {
+            kind,
+            color: b
+                .setting(&raw.color, Some(Value::from_vec3(Vec3::ONE)), true)
+                .at("color")?,
+            intensity: b
+                .setting(&raw.intensity, Some(Value::from_float(1.0)), false)
+                .at("intensity")?,
+            radius: b
+                .setting(&raw.radius, Some(Value::from_float(0.0)), false)
+                .at("radius")?,
+            exponent: b
+                .setting(&raw.exponent, Some(Value::from_float(2.0)), false)
+                .at("exponent")?,
+            cast_shadow,
+        })
+    }
+
+    /// Sprite object (spec 09 §1.7): its value is a material path.
+    fn sprite(&mut self, raw: &RawObject<'_>, path: &str) -> Result<SpriteObject, Fail> {
+        let parallax_depth = self
+            .b
+            .setting(
+                &raw.parallax_depth,
+                Some(Value::from_vec2(Vec2::ZERO)),
+                false,
+            )
+            .at("parallaxDepth")?;
+        let saved = std::mem::replace(&mut self.model_states, true);
+        let material = self.load_material(path);
+        self.model_states = saved;
+        Ok(SpriteObject {
+            file: self.intern(path),
+            material: material?,
+            parallax_depth,
         })
     }
 
@@ -671,6 +830,7 @@ impl<'s> Loader<'s, '_> {
                 user_textures: TextureMap::default(),
                 combos: Vec::new(),
                 constants: Vec::new(),
+                user_constants: Vec::new(),
             }],
         });
         let material = MaterialId(n as u32);
@@ -861,16 +1021,46 @@ impl<'s> Loader<'s, '_> {
                 Blending::Normal
             }
         };
-        let cull_mode = match opt_str(&p.cullmode, "nocull").at("cullmode")? {
+        // Spec 09 §1.11.2: passes of 3D models and sprites default to back-face culling and
+        // depth test/write; image passes keep the spec 02 defaults.
+        let model = self.model_states;
+        let (cull_default, depth_default) = if model {
+            ("normal", "enabled")
+        } else {
+            ("nocull", "disabled")
+        };
+        let cull_mode = match opt_str(&p.cullmode, cull_default).at("cullmode")? {
             "nocull" => CullMode::NoCull,
             "normal" => CullMode::Normal,
             other => {
-                self.warn(path, format!("unknown cullmode {other:?}, using nocull"));
-                CullMode::NoCull
+                self.warn(
+                    path,
+                    format!("unknown cullmode {other:?}, using {cull_default}"),
+                );
+                if model {
+                    CullMode::Normal
+                } else {
+                    CullMode::NoCull
+                }
             }
         };
-        let depth_test = self.depth_mode(path, &p.depthtest, "depthtest")?;
-        let depth_write = self.depth_mode(path, &p.depthwrite, "depthwrite")?;
+        // `depthtesting` / `depthwriting` (misspelt keys of `ricepod`) read as the real keys
+        // when those are absent (QO-3D-13).
+        let (test_key, test_name) =
+            if p.depthtest.kind().is_none() && !p.depthtesting.kind().is_none() {
+                (&p.depthtesting, "depthtesting")
+            } else {
+                (&p.depthtest, "depthtest")
+            };
+        let (write_key, write_name) =
+            if p.depthwrite.kind().is_none() && !p.depthwriting.kind().is_none() {
+                (&p.depthwriting, "depthwriting")
+            } else {
+                (&p.depthwrite, "depthwrite")
+            };
+        let depth_test = self.depth_mode(path, test_key, test_name, depth_default)?;
+        let depth_write = self.depth_mode(path, write_key, write_name, depth_default)?;
+        let user_constants = self.user_constants(path, &p.usershadervalues)?;
         Ok(MaterialPass {
             shader,
             blending,
@@ -883,6 +1073,7 @@ impl<'s> Loader<'s, '_> {
             constants: self
                 .constants(&p.constantshadervalues)
                 .at("constantshadervalues")?,
+            user_constants,
         })
     }
 
@@ -891,15 +1082,57 @@ impl<'s> Loader<'s, '_> {
         path: &str,
         j: &Json<'_>,
         key: &'static str,
+        default: &'static str,
     ) -> Result<DepthMode, DataErr> {
-        Ok(match opt_str(j, "disabled").at(key)? {
+        Ok(match opt_str(j, default).at(key)? {
             "disabled" => DepthMode::Disabled,
             "enabled" => DepthMode::Enabled,
             other => {
-                self.warn(path, format!("unknown {key} {other:?}, using disabled"));
-                DepthMode::Disabled
+                self.warn(path, format!("unknown {key} {other:?}, using {default}"));
+                if default == "enabled" {
+                    DepthMode::Enabled
+                } else {
+                    DepthMode::Disabled
+                }
             }
         })
+    }
+
+    /// `usershadervalues` (spec 09 §1.11.3): `{"<user property>": "<material alias>"}`, each
+    /// alias bound live to its property. A missing property is skipped with a warning.
+    fn user_constants(
+        &mut self,
+        path: &str,
+        raw: &RawMap<'_, Json<'_>>,
+    ) -> Result<Vec<Constant>, DataErr> {
+        let mut out = Vec::new();
+        if raw.kind != JsonKind::Object {
+            return Ok(out);
+        }
+        for (property, alias) in raw.sorted() {
+            let alias = req_str(alias).at_key(property).at("usershadervalues")?;
+            if self.b.props.find(property).is_none() {
+                self.warn(
+                    path,
+                    format!("usershadervalues: user property {property:?} not found, ignored"),
+                );
+                continue;
+            }
+            let json = serde_json::json!({ "user": property, "value": 0 });
+            let setting = match RawSetting::deserialize(&json) {
+                Ok(raw) => self
+                    .b
+                    .setting(&raw, None, false)
+                    .at_key(property)
+                    .at("usershadervalues")?,
+                Err(_) => continue,
+            };
+            out.push(Constant {
+                name: self.intern(alias),
+                setting,
+            });
+        }
+        Ok(out)
     }
 
     /// `Ok(None)` when the effect file or one of its materials is missing.
@@ -1050,5 +1283,14 @@ fn strict_vec2_setting(raw: &RawSetting<'_>) -> Result<Vec2, DataErr> {
         RawSetting::Absent => Ok(Vec2::ZERO),
         RawSetting::Scalar(j) => opt_vec2(j, Vec2::ZERO),
         RawSetting::Object(o) => opt_vec2(&o.value, Vec2::ZERO).at("value"),
+    }
+}
+
+/// A string value that is neither empty nor `null` (spec 09 §1.4: `null` and `""` count as
+/// absent when classifying objects).
+fn non_empty<'j>(j: &'j Json<'_>) -> Option<&'j str> {
+    match j {
+        Json::Str(s) if !s.is_empty() => Some(s),
+        _ => None,
     }
 }
