@@ -12,7 +12,6 @@
 //!
 //! If any step fails, the files already replaced are put back.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
@@ -150,7 +149,7 @@ fn replace_all(staging: &Path, dir: &Path, plan: &[PathBuf]) -> Result<(), Error
         }
     }
     #[cfg(unix)]
-    if let Ok(d) = File::open(dir) {
+    if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
     for r in &done {
@@ -168,8 +167,11 @@ fn replace_one(new: &Path, target: &Path) -> Result<Replaced, Error> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.display(), &e))?;
     }
-    // The content is on disk before the name points to it.
-    File::open(new)
+    // The content is on disk before the name points to it (write access: Windows
+    // refuses to flush a file opened read-only).
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(new)
         .and_then(|f| f.sync_all())
         .map_err(|e| Error::io(new.display(), &e))?;
     let backup = if std::fs::symlink_metadata(target).is_ok() {
