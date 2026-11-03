@@ -205,6 +205,8 @@ struct PreparedPass {
     pass: ImagePass,
     /// `(uniform, values, setting)` written once the pass exists.
     constants: Vec<(ConstantParam, Value, Option<SettingId>)>,
+    /// Slot 0 samples the image's animated main texture (spec 04 §16.3).
+    animated_slot0: bool,
 }
 
 struct PendingImage {
@@ -781,7 +783,7 @@ pub fn build_scene(
                 {
                     uses_time = true;
                     for (k, &pass) in handle.passes.iter().enumerate() {
-                        if img.passes[k].pass.slot0_variants.is_empty() {
+                        if !img.passes[k].animated_slot0 {
                             continue;
                         }
                         animated_passes.push(AnimatedPass {
@@ -1329,10 +1331,11 @@ fn prepare_image(
                 }
             };
         }
-        if k == 0
+        let animated_slot0 =
+            k == 0 && pass.slots[0].is_none() && main_tex.as_ref().is_some_and(|t| t.is_animated());
+        if animated_slot0
             && let Some(t) = &main_tex
-            && t.is_animated()
-            && pass.slots[0].is_none()
+            && t.has_image_variants()
         {
             pass.slot0_variants = t.ids.iter().map(|&i| TextureRef::Texture(i)).collect();
         }
@@ -1357,7 +1360,11 @@ fn prepare_image(
             };
             constants.push((param.clone(), value, setting));
         }
-        prepared.push(PreparedPass { pass, constants });
+        prepared.push(PreparedPass {
+            pass,
+            constants,
+            animated_slot0,
+        });
     }
 
     // Puppet mesh (spec 04 §20) with its bone weights when it has a skeleton (spec 08).

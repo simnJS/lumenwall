@@ -90,7 +90,9 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 - Scene wallpapers: images with every effect chain, effect `fbos`, `copy` commands, compatibility
   tint/colour-blend passes, composites, render-target name scopes, bloom with the WE materials,
   colour LUTs (volume textures in `sampler3D` slots, e.g. `ccsimple` with `LUT`), camera, parallax,
-  hierarchy transforms, animated textures, live visibility, user properties (`--set-property`,
+  hierarchy transforms, animated textures (several images, or one sprite-sheet image whose frames
+  are selected through `g_Texture0Translation`/`g_Texture0Rotation`, spec 04 §16.3), live
+  visibility, user properties (`--set-property`,
   configuration reload of properties and fps), material constants bound to properties.
 - Real Wallpaper Engine shaders for images, effects and particles (0 stand-in on the 7 installed
   scene wallpapers).

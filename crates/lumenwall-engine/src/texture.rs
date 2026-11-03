@@ -55,8 +55,16 @@ impl LoadedTexture {
         self.ids[0]
     }
 
+    /// Animated (flag 4 with frames, spec 04 §16.3): the frame is chosen in the shader through
+    /// `g_Texture0Translation` / `g_Texture0Rotation`, also when every frame sits in one image
+    /// (a sprite sheet); those uniforms left at zero would sample a single texel.
     pub fn is_animated(&self) -> bool {
-        self.animation.is_some() && self.ids.len() > 1
+        self.animation.is_some()
+    }
+
+    /// Several storage images: slot 0 switches between them (one bind group per image).
+    pub fn has_image_variants(&self) -> bool {
+        self.is_animated() && self.ids.len() > 1
     }
 }
 
