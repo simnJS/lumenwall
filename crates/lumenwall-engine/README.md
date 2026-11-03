@@ -134,7 +134,6 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | Feature | Current behaviour |
 |---|---|
 | Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
-| Integer colour strings | `lumenwall-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumenwall matches the preview). To settle in spec 02 Q1. |
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
 | Puppet extras (spec 08 §11) | Bone physics, inverse kinematics, blend rules, blend shapes (`MORPHING`) and `SKINNING_ALPHA` have no known format: not implemented. Particles attached to bones are not wired (images only). The SceneScript bone and layer API waits for `lumenwall-script` integration. |
 | Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumenwall-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |

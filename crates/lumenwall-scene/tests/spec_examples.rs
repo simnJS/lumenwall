@@ -332,7 +332,8 @@ fn overrides_3_3_and_3_5() {
             .get(p.property("schemecolor").unwrap())
             .value()
             .vec4(),
-        Vec4::new(1.0 / 255.0, 0.0, 0.0, 1.0)
+        // Q1 (Lumenwall): no component above 1, read as 0-1 values (red).
+        Vec4::new(1.0, 0.0, 0.0, 1.0)
     );
 
     // Q13: invalid slider / colour / combo texts are refused with a warning.
@@ -1642,16 +1643,20 @@ fn snapshot_sees_overrides_q18() {
 #[test]
 fn colors_q1_q2_q3() {
     let objects = img_obj(r#", "color": "1 1 1", "effects": [] "#);
+    // Q1 (Lumenwall, parity rule 5): no component above 1 → 0-1 values, as WE shows them.
+    let p = load(&base_files(&scene_with(ortho(), &objects)));
+    assert_eq!(p.value(image(&p, 0).color).vec4(), Vec4::ONE);
+    let objects = img_obj(r#", "color": "255 128 0" "#);
     let p = load(&base_files(&scene_with(ortho(), &objects)));
     assert_eq!(
         p.value(image(&p, 0).color).vec4(),
-        Vec4::new(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0)
+        Vec4::new(1.0, 128.0 / 255.0, 0.0, 1.0)
     );
     let objects = img_obj(r#", "color": "1, 0, 0" "#);
     let p = load(&base_files(&scene_with(ortho(), &objects)));
     assert_eq!(
         p.value(image(&p, 0).color).vec4(),
-        Vec4::new(1.0 / 255.0, 0.0, 0.0, 0.0)
+        Vec4::new(1.0, 0.0, 0.0, 0.0)
     );
     let objects = img_obj(r##", "color": "#ffffffff" "##);
     let p = load(&base_files(&scene_with(ortho(), &objects)));

@@ -296,13 +296,16 @@ pub(crate) fn parse_color(input: &str) -> Result<Vec4, ColorError> {
     }
     let mut out = [0.0f32, 0.0, 0.0, 1.0];
     if !s.contains('.') {
-        // parity: integer path, 0-255 per channel; "1 1 1" is almost black (Q1).
+        // Integer path. Lumenwall (parity rule 5, Q1): the 0-255 reading applies only when a
+        // component exceeds 1. Wallpaper Engine shows "1 1 1" as white and "1 0 0" as red (the
+        // previews of 3089056751 and eagleflag); the reference reads them as 1/255 (near black).
         let mut ints = [0i32, 0, 0, 255];
         for (i, slot) in ints.iter_mut().enumerate().take(c.count) {
             *slot = component_i32(&s, c.starts[i]).ok_or(ColorError::Integer)?;
         }
-        for (o, i) in out.iter_mut().zip(ints) {
-            *o = i as f32 / 255.0;
+        let bytes = ints[..c.count].iter().any(|&i| i > 1);
+        for (o, i) in out.iter_mut().zip(ints).take(c.count) {
+            *o = if bytes { i as f32 / 255.0 } else { i as f32 };
         }
     } else {
         for (i, slot) in out.iter_mut().enumerate().take(c.count) {
@@ -418,15 +421,24 @@ mod tests {
     fn colors() {
         let c = parse_color("255 128 0").unwrap();
         assert_eq!(c, Vec4::new(1.0, 128.0 / 255.0, 0.0, 1.0));
+        // Q1 (Lumenwall): 0-255 only when a component exceeds 1.
         let c = parse_color("1 1 1").unwrap();
-        assert_eq!(c, Vec4::new(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0));
+        assert_eq!(c, Vec4::ONE);
+        let c = parse_color("1 0 0").unwrap();
+        assert_eq!(c, Vec4::new(1.0, 0.0, 0.0, 1.0));
+        let c = parse_color("1 1 1 0").unwrap();
+        assert_eq!(c, Vec4::new(1.0, 1.0, 1.0, 0.0));
+        let c = parse_color("2 1 0").unwrap();
+        assert_eq!(c, Vec4::new(2.0 / 255.0, 1.0 / 255.0, 0.0, 1.0));
+        let c = parse_color("255 255 255 128").unwrap();
+        assert_eq!(c, Vec4::new(1.0, 1.0, 1.0, 128.0 / 255.0));
         let c = parse_color("0.2 0.4 0.8").unwrap();
         assert_eq!(c, Vec4::new(0.2, 0.4, 0.8, 1.0));
         let c = parse_color("0.5 0.5 0.5 0.25").unwrap();
         assert_eq!(c.w, 0.25);
-        // Q3: commas double the spaces.
+        // Q3: commas double the spaces ("1  0  0" counts 4 components).
         let c = parse_color("1, 0, 0").unwrap();
-        assert_eq!(c, Vec4::new(1.0 / 255.0, 0.0, 0.0, 0.0));
+        assert_eq!(c, Vec4::new(1.0, 0.0, 0.0, 0.0));
         // Q2: #RRGGBB shifted by one byte.
         let c = parse_color("#ff8000").unwrap();
         assert_eq!(c, Vec4::new(0.0, 1.0, 128.0 / 255.0, 0.0));

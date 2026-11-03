@@ -36,7 +36,7 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 | Q | Decision | Rule |
 |---|---|---|
-| Q1 | Integer colours stay 0–255 (`"1 1 1"` ≈ black), `// parity:` | 3, 5 (WE behaviour unknown) |
+| Q1 | Integer path only when a component exceeds 1: `"255 128 0"` is 0–255, `"1 1 1"` white and `"1 0 0"` red (WE previews of 3089056751 and eagleflag; the reference reads them as 1/255) | 5 |
 | Q2 | `#RRGGBB` byte shift reproduced; 8-digit colours ≥ 0x80 no longer fail (read as u32) | 5 for the shift, 2 for the error |
 | Q3 | Commas → spaces without merging, reproduced | 3 |
 | Q4 | Component counting reproduced exactly | 3 |
