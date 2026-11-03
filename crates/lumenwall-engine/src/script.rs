@@ -26,6 +26,9 @@ use lumenwall_script::{
 
 use crate::scene::{FrameState, chain_visible, visibility_chain, world_transform};
 
+mod dynamic;
+pub(crate) use dynamic::{Dynamic, Structure, workshop_ids};
+
 /// Receives the text that scripts compute for text layers: the junction between scripting and
 /// the text renderer, which registers itself with [`crate::SceneRuntime::set_text_sink`].
 ///
@@ -49,6 +52,8 @@ enum LayerKind {
     Text,
     Particle,
     Group,
+    /// Listed and found (`getLayer('jump').play()`), never scripted (spec 06 §1.2).
+    Sound,
 }
 
 /// A scriptable object (spec 06 §1.2) and the settings behind its members.
@@ -100,8 +105,17 @@ struct FrameData {
 
 /// Everything the host needs besides the project.
 struct HostData {
+    /// Every layer ever listed; destroyed ones stay (their index may be reused by a recycled
+    /// layer) but leave `by_id` and `order`.
     layers: Vec<Layer>,
     by_id: HashMap<i32, usize>,
+    /// Live layers in render order (indices into `layers`): `getLayerIndex`, `sortLayer`,
+    /// `enumerateLayers`, and the draw order of the scene when it changes.
+    order: Vec<usize>,
+    /// Layers created and destroyed by scripts; `None` when no script uses them.
+    dynamic: Option<Box<Dynamic>>,
+    /// Image objects whose `alignment` a script changed (applied by the scene update).
+    aligned: Vec<ObjectIndex>,
     frame: FrameData,
     /// Origin of [`SceneHost::now`]: timers follow scene time.
     epoch: Instant,
@@ -288,6 +302,114 @@ impl HostView<'_> {
     }
 }
 
+/// The script layer of a created object: its kind and the settings behind its members.
+/// `None` for objects scripts do not see (lights, shapes, unknown objects).
+fn new_layer(obj: &lumenwall_scene::Object, idx: ObjectIndex, size: Option<Vec2>) -> Option<Layer> {
+    // Group copies; the type-specific setting read by the renderer goes first below.
+    let (mut scale, mut angles, mut visible) = ([obj.scale; 2], [obj.angles; 2], [obj.visible; 2]);
+    let mut l = Layer {
+        id: obj.id,
+        object: idx,
+        kind: LayerKind::Group,
+        parent: None,
+        origin: obj.origin,
+        scale,
+        angles,
+        visible,
+        alpha: None,
+        color: None,
+        brightness: None,
+        parallax_depth: None,
+        point_size: None,
+        text: None,
+        size: Vec2::ZERO,
+        scripted: false,
+        text_script: false,
+    };
+    match &obj.kind {
+        ObjectKind::Image(i) => {
+            l.kind = LayerKind::Image;
+            (scale[0], angles[0], visible[0]) = (i.scale, i.angles, i.visible);
+            l.alpha = Some(i.alpha);
+            l.color = Some(i.color);
+            l.brightness = Some(i.brightness);
+            l.parallax_depth = Some(i.parallax_depth);
+            l.size = size.unwrap_or(i.size);
+        }
+        ObjectKind::Text(t) => {
+            l.kind = LayerKind::Text;
+            (scale[0], visible[0]) = (t.scale, t.visible);
+            l.alpha = Some(t.alpha);
+            l.color = Some(t.color);
+            l.point_size = Some(t.point_size);
+            l.text = Some(t.text);
+            l.size = t.size;
+        }
+        ObjectKind::Particle(p) => {
+            l.kind = LayerKind::Particle;
+            (scale[0], angles[0], visible[0]) = (p.scale, p.angles, p.visible);
+            l.parallax_depth = Some(p.parallax_depth);
+        }
+        ObjectKind::Generic(GenericKind::Group) => {}
+        // we-doc: sound layers are layers (`thisScene.getLayer('jump').play()` in Wallpaper
+        // Engine's Dino Run); their members are never scripted (spec 06 §1.2).
+        ObjectKind::Sound(_) => l.kind = LayerKind::Sound,
+        // Lights, shapes and unknown objects are not scriptable (spec 06 §1.2).
+        _ => return None,
+    }
+    (l.scale, l.angles, l.visible) = (scale, angles, visible);
+    Some(l)
+}
+
+/// `ILayer.alignment` text of an anchor (Wallpaper Engine values: `center`, `top`,
+/// `bottomleft`…).
+fn alignment_name(a: lumenwall_scene::Alignment) -> &'static str {
+    match (a.top, a.bottom, a.left, a.right) {
+        (true, _, true, _) => "topleft",
+        (true, _, _, true) => "topright",
+        (true, ..) => "top",
+        (_, true, true, _) => "bottomleft",
+        (_, true, _, true) => "bottomright",
+        (_, true, ..) => "bottom",
+        (.., true, _) => "left",
+        (.., true) => "right",
+        _ => "center",
+    }
+}
+
+impl HostView<'_> {
+    fn image_alignment(&self, idx: ObjectIndex) -> Option<lumenwall_scene::Alignment> {
+        match &self.project.scene.as_ref()?.objects.get(idx.index())?.kind {
+            ObjectKind::Image(i) => Some(i.alignment),
+            _ => None,
+        }
+    }
+
+    /// Writes `ILayer.alignment` of an image: the anchor of its rectangle.
+    fn set_alignment(&mut self, idx: ObjectIndex, value: &Value) -> bool {
+        let Value::String(s) = value else {
+            return false;
+        };
+        let a = lumenwall_scene::Alignment::parse(s);
+        let Some(ObjectKind::Image(i)) = self
+            .project
+            .scene
+            .as_mut()
+            .and_then(|sc| sc.objects.get_mut(idx.index()))
+            .map(|o| &mut o.kind)
+        else {
+            return false;
+        };
+        if i.alignment != a {
+            i.alignment = a;
+            if !self.data.aligned.contains(&idx) {
+                self.data.aligned.push(idx);
+            }
+        }
+        true
+    }
+}
+
 impl SceneHost for HostView<'_> {
     fn clock(&self) -> Clock {
         self.data.frame.clock
@@ -345,6 +467,10 @@ impl SceneHost for HostView<'_> {
                     "parallaxDepth" => l.parallax_depth?,
                     "pointsize" => l.point_size?,
                     "text" => l.text?,
+                    "alignment" => {
+                        let a = self.image_alignment(l.object)?;
+                        return Some(Value::String(alignment_name(a).to_owned()));
+                    }
                     _ => return None,
                 };
                 Some(to_script(settings.value(setting)))
@@ -379,6 +505,9 @@ impl SceneHost for HostView<'_> {
                     return false;
                 };
                 let l = &self.data.layers[li];
+                if name == "alignment" {
+                    return self.set_alignment(l.object, value);
+                }
                 let (targets, transform, uniform): ([Option<SettingId>; 2], bool, bool) = match name
                 {
                     "origin" => ([Some(l.origin), None], true, false),
@@ -460,6 +589,15 @@ impl SceneHost for HostView<'_> {
 
     fn call(&mut self, obj: ObjectRef, method: &str, args: &[Value]) -> Option<Value> {
         match (obj, method) {
+            (ObjectRef::Scene, "createLayer") => self.create_layer(args.first()?),
+            (ObjectRef::Scene, "destroyLayer") => {
+                Some(Value::Bool(self.destroy_layer(args.first()?)))
+            }
+            (ObjectRef::Scene, "sortLayer") => {
+                let index = args.get(1).map_or(0, Value::int);
+                Some(Value::Bool(self.sort_layer(args.first()?, index)))
+            }
+            (ObjectRef::Scene, "getInitialLayerConfig") => self.initial_layer_config(args.first()?),
             (ObjectRef::Layer(id), "getEffectCount") => {
                 Some(Value::Int(self.image_effects(id).len() as i32))
             }
@@ -477,11 +615,13 @@ impl SceneHost for HostView<'_> {
             }
             (ObjectRef::Layer(id), "getChildren") => {
                 let li = *self.data.by_id.get(&id)?;
+                let by_id = &self.data.by_id;
                 Some(Value::Array(
                     self.data
-                        .layers
+                        .order
                         .iter()
-                        .filter(|l| l.parent == Some(li))
+                        .map(|&i| &self.data.layers[i])
+                        .filter(|l| l.parent == Some(li) && by_id.contains_key(&l.id))
                         .map(|l| Value::Object(ObjectRef::Layer(l.id)))
                         .collect(),
                 ))
@@ -533,18 +673,24 @@ impl SceneHost for HostView<'_> {
 
     fn find_layer(&self, name: &str) -> Option<LayerId> {
         self.data
-            .layers
+            .order
             .iter()
+            .map(|&i| &self.data.layers[i])
             .find(|l| self.layer_name(l) == name)
             .map(|l| l.id)
     }
 
     fn layer_count(&self) -> usize {
-        self.data.layers.len()
+        self.data.order.len()
     }
 
     fn layer_at(&self, index: usize) -> Option<LayerId> {
-        self.data.layers.get(index).map(|l| l.id)
+        self.data.order.get(index).map(|&i| self.data.layers[i].id)
+    }
+
+    fn register_asset(&mut self, path: &str, _precache: bool) -> Option<u32> {
+        // Registered assets are prepared at once (the first `createLayer` reuses it).
+        self.register(path)
     }
 
     fn script_property(&self, binding: u64, name: &str) -> Option<Value> {
@@ -640,6 +786,7 @@ impl SceneScripts {
         build: &SceneBuild,
         image_sizes: &[(ObjectIndex, Vec2)],
         scene_size: Vec2,
+        mut dynamic: Option<Box<Dynamic>>,
     ) -> Option<Box<Self>> {
         if project.settings.scripted().is_empty() {
             return None;
@@ -657,63 +804,15 @@ impl SceneScripts {
             {
                 continue;
             }
-            let obj = scene.object(idx);
-            // Group copies; the type-specific setting read by the renderer goes first below.
-            let (mut scale, mut angles, mut visible) =
-                ([obj.scale; 2], [obj.angles; 2], [obj.visible; 2]);
-            let mut l = Layer {
-                id: obj.id,
-                object: idx,
-                kind: LayerKind::Group,
-                parent: None,
-                origin: obj.origin,
-                scale,
-                angles,
-                visible,
-                alpha: None,
-                color: None,
-                brightness: None,
-                parallax_depth: None,
-                point_size: None,
-                text: None,
-                size: Vec2::ZERO,
-                scripted: false,
-                text_script: false,
+            let size = image_sizes.iter().find(|(o, _)| *o == idx).map(|(_, s)| *s);
+            let Some(l) = new_layer(scene.object(idx), idx, size) else {
+                continue;
             };
-            match &obj.kind {
-                ObjectKind::Image(i) => {
-                    l.kind = LayerKind::Image;
-                    (scale[0], angles[0], visible[0]) = (i.scale, i.angles, i.visible);
-                    l.alpha = Some(i.alpha);
-                    l.color = Some(i.color);
-                    l.brightness = Some(i.brightness);
-                    l.parallax_depth = Some(i.parallax_depth);
-                    l.size = image_sizes
-                        .iter()
-                        .find(|(o, _)| *o == idx)
-                        .map_or(i.size, |(_, s)| *s);
-                }
-                ObjectKind::Text(t) => {
-                    l.kind = LayerKind::Text;
-                    (scale[0], visible[0]) = (t.scale, t.visible);
-                    l.alpha = Some(t.alpha);
-                    l.color = Some(t.color);
-                    l.point_size = Some(t.point_size);
-                    l.text = Some(t.text);
-                    l.size = t.size;
-                }
-                ObjectKind::Particle(p) => {
-                    l.kind = LayerKind::Particle;
-                    (scale[0], angles[0], visible[0]) = (p.scale, p.angles, p.visible);
-                    l.parallax_depth = Some(p.parallax_depth);
-                }
-                ObjectKind::Generic(GenericKind::Group) => {}
-                // Sounds, lights, shapes and unknown objects are not scriptable (spec 06 §1.2).
-                _ => continue,
-            }
-            (l.scale, l.angles, l.visible) = (scale, angles, visible);
             by_id.entry(l.id).or_insert(layers.len());
             layers.push(l);
+        }
+        if let Some(d) = &mut dynamic {
+            d.first_id(scene.objects.iter().map(|o| o.id).max().unwrap_or(0));
         }
         for l in &mut layers {
             let parent = scene.object(l.object).parent;
@@ -737,6 +836,9 @@ impl SceneScripts {
                 continue;
             };
             let l = &layers[li];
+            if l.kind == LayerKind::Sound {
+                continue;
+            }
             let mut add = |member: &str, ids: &[SettingId], object: Option<ObjectRef>| {
                 if let Some(sid) = ids.iter().find_map(|&id| script_of(id)) {
                     let (src, names, binding) = source(sid);
@@ -828,11 +930,15 @@ impl SceneScripts {
                 return None;
             }
         };
+        let order = (0..layers.len()).collect();
         let mut s = Box::new(SceneScripts {
             engine,
             data: HostData {
                 layers,
                 by_id,
+                order,
+                dynamic,
+                aligned: Vec::new(),
                 frame: FrameData {
                     display: Display {
                         screen_resolution: scene_size.to_array(),
@@ -1067,6 +1173,20 @@ impl SceneScripts {
                 }
             }
         }
+        // Destroyed layers (spec: deferred removal): `destroy()` of their scripts, their JS
+        // objects dropped. A `destroy()` may destroy more.
+        for _ in 0..8 {
+            let ids = match host.data.dynamic.as_mut() {
+                Some(d) => d.take_removed_ids(),
+                None => break,
+            };
+            if ids.is_empty() {
+                break;
+            }
+            for id in ids {
+                engine.remove_layer(&mut host, id);
+            }
+        }
         if !host.data.text_written.is_empty() {
             for li in host.data.text_written.drain(..) {
                 let l = &host.data.layers[li];
@@ -1081,6 +1201,51 @@ impl SceneScripts {
         changes
     }
 
+    /// Layers created, destroyed or reordered by scripts since the last call.
+    pub(crate) fn take_structure(&mut self) -> Option<Structure> {
+        self.data.dynamic.as_mut()?.take_structure()
+    }
+
+    /// Image objects whose anchor scripts changed since the last call.
+    pub(crate) fn take_aligned(&mut self) -> Vec<ObjectIndex> {
+        std::mem::take(&mut self.data.aligned)
+    }
+
+    /// Objects of the live layers, in draw order.
+    pub(crate) fn render_objects(&self) -> impl Iterator<Item = ObjectIndex> + '_ {
+        self.data.order.iter().map(|&i| self.data.layers[i].object)
+    }
+
+    /// Whether `idx` is the object of a live layer.
+    pub(crate) fn is_live(&self, idx: ObjectIndex) -> bool {
+        let slot = self
+            .data
+            .dynamic
+            .as_ref()
+            .and_then(|d| d.slot_of(idx))
+            .or_else(|| self.data.layers.iter().position(|l| l.object == idx));
+        slot.is_some_and(|s| self.data.by_id.get(&self.data.layers[s].id) == Some(&s))
+    }
+
+    /// Whether `idx` is listed as a layer (live or destroyed): scripts decide its place.
+    pub(crate) fn lists(&self, idx: ObjectIndex) -> bool {
+        self.data.layers.iter().any(|l| l.object == idx)
+    }
+
+    /// Drawn size of a created image layer, once the renderer set it up (`ILayer.size`, hit
+    /// tests).
+    pub(crate) fn set_layer_size(&mut self, idx: ObjectIndex, size: Vec2) {
+        let slot = self.data.dynamic.as_ref().and_then(|d| d.slot_of(idx));
+        if let Some(l) = slot.and_then(|s| self.data.layers.get_mut(s)) {
+            l.size = size;
+        }
+    }
+
+    /// The created-layer side of the host, when the scene's scripts use it.
+    pub(crate) fn dynamic(&self) -> Option<&Dynamic> {
+        self.data.dynamic.as_deref()
+    }
+
     /// Calls `destroy()` of every script and flushes `localStorage`.
     pub(crate) fn shutdown(&mut self, project: &mut Project) {
         let mut host = HostView {
@@ -1092,11 +1257,20 @@ impl SceneScripts {
     }
 }
 
-/// Topmost visible scripted image or text layer under the cursor (last drawn first), with the
-/// cursor in its local, unscaled pixels from its centre. The alignment is not applied.
-fn hit_test(host: &HostView<'_>, build: &SceneBuild, world: Vec2) -> Option<(usize, Vec2)> {
+/// Topmost visible image or text layer under the cursor (last drawn first) whose scripts
+/// handle cursor events, with the cursor in its local, unscaled pixels from its centre. The
+/// alignment is not applied. Layers without cursor handlers do not catch the cursor: Wallpaper
+/// Engine's Dino Run draws a full-screen post-process layer (scripted through its effect)
+/// over the dinosaur that receives the clicks.
+fn hit_test(
+    engine: &ScriptEngine,
+    host: &HostView<'_>,
+    build: &SceneBuild,
+    world: Vec2,
+) -> Option<(usize, Vec2)> {
     let settings = &host.project.settings;
-    for (i, l) in host.data.layers.iter().enumerate().rev() {
+    for &i in host.data.order.iter().rev() {
+        let l = &host.data.layers[i];
         if !l.scripted
             || !matches!(l.kind, LayerKind::Image | LayerKind::Text)
             || l.size == Vec2::ZERO
@@ -1114,7 +1288,7 @@ fn hit_test(host: &HostView<'_>, build: &SceneBuild, world: Vec2) -> Option<(usi
         }
         let local = local / scale;
         let half = l.size * 0.5;
-        if local.x.abs() <= half.x && local.y.abs() <= half.y {
+        if local.x.abs() <= half.x && local.y.abs() <= half.y && engine.handles_cursor(l.id) {
             return Some((i, local));
         }
     }
@@ -1135,7 +1309,7 @@ fn cursor_events(
     if !moved && left == track.left {
         return;
     }
-    let hit = hit_test(host, build, world);
+    let hit = hit_test(engine, host, build, world);
     let hovered = hit.map(|(i, _)| i);
     let event = CursorEvent {
         world_position: [world.x, world.y, 0.0],
@@ -1272,7 +1446,41 @@ mod tests {
     }
 
     fn scripts(p: &mut Project, b: &SceneBuild) -> Box<SceneScripts> {
-        SceneScripts::load(p, b, &[], Vec2::new(1920.0, 1080.0)).expect("scripts")
+        SceneScripts::load(p, b, &[], Vec2::new(1920.0, 1080.0), None).expect("scripts")
+    }
+
+    /// Scripts with created layers enabled, on an in-memory VFS holding the test model.
+    fn dynamic_scripts(p: &mut Project, b: &SceneBuild) -> Box<SceneScripts> {
+        let mut files = lumenwall_assets::MemoryFiles::default();
+        files.insert_static("models/m.json", br#"{ "material": "materials/m.json" }"#);
+        files.insert_static(
+            "materials/m.json",
+            br#"{ "passes": [ { "shader": "genericimage2" } ] }"#,
+        );
+        files.insert_static(
+            "models/workshop/77/bar.json",
+            br#"{ "material": "materials/m.json" }"#,
+        );
+        let mut vfs = lumenwall_assets::Vfs::new();
+        vfs.mount_adapter("/", lumenwall_assets::Adapter::Memory(files));
+        let ids = workshop_ids(p.settings.scripts().iter().map(|s| &*s.source));
+        let d = Dynamic::new(
+            std::sync::Arc::new(vfs),
+            ids,
+            HashMap::new(),
+            BuildOptions::new(1920, 1080),
+        );
+        SceneScripts::load(p, b, &[], Vec2::new(1920.0, 1080.0), Some(Box::new(d)))
+            .expect("scripts")
+    }
+
+    fn eval(s: &mut SceneScripts, p: &mut Project, src: &str) -> Value {
+        let mut host = HostView {
+            data: &mut s.data,
+            project: p,
+            audio: None,
+        };
+        s.engine.eval(&mut host, src).expect("eval")
     }
 
     struct Audio([f32; 16], [f32; 32], [f32; 64]);
@@ -1313,7 +1521,7 @@ mod tests {
     #[test]
     fn a_scene_without_scripts_creates_no_runtime() {
         let (mut p, b) = load(&[image(1, "a", "")]);
-        assert!(SceneScripts::load(&mut p, &b, &[], Vec2::ONE).is_none());
+        assert!(SceneScripts::load(&mut p, &b, &[], Vec2::ONE, None).is_none());
     }
 
     #[test]
@@ -1504,6 +1712,179 @@ mod tests {
         let theirs = p.world_transform(idx, &b);
         assert_eq!(ours, theirs);
         assert_ne!(ours.origin, Vec3::new(100.0, 100.0, 0.0));
+    }
+
+    #[test]
+    fn created_layers_are_listed_sorted_destroyed_and_reused() {
+        let (mut p, b) = load(&[
+            image(
+                1,
+                "a",
+                &format!(
+                    r#", "visible": {}"#,
+                    scripted(
+                        "true",
+                        "export let __workshopId = '77';
+                         let asset = engine.registerAsset('models/m.json');
+                         export function init() {
+                             shared.n0 = thisScene.getLayerCount();
+                             let l = thisScene.createLayer(asset);
+                             shared.n1 = thisScene.getLayerCount();
+                             shared.last = thisScene.getLayerIndex(l);
+                             thisScene.sortLayer(l, 0);
+                             shared.first = thisScene.getLayerIndex(l);
+                             l.alignment = 'bottomleft';
+                             shared.alignment = l.alignment;
+                             l.origin = new Vec3(5, 6, 0);
+                             shared.layer = l;
+                             shared.bar = thisScene.createLayer('models/bar.json');
+                             shared.config = thisScene.getInitialLayerConfig(l).image;
+                             shared.sound = thisScene.getLayer('snd') !== null;
+                         }"
+                    )
+                ),
+            ),
+            image(2, "b", ""),
+            r#"{ "id": 3, "name": "snd", "sound": ["sounds/x.mp3"] }"#.to_owned(),
+        ]);
+        let mut s = dynamic_scripts(&mut p, &b);
+        // Sounds are layers (Dino Run's `getLayer('jump').play()`).
+        assert_eq!(eval(&mut s, &mut p, "shared.n0"), Value::Int(3));
+        assert_eq!(eval(&mut s, &mut p, "shared.n1"), Value::Int(4));
+        assert_eq!(eval(&mut s, &mut p, "shared.last"), Value::Int(3));
+        assert_eq!(eval(&mut s, &mut p, "shared.first"), Value::Int(0));
+        assert_eq!(
+            eval(&mut s, &mut p, "shared.alignment"),
+            Value::String("bottomleft".into())
+        );
+        assert_eq!(eval(&mut s, &mut p, "shared.sound"), Value::Bool(true));
+        assert_eq!(
+            eval(&mut s, &mut p, "shared.config"),
+            Value::String("models/m.json".into())
+        );
+        // A Workshop script's relative path resolves under its own folder.
+        assert_ne!(eval(&mut s, &mut p, "shared.bar"), Value::Undefined);
+        assert_eq!(
+            eval(
+                &mut s,
+                &mut p,
+                "thisScene.getInitialLayerConfig(shared.bar).image"
+            ),
+            Value::String("models/workshop/77/bar.json".into())
+        );
+        // The precached object, the bar's object; the first is reused by `createLayer`.
+        let st = s.take_structure().expect("structure");
+        assert_eq!(st.created.len(), 2);
+        assert_eq!(st.reused.len(), 1);
+        assert!(st.reordered);
+        let created = st.reused[0];
+        assert!(s.is_live(created));
+        assert_eq!(s.take_aligned(), vec![created]);
+        let order: Vec<_> = s.render_objects().collect();
+        assert_eq!(order[0], created);
+        assert_eq!(order.len(), 5);
+
+        // Destroyed: unlisted, its object parked; the next layer of the asset reuses it with
+        // a new id and its initial values.
+        assert_eq!(eval(&mut s, &mut p, "shared.layer.origin.x"), Value::Int(5));
+        assert_eq!(
+            eval(&mut s, &mut p, "thisScene.destroyLayer(shared.layer)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval(&mut s, &mut p, "thisScene.getLayerCount()"),
+            Value::Int(4)
+        );
+        assert_eq!(
+            eval(&mut s, &mut p, "shared.layer.origin"),
+            Value::Undefined
+        );
+        assert!(!s.is_live(created));
+        tick(&mut s, &mut p, &b, 0.1);
+        let st = s.take_structure().expect("structure");
+        assert_eq!(st.removed, vec![created]);
+        assert_eq!(
+            eval(
+                &mut s,
+                &mut p,
+                "let again = thisScene.createLayer('models/m.json');
+                 shared.again = again;
+                 [again.origin.x, thisScene.getLayerIndex(again), again.alignment]"
+            ),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(4),
+                Value::String("center".into())
+            ])
+        );
+        let st = s.take_structure().expect("structure");
+        assert_eq!(st.reused, vec![created]);
+        assert!(st.created.is_empty());
+        assert_eq!(
+            eval(&mut s, &mut p, "shared.again === shared.layer"),
+            Value::Bool(false)
+        );
+        // Bad arguments are neutral.
+        assert_eq!(
+            eval(&mut s, &mut p, "thisScene.destroyLayer('nothing')"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval(&mut s, &mut p, "thisScene.createLayer('fonts/x.ttf')"),
+            Value::Undefined
+        );
+    }
+
+    #[test]
+    fn steady_state_with_created_layers_does_not_allocate() {
+        let (mut p, b) = load(&[image(
+            1,
+            "a",
+            &format!(
+                r#", "visible": {}"#,
+                scripted(
+                    "true",
+                    "let bars = [];
+                     let o = new Vec3(0, 0, 0);
+                     let sc = new Vec3(1, 1, 1);
+                     export function init() {
+                         for (let i = 0; i < 16; ++i) {
+                             let l = thisScene.createLayer('models/m.json');
+                             thisScene.sortLayer(l, 0);
+                             bars.push(l);
+                         }
+                     }
+                     export function update() {
+                         for (let i = 0; i < bars.length; ++i) {
+                             o.x = 10 * i;
+                             o.y = 100 + Math.sin(engine.runtime + i) * 50;
+                             bars[i].origin = o;
+                             sc.y = 1 + i * Math.cos(engine.runtime);
+                             bars[i].scale = sc;
+                             bars[i].alpha = 0.5 + 0.5 * Math.sin(engine.runtime);
+                             bars[i].visible = bars[i].alpha > 0.1;
+                         }
+                     }"
+                ),
+            ),
+        )]);
+        let mut s = dynamic_scripts(&mut p, &b);
+        let st = s.take_structure().expect("structure");
+        assert_eq!(st.created.len(), 16);
+        assert_eq!(s.render_objects().count(), 17);
+        let a = Audio([0.0; 16], [0.0; 32], [0.0; 64]);
+        let size = Vec2::new(1920.0, 1080.0);
+        for i in 0..10 {
+            s.tick(&mut p, &b, &frame(f64::from(i) * 0.1, &a), size);
+        }
+        let before = ALLOCS.with(Cell::get);
+        for i in 10..110 {
+            let c = s.tick(&mut p, &b, &frame(f64::from(i) * 0.1, &a), size);
+            assert!(c.transforms);
+        }
+        let n = ALLOCS.with(Cell::get) - before;
+        assert_eq!(n, 0, "{n} heap allocations in 100 frames");
+        assert!(s.take_structure().is_none());
     }
 
     #[test]

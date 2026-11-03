@@ -146,6 +146,9 @@ struct Slots {
 pub struct PendingParticle {
     pub object_id: i32,
     system: ParticleSystem,
+    /// What [`ParticleRuntime::respawn`] needs; dropped by [`Self::finish`].
+    def: ParticleDefinition,
+    opts: SystemOptions,
     stream: StreamId,
     desc: PassDesc,
     overbright: f32,
@@ -168,6 +171,11 @@ pub struct ParticleRuntime {
     drawn: bool,
     /// `(user property, slot, integer)`: constants rewritten when the property changes.
     user_constants: Vec<(String, UniformSlot, bool)>,
+    /// Definition and options of a system that can be started again (layers created by
+    /// scripts, reused after `destroyLayer`); `None` for the scene's own systems.
+    respawn: Option<Box<(ParticleDefinition, SystemOptions)>>,
+    /// Scene object drawn (layers destroyed or created by scripts find their system by it).
+    pub(crate) object: Option<lumenwall_scene::ObjectIndex>,
 }
 
 fn blend(b: PBlend) -> BlendMode {
@@ -289,10 +297,7 @@ pub fn prepare(
         texture: info,
         seed: None,
     };
-    let mut system = ParticleSystem::new(&def, &object, &opts);
-    for (name, value) in s.properties {
-        system.set_user_property_json(name, value);
-    }
+    let system = new_system(&def, &object, &opts, s.properties);
     let render: RenderInfo = system.render_info(material.blending.as_deref());
     let layout = StreamLayout {
         stride_floats: render.vertex_stride_floats as u32,
@@ -383,6 +388,8 @@ pub fn prepare(
     Ok(PendingParticle {
         object_id: s.object_id,
         system,
+        def,
+        opts,
         stream,
         desc,
         overbright: material.overbright,
@@ -392,7 +399,34 @@ pub fn prepare(
     })
 }
 
+fn new_system(
+    def: &ParticleDefinition,
+    object: &ParticleObject,
+    opts: &SystemOptions,
+    properties: &[(String, Json)],
+) -> ParticleSystem {
+    let mut system = ParticleSystem::new(def, object, opts);
+    for (name, value) in properties {
+        system.set_user_property_json(name, value);
+    }
+    system
+}
+
 impl PendingParticle {
+    /// [`Self::finish`] for a system that [`ParticleRuntime::respawn`] can start again.
+    pub(crate) fn finish_respawnable(
+        mut self,
+        b: &mut SceneBuilder<'_>,
+    ) -> Result<ParticleRuntime, String> {
+        let respawn = Box::new((
+            std::mem::take(&mut self.def),
+            std::mem::take(&mut self.opts),
+        ));
+        let mut rt = self.finish(b)?;
+        rt.respawn = Some(respawn);
+        Ok(rt)
+    }
+
     /// Adds the draw pass (render order) and resolves the uniform slots.
     pub fn finish(self, b: &mut SceneBuilder<'_>) -> Result<ParticleRuntime, String> {
         let pass = b
@@ -447,6 +481,8 @@ impl PendingParticle {
             visible: self.visible,
             drawn: false,
             user_constants,
+            respawn: None,
+            object: None,
         })
     }
 }
@@ -574,6 +610,30 @@ impl ParticleRuntime {
     /// Live particles (statistics).
     pub fn live(&self) -> usize {
         self.system.len()
+    }
+
+    /// Starts the system again from its definition with the scene object `object_json` (a
+    /// layer created by a script and reused: emitters fire anew at its current origin).
+    /// Allocates the new simulation; the stream, pass and uniforms are kept. `false` when the
+    /// system was not prepared with [`PendingParticle::finish_respawnable`].
+    pub(crate) fn respawn(
+        &mut self,
+        scene: &mut RenderScene,
+        ctx: &lumenwall_render::GpuContext,
+        object_json: &Json,
+        properties: &[(String, Json)],
+    ) -> bool {
+        let Some(r) = &self.respawn else {
+            return false;
+        };
+        let mut object = ParticleObject::from_json(object_json);
+        bind_object_values(&mut object, properties);
+        self.system = new_system(&r.0, &object, &r.1, properties);
+        if self.drawn {
+            scene.write_stream(ctx, self.stream, &[], 0);
+            self.drawn = false;
+        }
+        true
     }
 }
 

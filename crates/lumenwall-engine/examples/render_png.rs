@@ -13,6 +13,9 @@
 //!   --scaling MODE     stretch | fit | fill | default (default: default)
 //!   --hwdec MODE       video decoding: auto | nvdec-copy | no (default: auto)
 //!   --no-particles     particle systems are not created
+//!   --pointer X,Y      pointer in output pixels from the top-left (default: mouse disabled)
+//!   --click a,b,c      frames during which the left button is held
+//!   --audio synthetic  feed a synthetic moving spectrum (nothing is played)
 //!   --debug VALUE      render debug switch (repeatable): base-only | pass-log |
 //!                      no-solid-final | object=<id> | skip-object=<id> | skip-effect=<id>
 //! ```
@@ -64,6 +67,21 @@ fn main() {
             "--assets" => assets = Some(PathBuf::from(val())),
             "--software" => opts.software = true,
             "--no-particles" => opts.particles = false,
+            "--pointer" => {
+                let v = val();
+                let (x, y) = v.split_once(',').unwrap_or(("0", "0"));
+                opts.pointer = Some(glam::Vec2::new(
+                    x.trim().parse().unwrap_or(0.0),
+                    y.trim().parse().unwrap_or(0.0),
+                ));
+            }
+            "--click" => {
+                opts.clicks = val()
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+            }
+            "--audio" => opts.synthetic_audio = val() == "synthetic",
             "--debug" => {
                 let v = val();
                 let d = &mut opts.debug;

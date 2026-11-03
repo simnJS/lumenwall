@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use glam::{Mat4, Vec2, Vec3};
 use lumenwall_assets::Vfs;
@@ -44,6 +45,9 @@ use crate::script::{SceneScripts, TextSink};
 use crate::shaders::{ConstantParam, PassKind, ShaderProvider, ShaderRequest};
 use crate::text;
 use crate::texture::{LoadedTexture, TextureCache};
+
+mod layers;
+pub use layers::LayerStats;
 
 /// Scene construction settings.
 #[derive(Clone, Debug)]
@@ -268,6 +272,8 @@ pub struct SceneRuntime {
     /// Text changes reported by scripts ([`TextSink`]), applied to the glyph textures by the
     /// next update. Filled only when a script's string actually changes.
     text_changes: Rc<RefCell<Vec<(i32, String)>>>,
+    /// Layers created, destroyed or reordered by scripts; `None` when no script can.
+    layers: Option<Box<layers::RuntimeLayers>>,
 }
 
 /// Text junction: queues the strings scripts compute for text layers.
@@ -431,10 +437,17 @@ fn raw_objects(vfs: &Vfs, file: &str) -> HashMap<i64, Json> {
 pub fn build_scene(
     ctx: &GpuContext,
     project: &mut Project,
-    vfs: &Vfs,
+    vfs: &Arc<Vfs>,
     shaders: &mut dyn ShaderProvider,
     opts: &SceneOptions,
 ) -> Result<SceneRuntime, String> {
+    // Scripts that add, remove or reorder layers after load: the scene keeps what that needs
+    // (per-object frame operations, shader provider, texture cache).
+    let dynamic_layers = project.settings.scripts().iter().any(|s| {
+        ["createLayer", "destroyLayer", "sortLayer", "registerAsset"]
+            .iter()
+            .any(|f| s.source.contains(f))
+    });
     let src = SceneSource(vfs);
     let mut bopts = BuildOptions::new(opts.output_size.0, opts.output_size.1);
     bopts.particles_enabled = opts.particles;
@@ -652,7 +665,12 @@ pub fn build_scene(
     let mut uses_pointer = false;
     let mut frame_inputs = false;
     let render_order = build.render_order.clone();
+    // First frame operation of each object, to reorder them later (dynamic layers only).
+    let mut op_marks: Vec<(ObjectIndex, usize)> = Vec::new();
     for idx in render_order {
+        if dynamic_layers {
+            op_marks.push((idx, b.ops().len()));
+        }
         if let Some((bl, targets, composites)) = &bloom
             && bl.object == idx
         {
@@ -821,7 +839,8 @@ pub fn build_scene(
                 });
             }
             Some(Pending::Particle(p)) => match p.finish(&mut b) {
-                Ok(rt) => {
+                Ok(mut rt) => {
+                    rt.object = Some(idx);
                     stats.particle_systems += 1;
                     stats.passes += 1;
                     particle_rts.push(rt);
@@ -872,6 +891,20 @@ pub fn build_scene(
     stats.textures = textures.len();
     stats.texture_bytes = textures.uploaded_bytes;
     stats.stand_in_shaders = shaders.replaced();
+    let mut layers = dynamic_layers.then(|| {
+        Box::new(layers::RuntimeLayers::new(
+            vfs.clone(),
+            shaders
+                .detach()
+                .unwrap_or_else(crate::shaders::default_provider),
+            std::mem::take(&mut textures),
+            opts.clone(),
+            root,
+            st.full,
+            b.ops(),
+            &op_marks,
+        ))
+    });
     let mut scene_rt = b.build().map_err(|e| e.to_string())?;
     // Images invisible at start: their passes are disabled (Q8, live visibility).
     for img in &mut images {
@@ -893,7 +926,25 @@ pub fn build_scene(
     // Spec 06 §8.1: scripts load once every object exists; what they write at load reaches
     // the renderer with the first update.
     let sizes: Vec<(ObjectIndex, Vec2)> = images.iter().map(|i| (i.object, i.size)).collect();
-    let mut scripts = SceneScripts::load(project, &build, &sizes, size);
+    let dynamic = layers.as_ref().map(|_| {
+        let ids =
+            crate::script::workshop_ids(project.settings.scripts().iter().map(|s| &*s.source));
+        // Particle layers stay scriptable with particles off (nothing is drawn), so scripts
+        // that move the layer they create keep running.
+        let mut layer_opts = bopts;
+        layer_opts.particles_enabled = true;
+        Box::new(crate::script::Dynamic::new(
+            vfs.clone(),
+            ids,
+            raw,
+            layer_opts,
+        ))
+    });
+    let mut scripts = SceneScripts::load(project, &build, &sizes, size, dynamic);
+    match (&mut layers, &scripts) {
+        (Some(l), Some(s)) => l.set_tail(s),
+        _ => layers = None,
+    }
     let text_changes = Rc::new(RefCell::new(Vec::new()));
     if let Some(s) = &mut scripts {
         s.base_animated = animated;
@@ -909,7 +960,7 @@ pub fn build_scene(
     }
     // Particle and bloom shaders are not inspected: counted as readers.
     let frame_inputs = frame_inputs || !particle_rts.is_empty() || bloom.is_some();
-    Ok(SceneRuntime {
+    let mut rt = SceneRuntime {
         animated: animated || scripts.as_ref().is_some_and(|s| s.needs_frames()),
         uses_pointer: uses_pointer || parallax_on || !particle_rts.is_empty() || scripts.is_some(),
         scene: scene_rt,
@@ -938,7 +989,11 @@ pub fn build_scene(
         frame_inputs,
         scripts,
         text_changes,
-    })
+        layers,
+    };
+    // Layers scripts created or registered while loading (`init`, module top level).
+    rt.apply_layer_changes(ctx, project);
+    Ok(rt)
 }
 
 /// `(upper-case name, value)` combos.
@@ -1718,6 +1773,10 @@ impl SceneRuntime {
                     t.set_text(&text);
                 }
             }
+        }
+        if self.scripts.is_some() {
+            // Anchors written by scripts; layers created, destroyed or sorted.
+            self.apply_layer_changes(ctx, project);
         }
         let project = &*project;
         let time = f.time as f32;
