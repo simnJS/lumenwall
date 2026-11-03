@@ -80,7 +80,10 @@ fn installed_3d_projects_render() {
         assert_eq!(r.stats.meshes, meshes, "{name}: meshes");
         assert_eq!(r.stats.skipped_objects, 0, "{name}");
         #[cfg(feature = "we-shaders")]
-        assert_eq!(r.stats.stand_in_shaders, 0, "{name}: every shader translates");
+        assert_eq!(
+            r.stats.stand_in_shaders, 0,
+            "{name}: every shader translates"
+        );
     }
 }
 
