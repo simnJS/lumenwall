@@ -1,0 +1,189 @@
+# Lumenwall releases. Push a tag v<version> (the [workspace.package] version of
+# Cargo.toml): Linux and Windows archives are built, SHA256SUMS is written, every file
+# is signed with the minisign release key, checked exactly as the app checks updates,
+# and the GitHub release is published with generated notes.
+# Procedure, key creation and checks: docs/RELEASING.md.
+# Third-party actions are pinned to a commit SHA (tag in the trailing comment).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    name: check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ "$TAG" != v* || ! "$version" =~ $semver ]]; then
+            echo "::error::$TAG is not v<semver> (v0.2.0, v0.3.0-beta.1)"
+            exit 1
+          fi
+          manifest=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [[ "$manifest" != "$version" ]]; then
+            echo "::error::the tag is $TAG but Cargo.toml says $manifest: bump [workspace.package] version first"
+            exit 1
+          fi
+          # Fail in seconds rather than after the builds (release_sign checks it for real).
+          if grep -Eq 'RELEASE_PUBLIC_KEY: Option<&str> = None;' crates/lumenwall-update/src/lib.rs; then
+            echo "::error::RELEASE_PUBLIC_KEY is not set: this release could not verify its own updates (docs/RELEASING.md)"
+            exit 1
+          fi
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out with LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # No cache: a release is built from this commit and crates.io only.
+          cache: "false"
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Build
+        run: cargo build --workspace --release --locked --target "$TARGET"
+
+      - name: Third-party notices
+        run: |
+          cargo about generate --workspace --locked --fail \
+            -c packaging/about/about.toml packaging/about/about.hbs \
+            -o "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html"
+
+      - name: Package
+        run: |
+          py=python3
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            py=python
+          fi
+          # Same inputs, same archive: timestamps come from the tagged commit.
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          "$py" packaging/release/package.py \
+            --version "$VERSION" --target "$TARGET" \
+            --bin-dir "target/$TARGET/release" \
+            --notices "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html" \
+            --out dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/lumenwall-*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: sign and publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The only job that can write to the repository (create the release).
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          system-deps: "false"
+          cache: "false"
+
+      # Built before any secret is in the environment; Cargo.lock pins the minisign crate.
+      - name: Build the signing tool
+        run: cargo build --locked -p lumenwall-update --example release_sign
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: target/debug/examples/release_sign sign --version "$VERSION" dist
+
+      - name: Verify as the app does
+        run: |
+          target/debug/examples/release_sign verify --version "$VERSION" dist
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          ls -l dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "Lumenwall $VERSION" --draft)
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" "${flags[@]}" dist/*
+          # Public only once every file is uploaded: the app never sees half a release.
+          if [[ "$PRERELEASE" == true ]]; then
+            gh release edit "$TAG" --draft=false
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi

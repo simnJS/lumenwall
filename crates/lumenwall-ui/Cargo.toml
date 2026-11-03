@@ -15,6 +15,9 @@ path = "src/main.rs"
 
 [dependencies]
 lumenwall-ipc.workspace = true
+# Signed self-update from GitHub Releases (src/updater.rs). A path dependency: the
+# workspace manifest is left to the maintainers.
+lumenwall-update.workspace = true
 # Native Rust UI (no webview). wgpu with tiny-skia (CPU) as automatic fallback;
 # smol executor: one runtime thread instead of a thread pool per core.
 iced = { version = "0.14.0", default-features = false, features = ["wgpu-bare", "tiny-skia", "image-without-codecs", "svg", "smol", "x11", "wayland", "linux-theme-detection", "advanced", "crisp"] }

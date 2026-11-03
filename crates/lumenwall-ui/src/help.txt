@@ -25,3 +25,4 @@ ENVIRONMENT:
     LUMENWALL_LOG                 Log filter, e.g. "debug"
     LUMENWALL_UI_REDUCE_MOTION    1: no UI animations, 0: animations (default: system setting)
     LUMENWALL_WE_WORKSHOP         Extra Workshop folder (testing)
+    LUMENWALL_NO_UPDATE           1: no update checks for this session

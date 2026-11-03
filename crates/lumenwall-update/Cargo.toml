@@ -1,0 +1,45 @@
+[package]
+name = "lumenwall-update"
+description = "Signed self-update of Lumenwall from GitHub Releases."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lumenwall-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Same HTTP stack as lumenwall-ui (ureq + rustls/ring + the OS certificate store):
+# no second TLS implementation in the binary.
+ureq = { version = "3.5.1", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+# SHA-256 of the downloaded archive, from the ring already linked for TLS.
+ring = "0.17.14"
+# Minisign (Ed25519) signature verification, no dependencies of its own.
+minisign-verify = "0.3.0"
+semver = { version = "1.0.28", features = ["serde"] }
+dirs = "7.0.0"
+
+# Release archives: .tar.gz on Linux, .zip (deflate only) on Windows.
+[target.'cfg(not(windows))'.dependencies]
+flate2 = "1.1.10"
+tar = { version = "0.4.46", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "9.3.0", default-features = false, features = ["deflate-flate2"] }
+
+[dev-dependencies]
+# The tests build and read both archive formats on every platform.
+flate2 = "1.1.10"
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9.3.0", default-features = false, features = ["deflate-flate2"] }
+# Signs fake releases with the test key in tests/keys (never shipped).
+minisign = "0.10.0"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

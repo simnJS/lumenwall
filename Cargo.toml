@@ -22,6 +22,7 @@ lumenwall-web = { path = "crates/lumenwall-web" }
 lumenwall-particles = { path = "crates/lumenwall-particles" }
 lumenwall-assets = { path = "crates/lumenwall-assets" }
 lumenwall-ipc = { path = "crates/lumenwall-ipc" }
+lumenwall-update = { path = "crates/lumenwall-update" }
 lumenwall-ui = { path = "crates/lumenwall-ui" }
 lumenwall-engine = { path = "crates/lumenwall-engine" }
 

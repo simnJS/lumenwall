@@ -32,6 +32,10 @@ impl App {
             Page::Screens => self.screens_view(t),
             Page::Settings => self.settings_view(t),
         };
+        let page: Element<'_, Message> = match self.updater_banner(t) {
+            Some(banner) => column![banner, page].into(),
+            None => page,
+        };
         let mut body = row![
             self.sidebar(t),
             container(page).width(Length::Fill).height(Length::Fill)
