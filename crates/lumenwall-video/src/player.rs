@@ -118,6 +118,7 @@ mod imp {
             notify: Option<Notify>,
         ) -> Result<Self, VideoError> {
             let t0 = Instant::now();
+            crate::load_decoder()?;
             let adapter = AdapterHint::from_wgpu(&ctx.adapter().get_info());
             let mut attempts = Vec::new();
             if opts.hwdec == HwDecode::Auto && select::zero_copy_allowed() {

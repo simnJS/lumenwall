@@ -28,6 +28,7 @@ pub mod error;
 pub mod graph;
 pub mod headless;
 pub mod image;
+pub mod loader;
 pub mod math;
 pub mod shader;
 pub mod stats;

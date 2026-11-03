@@ -52,6 +52,7 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
 | `script` | SceneScript (`lumenwall-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. `script/dynamic.rs`: layers scripts create, destroy and sort (scene-model side, pools). |
 | `scene/layers.rs` | GPU side of the layers scripts create after load: `RenderScene::extend`, parking and reuse, draw order (see "Layers created by scripts"). |
+| `vulkan_driver` | `restrict_vulkan_loader` (first call of `main`, Linux): `VK_LOADER_DRIVERS_SELECT` set to the manifest glob of the driver used last time (`<cache>/vulkan-driver`: glob, PCI vendor and device), so the loader does not open the other drivers (Mesa's stay mapped: ≈ 50 MiB RSS, 25 ms per instance here). `open_gpu` lifts it and opens again with every driver when the restricted loader finds no adapter or not the remembered one, then remembers the new choice. Untouched when the user sets a loader driver variable; nothing on Windows. |
 | `audio` | Scene sounds (`lumenwall-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
 | `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device); `engine/release.rs`: GPU released after a long pause and restored on resume (Frame loop below). |
 | `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
@@ -80,6 +81,10 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   particles (with their `starttime` warm-up), scripts (`init` again, in-memory `localStorage`
   lost), videos (from the start, with a fresh sound track) and web pages (reloaded; the output
   keeps its image until the page's first frame).
+- Freed heap pages go back to the system (`malloc_trim(0)`, glibc only) after a wallpaper is
+  unloaded by a new plan and after the GPU release: glibc keeps them in its arenas otherwise
+  (scene → video → scene: 249 → 220 MiB RSS; released GPU: 117 → 101 MiB). 1–3 ms, on those
+  events only.
 - One scene per target, updated and encoded once per loop iteration even when several outputs
   show it; each output then composes it with its own scaling and clamp.
 - Scene time (`clock.rs`, `SceneClock`, one per scene, read as `FrameState::time`/`dt`): the
@@ -145,7 +150,11 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 - Video wallpapers (`type: video`, `--hwdec`): decoding, cadence, loop, pause, sound and
   measurements in `crates/lumenwall-video/README.md`. Engine side: the device gets video decode
   queues when a video is loaded (`ContextOptions::video_decode`), a video target is rendered
-  by `render_video` (convert on a new frame, compose per output like a scene).
+  by `render_video` (convert on a new frame, compose per output like a scene). A video applied
+  over IPC to a device created for scenes only (`--hwdec auto`, Vulkan) recreates the device
+  with the queues through the GPU release mechanism (`engine/release.rs`, Vulkan instance
+  kept): 0.19 s for the switch, then zero copy; the device keeps its queues when a scene comes
+  back (+4 MiB VRAM).
 - Web wallpapers (`type: web`, needs `lumenwall-web-host` built with the `cef` feature next to
   `lumenwall`, see `crates/lumenwall-web/README.md`): offscreen Chromium in its own process,
   frames shared on the GPU and composed on every output with the target's scaling, the Wallpaper
@@ -255,7 +264,7 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | `localStorage` | In memory (not persisted between runs). |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
 | Playlists | Only the first item is shown (no `PlaylistRunner` timer). |
-| Plan reload | Wallpapers, layout, fps, audio, pause policy, GPU release delay and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A video applied to a running scene-only device decodes through the copy path (the device is not recreated with video queues). A plan received while the GPU is released restores it first (≈ 0.2 s), even when nothing needs drawing. |
+| Plan reload | Wallpapers, layout, fps, audio, pause policy, GPU release delay and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A plan received while the GPU is released restores it first (≈ 0.2 s), even when nothing needs drawing. A video applied to a device created without decode queues recreates the device (below): the other targets are rebuilt too (scripts restart, web pages reload), and a video that fails to open then leaves its target in error instead of keeping the previous wallpaper. |
 | Screenshot formats | PNG data whatever the extension. |
 
 ## SceneScript
@@ -367,6 +376,15 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
 - A positional wallpaper without `-w`/`-r` runs on every output as a desktop wallpaper (decided
   for the product; the reference opens a 640×480 window). Lives in the `lumenwall` glue.
 - Screenshots read `_rt_FullFrameBuffer` and always write PNG.
+- An image's composites A/B (spec 04 §8.9) get the image size only when its chain writes them
+  (chain planned in creation order from the declared targets, checked again on the prepared
+  passes) or when a material, effect or pass target of the wallpaper names them
+  (`_rt_imageLayerComposite_<id>_a/_b` among the project's strings); the others are 1×1 and
+  would only hold zeros. Identical pixels on every installed scene; render targets of
+  3463520581 515 → 384 MiB (headless, textures included), 1960765686 380 → 190 MiB. A layer
+  that a script creates later and that names a composite of a load-time image left 1×1 would
+  read zeros at another `g_TextureNResolution` (no installed wallpaper does), as would an effect
+  made visible later if effect visibility becomes live.
 - SceneScript, following Wallpaper Engine where the reference's data model contradicts its
   documented API (`docs/PARITY-POLICY.md` rules 4–5, `// we-doc:`):
   - `scale`, `angles` and `visible` scripts of images, texts and particles drive the copy the
@@ -494,10 +512,12 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Desktop on DP-4 + DP-5 (2560×1440 each, X11 via XWayland) | 30.0 fps, 1.6 % of one core, RSS 240 MiB (anonymous 49 MiB, the rest is file-backed driver libraries and the mapped `.pkg`), VRAM 268 MiB (nvidia-smi), 127 MiB tracked by lumenwall-render |
 | Fullscreen window on top / user pause | paused; scene sounds suspended, capture closed: 0 wake-ups/s on Lumenwall's threads, 0.00 % CPU (`--silent`, 3018340632 and 3372348904). Left: NVIDIA driver threads created by `vkCreateDevice`, ~115/s (an unnamed one at ~100/s, `[vkrt]` ~10/s, `[vkps]` ~4/s), alive as long as the wgpu device; gone after the GPU release below |
 | GPU release after the pause delay (window 480×270, user pause, `gpu-release-delay = 15`; before → after) | 3018340632: 115 → **0 wake-ups/s**, 13 → 6 threads, RSS 193 → 116 MiB (PSS 89 → 62), VRAM 170 → 0 MiB (nvidia-smi). 3463520581: RSS 209 → 131 MiB, VRAM 642 → 0 MiB. Video 3655057993: RSS 250 → 148 MiB, VRAM 222 → 0 MiB. Web 3044696375 (8 processes with the CEF host): 474 → 0 wake-ups/s, 0.5 → 0 % CPU, PSS 446 → 47 MiB. Release itself: 30–75 ms |
+| FFmpeg loaded at the first video (lumenwall-video `ffmpeg::sys`), scene 3018340632 | `--version` 18–20 → 2.2–2.5 ms, RSS 145 → 120 MiB, 167 → 49 shared objects; `check_supported` loads it for a video wallpaper, so a missing FFmpeg fails a plan change before anything is released |
+| Vulkan loader restricted to the remembered driver (`vulkan_driver`), launch of 3018340632 | instance 71–75 → 47–49 ms, adapter + device 146–183 → 102–123 ms, RSS 194 → 145 MiB, 176 → 167 shared objects; GPU released: RSS 101 → 55 MiB |
 | GPU restore, resume → first frame presented | 3018340632: 210–230 ms (instance 54–58 ms, adapter + device 84–93 ms, scene 64–74 ms); 3463520581 (67 images, 156 passes): 256–268 ms; video: 227–243 ms (zero copy kept); web: 367–372 ms (CEF start, the last image stays meanwhile). First restore of a process: up to 330 ms (instance 85 ms) |
 | Video wallpaper 3655057993 (4K60 H.264, 30 fps cap), zero copy | 30.0 fps, 2.3–2.6 % of one core, RSS 325 MiB, VRAM 318 MiB; paused: 0.00 % |
 | Web wallpapers in a visible 1920×1080 window (all processes of the instance, details in `crates/lumenwall-web/README.md`) | clock 3044696375: 11.7 % of one core (lumenwall 1.7 %), PSS 493 MiB, VRAM 145 MiB; CORSAIR collection 8.1 %; Corsair-O-Tron 15.9 %; paused 0.5 %. Frame copy 0.33 ms (DMA-BUF), 3.9 ms (shared-memory fallback, ≈ 2× the total CPU). Scene 3018340632 in the same window: 2.2 %, PSS 113 MiB, VRAM 302 MiB |
-| Hot switch over IPC (`apply`) | scene → web 2–3 ms (host started, page painted ≈ 0.4–1 s later), web → scene 96–122 ms (scene load) |
+| Hot switch over IPC (`apply`) | scene → web 2–3 ms (host started, page painted ≈ 0.4–1 s later), web → scene 96–122 ms (scene load); scene → video 188–191 ms (device recreated with decode queues, then zero copy: 1.7–2.0 % CPU, 520 wake-ups/s, RSS 261 MiB, VRAM 222 MiB, against NVDEC + copy before: 9.7 %, 1280–1870/s, 576 MiB, 679 MiB) |
 | Covered output | paused (`OCCLUDED`), no frame |
 | Puppets, 3463520581 at 1920×1080 (16 skeletons, 78 bones, 58 attached objects), 600 frames, particles off | puppet work (clocks, blending, matrices, palettes, attachment chains) **8.5–9 µs CPU per frame**; whole frame CPU 0.37 vs 0.34–0.41 ms and GPU 0.77 vs 0.77–0.79 ms before/after (noise); no allocation per frame (`tests/puppet_alloc.rs`); 5 `BONECOUNT` variants of `genericimage4` compiled once (shader cache) |
 

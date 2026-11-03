@@ -58,7 +58,13 @@ impl Wallpaper {
     pub fn check_supported(&self) -> Result<(), String> {
         match self.project.kind {
             ProjectKind::Scene => Ok(()),
-            ProjectKind::Video if lumenwall_video::is_supported() => self.video_path().map(|_| ()),
+            ProjectKind::Video if lumenwall_video::is_supported() => {
+                // FFmpeg is loaded at the first video: a missing library is reported here,
+                // before a plan change releases anything.
+                lumenwall_video::load_decoder()
+                    .map_err(|e| format!("'{}': {e}", self.project.title))?;
+                self.video_path().map(|_| ())
+            }
             ProjectKind::Video => Err(format!(
                 "'{}' is a video wallpaper: this build has no video support (lumenwall-video without FFmpeg)",
                 self.project.title

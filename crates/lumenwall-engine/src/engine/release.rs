@@ -13,10 +13,15 @@
 //! What a rebuild resets: particle systems start over (with their own `starttime` warm-up),
 //! scripts run `init` again (their in-memory `localStorage` is lost), videos restart from the
 //! beginning with their sound track, web pages reload.
+//!
+//! The same release and rebuild serve a video applied to a device created without Vulkan
+//! Video queues (hot switch from a scene, [`Engine::recreate_for_video`]): the device is
+//! recreated with them right away, the instance kept, so the video decodes with zero copy.
 
 use std::time::Instant;
 
 use lumenwall_platform::{Event, OutputId, Wait, WallpaperSurface};
+use lumenwall_render::GpuInstance;
 use lumenwall_render::compose::Compositor;
 use lumenwall_render::stats::GpuTimer;
 
@@ -26,6 +31,15 @@ use crate::monitor::Change;
 use crate::plan::Stopped;
 use lumenwall_platform::Config;
 use lumenwall_platform::mouse::PointerTracker;
+
+/// Why the GPU is recreated.
+#[derive(Clone, Copy)]
+enum Restore {
+    /// An output shows a wallpaper again (or a control message needs a frame).
+    Resume,
+    /// A video was applied to a device without decode queues ([`Engine::recreate_for_video`]).
+    VideoDevice,
+}
 
 /// What a released engine keeps: everything but the GPU.
 pub(super) struct Dormant {
@@ -89,8 +103,66 @@ impl Engine {
     }
 
     /// Drops every GPU object of `r`; keeps the platform, the audio and the wallpapers.
-    fn release_gpu(&mut self, mut r: Running) {
+    fn release_gpu(&mut self, r: Running) {
         let t0 = Instant::now();
+        let (vram, _) = self.release_running(r, false);
+        super::trim_heap();
+        tracing::info!(
+            "every output paused for {} s: GPU released ({:.1} MiB) in {:.0} ms",
+            self.plan.gpu_release.map_or(0, |d| d.as_secs()),
+            vram as f64 / 1048576.0,
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+        self.publish(None, Change::State);
+    }
+
+    /// A video was applied to a device created without Vulkan Video queues (a scene was shown
+    /// until now): its frames would go through a hardware decoder and a copy (measured with
+    /// the 4K reference video: 8 % CPU, 1480 wake-ups/s, +330 MiB RSS and +460 MiB VRAM
+    /// against zero copy). The device is released and recreated with the decode queues by the
+    /// GPU release mechanism (the Vulkan instance is kept), and every target rebuilt (≈ 0.2 s).
+    /// When no output can show a wallpaper yet, the engine stays released and the loop
+    /// restores it later.
+    pub(super) fn recreate_for_video(&mut self, running: &mut Option<Running>) {
+        let Some(r) = running.take() else {
+            return;
+        };
+        let (_, instance) = self.release_running(r, true);
+        match self.restore(Restore::VideoDevice, instance) {
+            Ok(r) => *running = Some(r),
+            Err(e) => tracing::debug!("render device not recreated yet: {e}"),
+        }
+    }
+
+    /// Whether one of `r`'s outputs is about to show a new video of `plan` (`new_videos`:
+    /// target indices) on a Vulkan device created without decode queues, while zero copy is
+    /// allowed: the video would decode through a copy unless the device is recreated.
+    pub(super) fn wants_video_device(
+        r: &Running,
+        plan: &crate::plan::EnginePlan,
+        mut new_videos: impl Iterator<Item = usize>,
+    ) -> bool {
+        if plan.hwdec != crate::plan::HwDecode::Auto
+            || r.ctx.video_decode_requested()
+            || r.ctx.adapter().get_info().backend != wgpu::Backend::Vulkan
+            || !lumenwall_video::select::zero_copy_allowed()
+        {
+            return false;
+        }
+        new_videos.any(|i| {
+            r.outputs
+                .iter()
+                .any(|o| target_for(plan, &o.name) == Some(i))
+        })
+    }
+
+    /// Drops every GPU object of `r` into [`Self::dormant`]; returns the VRAM it held, and the
+    /// instance when `keep_instance`.
+    fn release_running(
+        &mut self,
+        mut r: Running,
+        keep_instance: bool,
+    ) -> (u64, Option<GpuInstance>) {
         let video_bytes: u64 = r
             .videos
             .iter()
@@ -137,7 +209,7 @@ impl Engine {
         // Swap chains first, then what renders into them, then the device.
         drop(outputs);
         drop((scenes, videos, webs, compositor, timer));
-        drop(ctx);
+        let instance = keep_instance.then(|| ctx.into_instance());
         self.dormant = Some(Dormant {
             surfaces,
             platform,
@@ -151,13 +223,7 @@ impl Engine {
             since: Instant::now(),
         });
         self.monitor.set_gpu_memory(0);
-        tracing::info!(
-            "every output paused for {} s: GPU released ({:.1} MiB) in {:.0} ms",
-            self.plan.gpu_release.map_or(0, |d| d.as_secs()),
-            vram as f64 / 1048576.0,
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
-        self.publish(None, Change::State);
+        (vram, instance)
     }
 
     /// Whether an output shows a wallpaper again (resumed by the platform and not held by
@@ -223,10 +289,14 @@ impl Engine {
     /// Recreates the device and every renderer (see the module documentation). On error the
     /// engine stays released.
     pub(super) fn restore_gpu(&mut self) -> Result<Running, String> {
+        self.restore(Restore::Resume, None)
+    }
+
+    fn restore(&mut self, why: Restore, instance: Option<GpuInstance>) -> Result<Running, String> {
         let t0 = Instant::now();
         let d = self.dormant.as_ref().ok_or("GPU not released")?;
         let first = first_output(self, d).ok_or("no output to show")?;
-        let (first_surface, ctx) = self.open_gpu(d.surfaces.as_ref(), first)?;
+        let (first_surface, ctx) = self.open_gpu(d.surfaces.as_ref(), first, instance)?;
         let device_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let Dormant {
             surfaces,
@@ -278,11 +348,17 @@ impl Engine {
         if !self.user_paused && r.outputs.iter().any(|o| !o.paused) {
             r.audio.resume();
         }
-        tracing::info!(
-            "GPU restored after {:.0} s released: device {device_ms:.0} ms, wallpapers ready in {:.0} ms",
-            since.elapsed().as_secs_f64(),
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
+        match why {
+            Restore::Resume => tracing::info!(
+                "GPU restored after {:.0} s released: device {device_ms:.0} ms, wallpapers ready in {:.0} ms",
+                since.elapsed().as_secs_f64(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            ),
+            Restore::VideoDevice => tracing::info!(
+                "render device recreated with video decode queues: device {device_ms:.0} ms, wallpapers ready in {:.0} ms",
+                t0.elapsed().as_secs_f64() * 1000.0
+            ),
+        }
         self.publish(Some(&r), Change::State);
         Ok(r)
     }

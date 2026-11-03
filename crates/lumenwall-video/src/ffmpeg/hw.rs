@@ -5,7 +5,7 @@ use std::os::raw::c_int;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ffmpeg_sys_next as ff;
+use super::sys as ff;
 
 use super::av_err;
 use crate::HwKind;

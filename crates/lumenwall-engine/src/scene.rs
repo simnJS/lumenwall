@@ -23,7 +23,7 @@ use lumenwall_render::math::{
     Alignment as RAlign, HAlign, NodeTransform, OrthoCamera, Parallax, ParallaxSmoothing, Pointer,
     VAlign, parallax_translation, scene_logical_size, trunc_u32,
 };
-use lumenwall_render::targets::{ScopeId, scaled_size};
+use lumenwall_render::targets::{ScopeId, composite_names, scaled_size};
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
     BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
@@ -1310,10 +1310,37 @@ fn prepare_image(
         return Err("zero-sized image".into());
     }
     let rt_sampler = composite_sampler(main_flags);
-    let composites = b.targets.create_composites(
+    let final_to_scene = !(opts.debug.no_solid_final && solid);
+    // Composites at the image size only when used (`composite_use`), else 1×1. Each pass is
+    // assumed to reach its declared target when the name is one of its effect's `fbos` or
+    // resolves in the scene scope; `size_composites` checks the real chain after the passes.
+    let composite_size = (trunc_u32(s.x).max(1), trunc_u32(s.y).max(1));
+    let scene = project.scene.as_ref().ok_or("not a scene project")?;
+    let (name_a, name_b) = composite_names(i64::from(id));
+    let declared: Vec<bool> = (0..passes.passes.len())
+        .map(|k| {
+            project.pass_target(idx, &passes, k).is_some_and(|sym| {
+                let name = project.strings.resolve(sym);
+                let fbo = passes.passes[k]
+                    .effect
+                    .and_then(|(ei, _)| effects.get(ei as usize))
+                    .is_some_and(|e| {
+                        scene
+                            .effect(*e)
+                            .fbos
+                            .iter()
+                            .any(|f| project.strings.resolve(f.name) == name)
+                    });
+                fbo || name == name_a || name == name_b || b.targets.resolve(root, name).is_some()
+            })
+        })
+        .collect();
+    let [use_a, use_b] = composite_use(project, i64::from(id), &declared, final_to_scene);
+    let size_of = |used: bool| if used { composite_size } else { (1, 1) };
+    let composites = b.targets.create_composites_sized(
         ctx,
         i64::from(id),
-        (trunc_u32(s.x).max(1), trunc_u32(s.y).max(1)),
+        (size_of(use_a), size_of(use_b)),
         rt_sampler,
     );
     let image_scope = b.targets.new_scope(root);
@@ -1516,7 +1543,15 @@ fn prepare_image(
             .strings
             .resolve(project.scene.as_ref().ok_or("no scene")?.object(idx).name)
     );
-    let final_to_scene = !(opts.debug.no_solid_final && solid);
+    size_composites(
+        b,
+        project,
+        id,
+        composites,
+        composite_size,
+        &prepared,
+        final_to_scene,
+    );
     let spec = ImageSpec {
         label,
         size: s,
@@ -1541,6 +1576,73 @@ fn prepare_image(
         puppet,
         skinning,
     }))
+}
+
+/// Which of an image's composites A/B (spec 04 §8.9) need the image size: those its chain
+/// writes (`has_target`: whether each pass draws into a resolved target; destinations depend
+/// on nothing else but `final_to_scene`), and those any material, effect or pass target of the
+/// wallpaper names (`_rt_imageLayerComposite_<id>_a/_b` among the project's strings: an image
+/// created later can resolve it). The others would only ever hold zeros and stay 1×1
+/// (measured: 131 MiB of the 452 MiB of render targets of 3463520581, 190 MiB of 253 MiB on
+/// 1960765686). The chain is the one of the effects visible at load, like the render graph
+/// (effect visibility is not live).
+fn composite_use(
+    project: &Project,
+    id: i64,
+    has_target: &[bool],
+    final_to_scene: bool,
+) -> [bool; 2] {
+    use lumenwall_render::chain::{ChainBuffer, ChainOptions, ChainPassInput, plan_image_chain};
+    let inputs: Vec<ChainPassInput<()>> = has_target
+        .iter()
+        .map(|&t| ChainPassInput {
+            target: t.then_some(()),
+            blend: BlendMode::Normal,
+        })
+        .collect();
+    let plan = plan_image_chain(
+        &inputs,
+        ChainOptions {
+            final_to_scene,
+            ..ChainOptions::default()
+        },
+    );
+    let (name_a, name_b) = composite_names(id);
+    [(ChainBuffer::A, name_a), (ChainBuffer::B, name_b)].map(|(buffer, name)| {
+        plan.iter().any(|q| q.destination == buffer) || project.strings.get(&name).is_some()
+    })
+}
+
+/// After the passes of an image are prepared: a composite left 1×1 that the real chain writes
+/// or one of its passes binds (a target that did not resolve as assumed, a shader default
+/// naming it) gets the image size before anything refers to its texture.
+fn size_composites(
+    b: &mut SceneBuilder<'_>,
+    project: &Project,
+    id: i32,
+    composites: lumenwall_render::targets::PingPong,
+    size: (u32, u32),
+    passes: &[PreparedPass],
+    final_to_scene: bool,
+) {
+    let has_target: Vec<bool> = passes.iter().map(|p| p.pass.target.is_some()).collect();
+    let used = composite_use(project, i64::from(id), &has_target, final_to_scene);
+    let bound =
+        |rt: RtId| {
+            passes.iter().any(|p| {
+                p.pass.target == Some(rt)
+                    || p.pass.slots.iter().flatten().any(
+                        |s| matches!(s, SlotSource::Texture(TextureRef::Target(t)) if *t == rt),
+                    )
+            })
+        };
+    let ctx = b.context();
+    for (rt, used) in [(composites.a, used[0]), (composites.b, used[1])] {
+        if (used || bound(rt)) && b.targets.get(rt).size() != size {
+            tracing::debug!("object {id}: composite {rt:?} used after all, allocated now");
+            b.targets.resize(ctx, rt, size);
+        }
+    }
 }
 
 /// Reads and parses the puppet file of an image's model (spec 08). Problems are logged with

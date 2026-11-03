@@ -40,7 +40,7 @@ use crate::shaders::default_provider;
 use crate::video::{VideoSlot, notify_from};
 use crate::wallpaper::Wallpaper;
 use crate::web::WebSlot;
-use crate::{WallpaperResolver, cache_dir};
+use crate::{WallpaperResolver, cache_dir, vulkan_driver};
 
 /// Wakes the engine loop from any thread; usable before the platform exists and while the
 /// engine is idle (no surfaces).
@@ -416,7 +416,7 @@ impl Engine {
                 _ => None,
             })
             .ok_or("no output")?;
-        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first) {
+        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first, None) {
             Ok(b) => b,
             Err(e) => {
                 self.waker.detach();
@@ -481,42 +481,62 @@ impl Engine {
         Ok(running)
     }
 
-    /// Instance, device and the GPU surface of `first`, whose adapter must present it.
+    /// Instance (`instance`, or a new one), device and the GPU surface of `first`, whose
+    /// adapter must present it. When the Vulkan loader is restricted to the remembered driver
+    /// and that finds no adapter or another one, the instance is created again with every
+    /// driver (`vulkan_driver`).
     fn open_gpu(
         &self,
         surfaces: &dyn WallpaperSurface,
         first: OutputId,
+        instance: Option<GpuInstance>,
     ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
-        let t0 = Instant::now();
-        let instance = GpuInstance::new(None);
-        let t1 = Instant::now();
-        let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
-        let t2 = Instant::now();
-        let ctx = instance
-            .into_context(
-                &ContextOptions {
-                    pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
-                    // Timestamp queries are allowed so that statistics can time the GPU on
-                    // demand; nothing is measured until someone asks.
-                    profiling: true,
-                    // Video wallpapers: decode queues on the render device (zero copy).
-                    video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
-                        && self
-                            .wallpapers
-                            .iter()
-                            .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
-                    ..ContextOptions::default()
-                },
-                &[&first_surface],
-            )
-            .map_err(|e| e.to_string())?;
-        let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
-        tracing::debug!(
-            "GPU opened: instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
-            ms(t0, t1),
-            ms(t1, t2),
-            ms(t2, Instant::now())
-        );
+        let options = ContextOptions {
+            pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
+            // Timestamp queries are allowed so that statistics can time the GPU on demand;
+            // nothing is measured until someone asks.
+            profiling: true,
+            // Video wallpapers: decode queues on the render device (zero copy).
+            video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
+                && self
+                    .wallpapers
+                    .iter()
+                    .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
+            ..ContextOptions::default()
+        };
+        let open = |instance: Option<GpuInstance>| {
+            let t0 = Instant::now();
+            let instance = instance.unwrap_or_else(|| GpuInstance::new(None));
+            let t1 = Instant::now();
+            let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
+            let t2 = Instant::now();
+            let ctx = instance
+                .into_context(&options, &[&first_surface])
+                .map_err(|e| e.to_string())?;
+            let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+            tracing::debug!(
+                "GPU opened (Vulkan drivers: {}): instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
+                vulkan_driver::describe(),
+                ms(t0, t1),
+                ms(t1, t2),
+                ms(t2, Instant::now())
+            );
+            Ok::<_, String>((first_surface, ctx))
+        };
+        let opened = match open(instance) {
+            Ok((_, ctx)) if vulkan_driver::wrong_adapter(&ctx) => {
+                Err("the remembered GPU is not there".to_owned())
+            }
+            other => other,
+        };
+        let (first_surface, ctx) = match opened {
+            Err(e) if vulkan_driver::lift() => {
+                tracing::info!("remembered Vulkan driver: {e}; trying every driver");
+                open(None)?
+            }
+            other => other?,
+        };
+        vulkan_driver::remember(&ctx);
         Ok((first_surface, ctx))
     }
 
@@ -804,6 +824,20 @@ impl Engine {
             .filter(|s| matches!(s, Staged::New(..)))
             .count();
         let released = used.iter().filter(|u| !**u).count();
+        // A new video on a device without decode queues: the device is recreated after the
+        // commit (zero copy) and every renderer built then.
+        let recreate = running.as_ref().is_some_and(|r| {
+            Self::wants_video_device(
+                r,
+                &new,
+                staged.iter().enumerate().filter_map(|(i, s)| match s {
+                    Staged::New(wp, _) if wp.kind() == lumenwall_scene::ProjectKind::Video => {
+                        Some(i)
+                    }
+                    _ => None,
+                }),
+            )
+        });
 
         // 2. Build the new renderers for the outputs already there, and open the new
         // surfaces when the layout changes: a failure here changes nothing.
@@ -814,6 +848,9 @@ impl Engine {
                 let Staged::New(wp, renderer) = s else {
                     continue;
                 };
+                if recreate {
+                    break;
+                }
                 let size = r
                     .outputs
                     .iter()
@@ -957,7 +994,8 @@ impl Engine {
                         r.platform = config;
                         tracing::info!("surfaces reopened: {:?}", r.surfaces.backend());
                     }
-                    None if targets_changed => self.rebind_outputs(r),
+                    // The recreated device rebuilds every target below.
+                    None if targets_changed && !recreate => self.rebind_outputs(r),
                     None => {}
                 }
                 let a = (&old_plan.audio, &self.plan.audio);
@@ -978,6 +1016,9 @@ impl Engine {
                 }
                 sync_video_pause(r);
             }
+            if recreate {
+                self.recreate_for_video(running);
+            }
         }
         for (what, changed) in [
             ("input", old_plan.mouse != self.plan.mouse),
@@ -992,6 +1033,9 @@ impl Engine {
                 "new plan applied in {:.0} ms: {added} wallpaper(s) loaded, {released} released",
                 t0.elapsed().as_secs_f64() * 1000.0
             );
+        }
+        if released > 0 {
+            trim_heap();
         }
         self.publish(running.as_ref(), Change::State);
         Ok(())
@@ -1268,6 +1312,10 @@ impl Engine {
         let Some(info) = r.surfaces.output(id).cloned() else {
             return Ok(());
         };
+        // Already added by a GPU restore that ran before the platform's own event.
+        if r.outputs.iter().any(|o| o.id == id) {
+            return Ok(());
+        }
         let Some(target) = target_for(&self.plan, &info.name) else {
             tracing::debug!("output {} has no wallpaper", info.name);
             return Ok(());
@@ -2045,6 +2093,30 @@ fn daytime() -> f32 {
         .map_or(0, |d| d.as_secs());
     let minutes = (secs / 60) % 1440;
     minutes as f32 / 1440.0
+}
+
+/// Gives the heap pages freed by an unloaded wallpaper or a released GPU back to the system.
+/// glibc keeps them in its arenas otherwise (measured: scene → video → scene left 305 MiB
+/// RSS, 227 MiB after the trim, which takes ≈ 5 ms). Called on those events only, never per
+/// frame.
+pub(crate) fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        let t0 = Instant::now();
+        let before = rss_bytes();
+        // SAFETY: glibc entry point without preconditions; it locks its own arenas.
+        unsafe { malloc_trim(0) };
+        let mib = |b: Option<u64>| b.map_or(f64::NAN, |b| b as f64 / 1048576.0);
+        tracing::debug!(
+            "heap trimmed in {:.1} ms: RSS {:.0} -> {:.0} MiB",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            mib(before),
+            mib(rss_bytes())
+        );
+    }
 }
 
 fn rss_bytes() -> Option<u64> {
