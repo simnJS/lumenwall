@@ -53,13 +53,9 @@ pub fn download(
     let http = Http::new(source, &crate::user_agent(current), Kind::Download);
     let key = source.key();
 
-    let sums_sig = verify::signature(&small(&http, &release.sums_signature.url, MAX_SIGNATURE)?)?;
+    let sums_sig = small(&http, &release.sums_signature.url, MAX_SIGNATURE)?;
     let sums = small(&http, &release.sums.url, MAX_SUMS)?;
-    verify::bytes(key, &sums, &sums_sig, SUMS_NAME)?;
-    let sums =
-        String::from_utf8(sums).map_err(|_| Error::Checksum(format!("{SUMS_NAME} is not text")))?;
-    let expected = verify::listed_sum(&sums, name)
-        .ok_or_else(|| Error::Checksum(format!("{name} is not listed in {SUMS_NAME}")))?;
+    let expected = expected_sum(key, &sums, &sums_sig, name)?;
 
     let sig = verify::signature(&small(&http, &release.signature.url, MAX_SIGNATURE)?)?;
     // Checked before downloading: the signature must be for this very file.
@@ -145,6 +141,82 @@ pub fn download(
             Err(e)
         }
     }
+}
+
+/// The SHA-256 that the signed `SHA256SUMS` lists for `name`.
+fn expected_sum(
+    key: &minisign_verify::PublicKey,
+    sums: &[u8],
+    sums_signature: &[u8],
+    name: &str,
+) -> Result<String, Error> {
+    let sig = verify::signature(sums_signature)?;
+    verify::bytes(key, sums, &sig, SUMS_NAME)?;
+    let sums = std::str::from_utf8(sums)
+        .map_err(|_| Error::Checksum(format!("{SUMS_NAME} is not text")))?;
+    verify::listed_sum(sums, name)
+        .ok_or_else(|| Error::Checksum(format!("{name} is not listed in {SUMS_NAME}")))
+}
+
+/// Verifies release files already on disk exactly as [`download`] does: `dir` holds
+/// the archive of `version` for `target`, its `.minisig`, `SHA256SUMS` and
+/// `SHA256SUMS.minisig`. Used by the release workflow before publishing.
+pub fn verify_local(
+    source: &Source,
+    dir: &Path,
+    version: &Version,
+    target: &str,
+) -> Result<Verified, Error> {
+    let name = crate::archive_name(version, target);
+    let read = |file: &str, limit: u64| -> Result<Vec<u8>, Error> {
+        let path = dir.join(file);
+        let len = std::fs::metadata(&path)
+            .map_err(|e| Error::io(path.display(), &e))?
+            .len();
+        if len > limit {
+            return Err(Error::TooLarge);
+        }
+        std::fs::read(&path).map_err(|e| Error::io(path.display(), &e))
+    };
+    let sig_suffix = crate::SIGNATURE_SUFFIX;
+    let key = source.key();
+    let expected = expected_sum(
+        key,
+        &read(SUMS_NAME, MAX_SUMS)?,
+        &read(&format!("{SUMS_NAME}{sig_suffix}"), MAX_SIGNATURE)?,
+        &name,
+    )?;
+    let sig = verify::signature(&read(&format!("{name}{sig_suffix}"), MAX_SIGNATURE)?)?;
+    verify::names(&sig, &name)?;
+    let mut verifier = key
+        .verify_stream(&sig)
+        .map_err(|e| verify::why(&e, &name))?;
+    let archive = dir.join(&name);
+    let mut file = File::open(&archive).map_err(|e| Error::io(archive.display(), &e))?;
+    let mut sha = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| Error::io(archive.display(), &e))?;
+        if n == 0 {
+            break;
+        }
+        sha.update(&buf[..n]);
+        verifier.update(&buf[..n]);
+    }
+    verifier.finalize().map_err(|e| verify::why(&e, &name))?;
+    let sha256 = verify::hex(sha.finish().as_ref());
+    if sha256 != expected {
+        return Err(Error::Checksum(format!(
+            "the SHA-256 of {name} differs from {SUMS_NAME}"
+        )));
+    }
+    Ok(Verified {
+        archive,
+        version: version.clone(),
+        sha256,
+    })
 }
 
 /// A small file (signature, checksum list), whole.

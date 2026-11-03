@@ -1,0 +1,40 @@
+# cargo-about configuration: THIRD-PARTY-NOTICES.html shipped in every release archive
+# (.github/workflows/release.yml, docs/RELEASING.md).
+#
+#   cargo about generate --workspace --locked --fail \
+#     -c packaging/about/about.toml packaging/about/about.hbs -o THIRD-PARTY-NOTICES.html
+#
+# `accepted` mirrors `[licenses] allow` and the per-crate exceptions of deny.toml, which
+# remains the policy: cargo-deny decides what may be used, cargo-about only writes the
+# notices for what is shipped.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    # deny.toml exceptions (ffmpeg-sys-next; the optional CEF build chain).
+    "WTFPL",
+    "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
+]
+
+# Only what ships: the two release targets, no build or dev dependencies, not the
+# workspace's own crates (they are Lumenwall, MIT OR Apache-2.0).
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+private = { ignore = true }
+
+# Crates whose licence files need cargo-about's built-in handling.
+workarounds = ["ring", "rustls"]

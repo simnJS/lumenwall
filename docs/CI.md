@@ -75,6 +75,10 @@ From Linux, `cargo clippy -p <crate> --target x86_64-pc-windows-msvc` type-check
 
 Not covered by CI (runner = Windows Server with no GPU, no audio device, one virtual screen): the Windows 11 24H2/25H2 desktop layering (Progman/WorkerW), real GPU drivers and D3D11VA decoding, WASAPI loopback on a real device, multi-monitor and DPI scaling. Before each release, run the release artifact on a Windows 11 machine or VM through that list; a self-hosted Windows 11 runner with a GPU can automate it later. Tests that need an audio device must treat "no device" as a normal outcome (`docs/PARITY-POLICY.md`, rule 2).
 
+## Releases
+
+`.github/workflows/release.yml` runs on `v*` tags only: it checks the tag against the `Cargo.toml` version, builds the Linux and Windows archives (no cache), writes the third-party notices with cargo-about (`packaging/about/`), packages them (`packaging/release/package.py`), signs everything with the minisign release key (`MINISIGN_SECRET_KEY`, `MINISIGN_PASSWORD` secrets), verifies the result with the app's own code, and publishes the GitHub release. Only its last job can write to the repository. Procedure and key management: [RELEASING.md](RELEASING.md).
+
 ## Maintenance
 
 - Actions are pinned to commit SHAs (tag in the comment). Update them deliberately, e.g. with Dependabot for `github-actions`.

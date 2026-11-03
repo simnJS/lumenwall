@@ -73,9 +73,13 @@ cargo run -p lumenwall-update --example fake_github -- 0.2.0 --slow
 
 `--bad-signature`, `--bad-checksum` and `--rate-limit` show the error states.
 
+## Release tooling
+
+`examples/release_sign.rs` is what the release workflow runs (`docs/RELEASING.md`): `sign` writes `SHA256SUMS` and the `.minisig` files with the key from `MINISIGN_SECRET_KEY` / `MINISIGN_PASSWORD` (and refuses a key that is not `RELEASE_PUBLIC_KEY`); `verify` checks every archive with `verify_local`, the same checks as `download`, then installs this platform's archive into a temporary folder.
+
 ## Dependencies
 
-`ureq` + `rustls` (ring) + `rustls-platform-verifier`: the HTTP stack `lumenwall-ui` already uses. `ring` for SHA-256 (already linked for TLS). `minisign-verify` (MIT, no dependencies) for signatures. `semver`. `tar` + `flate2` on Linux, `zip` (deflate only) on Windows. Dev only: `minisign` (signs the fake releases), `tempfile`.
+`ureq` + `rustls` (ring) + `rustls-platform-verifier`: the HTTP stack `lumenwall-ui` already uses. `ring` for SHA-256 (already linked for TLS). `minisign-verify` (MIT, no dependencies) for signatures. `semver`. `tar` + `flate2` on Linux, `zip` (deflate only) on Windows. Dev only: `minisign` (signs the fake releases, and releases through `release_sign`), `tempfile`.
 
 ## Specs
 

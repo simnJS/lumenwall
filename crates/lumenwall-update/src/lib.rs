@@ -35,7 +35,7 @@ mod verify;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use download::{Verified, download};
+pub use download::{Verified, download, verify_local};
 pub use error::Error;
 pub use github::{Asset, Check, Release, check};
 pub use install::{BUNDLE_MARKER, Installed, Layout, PROGRAMS, cleanup, install};

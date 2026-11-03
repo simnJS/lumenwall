@@ -484,6 +484,31 @@ fn no_release_yet() {
 }
 
 #[test]
+fn release_files_on_disk_verify_like_downloads() {
+    let r = FakeRelease::signed("0.2.0");
+    let dir = tempfile::tempdir().unwrap();
+    for (name, data) in &r.assets {
+        std::fs::write(dir.path().join(name), data).unwrap();
+    }
+    let source = Source::new(
+        lumenwall_update::API_BASE,
+        lumenwall_update::REPOSITORY,
+        support::TEST_PUBLIC_KEY,
+    )
+    .unwrap();
+    let name = r.archive_name();
+    let ok = lumenwall_update::verify_local(&source, dir.path(), &v("0.2.0"), target()).unwrap();
+    assert_eq!(ok.sha256, sha256_hex(&r.assets[&name]));
+    let mut bytes = r.assets[&name].clone();
+    bytes[20] ^= 1;
+    std::fs::write(dir.path().join(&name), bytes).unwrap();
+    assert!(matches!(
+        lumenwall_update::verify_local(&source, dir.path(), &v("0.2.0"), target()),
+        Err(Error::Signature(_))
+    ));
+}
+
+#[test]
 fn the_test_key_is_not_the_release_key() {
     let test_key = support::TEST_PUBLIC_KEY.lines().nth(1).unwrap().trim();
     assert_ne!(lumenwall_update::RELEASE_PUBLIC_KEY, Some(test_key));
