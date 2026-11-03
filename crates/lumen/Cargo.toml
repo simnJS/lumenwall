@@ -5,14 +5,48 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+# The library carries the documentation; documenting a bin of the same name collides.
+doc = false
 
 [dependencies]
 lumen-formats.workspace = true
 lumen-scene.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender = "0.2.5"
+toml = "1.1.8"
+dirs = "7.0.0"
+notify = "8.2.1"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
+
+[build-dependencies]
+embed-manifest = "1.5.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [lints]
 workspace = true
