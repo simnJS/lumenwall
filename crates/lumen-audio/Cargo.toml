@@ -7,7 +7,47 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["playback", "wasapi"]
+# Scene sound playback: symphonia decoding + cpal output stream (ALSA on Linux, WASAPI on Windows).
+playback = ["dep:cpal", "dep:symphonia", "dep:rtrb"]
+# Windows backends: WASAPI loopback capture (cpal) and IAudioSessionManager2 automute. No-op elsewhere.
+wasapi = ["dep:cpal", "dep:windows", "dep:windows-core"]
+# Linux PipeWire native backends (needs libpipewire-0.3 development files + clang).
+pipewire = ["dep:pipewire"]
+# Linux PulseAudio-protocol backends (needs libpulse; also works on pipewire-pulse).
+pulse = ["dep:libpulse-binding", "dep:libpulse-sys"]
+
 [dependencies]
+realfft = "3.5"
+thiserror.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+symphonia = { version = "0.6", optional = true, default-features = false, features = ["opt-simd", "mp3", "ogg", "vorbis", "wav", "flac", "pcm", "adpcm", "aac", "isomp4"] }
+cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.3", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.10", optional = true }
+libpulse-binding = { version = "2.30", optional = true }
+libpulse-sys = { version = "1.23", optional = true, default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+] }
+# Required by the `#[implement]` macro of the COM callbacks.
+windows-core = { version = "0.62", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "spectrum"
+harness = false
 
 [lints]
 workspace = true
