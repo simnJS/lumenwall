@@ -4,3 +4,4 @@
 
 # Wallpaper Engine content: copyrighted, local testing only, never commit
 /testdata/we/
+/.worktrees/
