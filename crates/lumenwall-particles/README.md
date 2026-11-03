@@ -118,6 +118,11 @@ Boids are quadratic inside a cluster by nature; WE presets use them on 16–250 
 - `oscillateposition` skips axes whose mask is 0 (identical for finite amplitudes/frequencies).
 - Perspective projection depth range is a parameter, `[0, 1]` (wgpu) by default; the reference
   uses OpenGL `[-1, 1]`.
+- `UserValue::set_from_json` applies the binding's `condition` (spec 02 §4.4-1, to which spec 05
+  §1.1 defers): a text property (combo value) equal to the condition gives `true`, otherwise
+  `false`; other property types ignore it (spec 02 Q8), a numeric condition reads like a combo
+  value (Q30). Without it, `"visible": {"user": {"name": "style", "condition": "0"}}` read the
+  combo text `"0"` as the number 0 and hid every system of shimmering_particles.
 
 ## Choices where the amendments leave room
 

@@ -28,7 +28,7 @@ Data model for `project.json`, user properties, `scene.json`, objects, models, m
 
 Not here: §7.9 particle files (`lumenwall-particles`), Annexes A/B (`lumenwall-formats` / `lumenwall-assets`; the tests contain a minimal test-only PKG reader).
 
-Tests: 17 unit, 42 on the spec examples and open-question edge cases, plus 2 `#[ignore]` tests on real content: wallpaper 3018340632 and every scene wallpaper of `$LUMENWALL_WE_WORKSHOP`. All 7 load and build with no warning (`cargo test -p lumenwall-scene -- --ignored`).
+Tests: 17 unit, 45 on the spec examples and open-question edge cases, plus 2 `#[ignore]` tests on real content: wallpaper 3018340632 and every scene wallpaper of `$LUMENWALL_WE_WORKSHOP`. All 7 load and build with no warning (`cargo test -p lumenwall-scene -- --ignored`).
 
 ## Open questions: decisions
 
@@ -36,7 +36,7 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 | Q | Decision | Rule |
 |---|---|---|
-| Q1 | Integer colours stay 0–255 (`"1 1 1"` ≈ black), `// parity:` | 3, 5 (WE behaviour unknown) |
+| Q1 | Integer path only when a component exceeds 1: `"255 128 0"` is 0–255, `"1 1 1"` white and `"1 0 0"` red (WE previews of 3089056751 and eagleflag; the reference reads them as 1/255) | 5 |
 | Q2 | `#RRGGBB` byte shift reproduced; 8-digit colours ≥ 0x80 no longer fail (read as u32) | 5 for the shift, 2 for the error |
 | Q3 | Commas → spaces without merging, reproduced | 3 |
 | Q4 | Component counting reproduced exactly | 3 |
@@ -61,7 +61,7 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 | Q23 | Becoming Null keeps the text view, `// parity:` | 3 |
 | Q24 | Float boolean view by truncation (0.5 → false), `// parity:` | 3 |
 | Q25 | n/a (`lumenwall-particles`) | — |
-| Q26 | Model `width`/`height` stored, unused | 3 |
+| Q26 | Model `width`/`height` stored; `lumenwall-engine` sizes an image without `size` with them (deep_space preview) | 5 |
 | Q27 | Image whose material has no pass: not set up, warning (no global failure) | 2 |
 | Q28 | Magenta-tint compatibility pass reproduced, `// parity:` | 3 |
 | Q29 | Combo values written as integer strings (`"1"`) accepted; other strings stay a typed error | 2 |
@@ -72,6 +72,18 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 
 - Q2 (8-digit hex), Q5, Q6, Q7, Q9, Q10, Q12, Q13, Q16 (effects), Q17, Q18, Q19, Q27, Q29, Q30, Q31: see the table.
 - A UTF-8 byte order mark at the start of a JSON file is skipped.
+- `project.json` (parity rule 4, absent from spec 02 §2): without `type`, the type follows the
+  extension of `file` like Wallpaper Engine's own projects (`.json` scene, `.mp4`/`.webm`/… video,
+  `.html` web; audiophile, techno); `application` (`.exe`, sheep) is
+  `LoadError::Unsupported`; Workshop assets (`"category": "Asset"`, or `assets.json` without
+  `type`) and editor templates (`templateoptions` without `type`) are
+  `LoadError::NotAWallpaper` instead of a parsing error. Unknown extensions stay an error
+  (`DataError::ProjectFile`).
+- Material passes read `usershadervalues` (`{"<user property>": "<material constant>"}`, absent
+  from spec 02): the constant becomes a setting bound to the property (live, like a
+  `{"user": …}` constant) and replaces a `constantshadervalues` entry of the same name. Unknown
+  properties are a warning. Used by eagleflag (flag colours), neon_sunset, shimmering_particles
+  (particle materials, read by `lumenwall-engine`).
 - Object `dependencies` also accept objects `{ "id", "index", "type" }` (written by Wallpaper Engine for particle links, spec 05 A7.8): their `id` is used as the dependency (strict integer); `index` and `type` are not kept. Spec 02 §7.2 only describes integers.
 - Spec ambiguity: §13.3 says "group" scale/angles for types other than image and text, while §7.2 says particles use their re-read settings. Particles use their own settings (§7.2).
 - A passthrough image with at least one effect is created even when all its effects are hidden at setup. `ImagePasses::draws` is then false (nothing drawn), so it can appear when an effect becomes visible.

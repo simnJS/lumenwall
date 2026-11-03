@@ -289,7 +289,25 @@ impl UserValue {
     }
 
     /// Replaces the current value from raw JSON, with this value's family rules ([U] or [C]).
+    ///
+    /// A binding with a `condition` compares a text property (a combo value) with it and
+    /// stores the boolean result (spec 02 §4.4-1, which spec 05 §1.1 defers to); for any other
+    /// property type the condition is ignored (spec 02 Q8). A numeric condition reads like a
+    /// combo value (spec 02 Q30).
     pub fn set_from_json(&mut self, j: &Json) {
+        if let Json::String(text) = j
+            && let Some(condition) = self.binding.as_ref().and_then(|b| b.condition.as_ref())
+        {
+            let matches = match condition {
+                Json::String(c) => Some(c == text),
+                Json::Number(n) => Some(n.to_string() == *text),
+                _ => None,
+            };
+            if let Some(m) = matches {
+                self.value = Value::Bool(m);
+                return;
+            }
+        }
         self.value = if self.color {
             Value::color_from_json(j)
         } else {
@@ -479,6 +497,28 @@ mod tests {
         let b2 = user_f(&o, "o2", 0.0);
         assert_eq!(b2.property(), Some("p"));
         assert_eq!(b2.binding.as_ref().unwrap().condition, Some(json!("x")));
+    }
+
+    #[test]
+    fn conditions_compare_text_properties() {
+        // `visible` bound to combo `style` with condition "0" (shimmering_particles).
+        let o = obj(json!({
+            "v": {"value": true, "user": {"name": "style", "condition": "0"}},
+            "n": {"value": true, "user": {"name": "style", "condition": 1}},
+            "f": {"value": 2.0, "user": {"name": "speed", "condition": "1"}}
+        }));
+        let mut v = user(&o, "v", Value::Bool(false));
+        v.set_from_json(&json!("0"));
+        assert!(v.bool());
+        v.set_from_json(&json!("1"));
+        assert!(!v.bool());
+        let mut n = user(&o, "n", Value::Bool(false));
+        n.set_from_json(&json!("1"));
+        assert!(n.bool());
+        // A non-text property ignores the condition (spec 02 Q8).
+        let mut f = user(&o, "f", Value::Number(0.0));
+        f.set_from_json(&json!(0.5));
+        assert_eq!(f.f32(), 0.5);
     }
 
     #[test]

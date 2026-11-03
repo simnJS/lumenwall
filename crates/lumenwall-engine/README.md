@@ -90,7 +90,9 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 - Scene wallpapers: images with every effect chain, effect `fbos`, `copy` commands, compatibility
   tint/colour-blend passes, composites, render-target name scopes, bloom with the WE materials,
   colour LUTs (volume textures in `sampler3D` slots, e.g. `ccsimple` with `LUT`), camera, parallax,
-  hierarchy transforms, animated textures, live visibility, user properties (`--set-property`,
+  hierarchy transforms, animated textures (several images, or one sprite-sheet image whose frames
+  are selected through `g_Texture0Translation`/`g_Texture0Rotation`, spec 04 §16.3), live
+  visibility, user properties (`--set-property`,
   configuration reload of properties and fps), material constants bound to properties.
 - Real Wallpaper Engine shaders for images, effects and particles (0 stand-in on the 7 installed
   scene wallpapers).
@@ -132,7 +134,6 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | Feature | Current behaviour |
 |---|---|
 | Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
-| Integer colour strings | `lumenwall-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumenwall matches the preview). To settle in spec 02 Q1. |
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
 | Puppet extras (spec 08 §11) | Bone physics, inverse kinematics, blend rules, blend shapes (`MORPHING`) and `SKINNING_ALPHA` have no known format: not implemented. Particles attached to bones are not wired (images only). The SceneScript bone and layer API waits for `lumenwall-script` integration. |
 | Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumenwall-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
@@ -245,6 +246,13 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
   - fallback fonts: DejaVu Sans then Liberation Sans (Segoe UI then Arial on Windows, and
     `systemfont_<name>` as `<name>.ttf` there), then Wallpaper Engine's `fonts/NotoSans-Regular.ttf`;
     they are also used for glyphs the wallpaper's font lacks.
+- An image without `size` takes the `width`/`height` of its model before the real size of its
+  main texture (spec 02 Q26: unused by the reference). Evidence: deep_space's `background` model
+  (1920×1080 over a 480×270 flow mask) covers the screen in its WE preview; the reference draws it
+  as a 480×270 inset (rule 5).
+- Particle materials: `usershadervalues` (`{"<user property>": "<material constant>"}`) set the
+  constant from the property at load and on every property change (shimmering_particles tints
+  its motes with `schemecolor`/`color2`). Image materials get it from `lumenwall-scene`.
 - Puppet layer clocks advance by at most 0.25 s per frame: the engine clock keeps running while
   an output is paused, and spec 08 §9.3 excludes the pause (QO-P18). Animations only slow down
   below 4 fps.
@@ -277,6 +285,7 @@ cargo run --release -p lumenwall -- -w 0x0x1720x720 3018340632 # borderless wind
 LUMENWALL_WINDOWED=1 cargo run --release -p lumenwall -- 3018340632 # 640x480 window
 LUMENWALL_STATS=1 ...                                          # fps, CPU/GPU ms per frame, memory every 5 s
 cargo run -p lumenwall-engine --example render_png -- --size 1720x720 --frames 60 --save 0,30,59 3018340632
+cargo run -p lumenwall-engine --example render_png -- --no-particles --debug object=28 --debug pass-log <path>
 ```
 
 PNG files go to `target/agent-integration/shots/` by default (never into the repository: the

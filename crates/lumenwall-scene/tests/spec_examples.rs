@@ -264,6 +264,55 @@ fn project_header_rules() {
     );
     let e = p(r#"{"type": "gif", "title": "t", "file": "x"}"#).unwrap_err();
     assert_eq!(data_err(&e).2, DataError::ProjectType("gif".into()));
+    // Lumenwall: without `type`, the extension of `file` gives it (Wallpaper Engine's own
+    // projects: audiophile, techno, sheep).
+    for (file, kind) in [
+        ("v.WEBM", ProjectKind::Video),
+        ("dir/index.html", ProjectKind::Web),
+        ("v.mp4", ProjectKind::Video),
+    ] {
+        let json = format!(r#"{{"title": "t", "file": "{file}"}}"#);
+        assert_eq!(p(&json).unwrap().kind, kind, "{file}");
+    }
+    let e = p(r#"{"title": "t", "file": "x.dat"}"#).unwrap_err();
+    assert_eq!(
+        data_err(&e),
+        (
+            "project.json".into(),
+            "$.file".into(),
+            DataError::ProjectFile("x.dat".into())
+        )
+    );
+    let e = p(r#"{"title": "t"}"#).unwrap_err();
+    assert_eq!(data_err(&e).1, "$.file");
+    let e = p(r#"{"title": "Sheep", "file": "sheep.exe"}"#).unwrap_err();
+    assert!(
+        matches!(&e, LoadError::Unsupported { kind: "application", file } if file == "sheep.exe"),
+        "{e}"
+    );
+    let e = p(r#"{"type": "Application", "title": "t", "file": "a.exe"}"#).unwrap_err();
+    assert!(matches!(e, LoadError::Unsupported { .. }), "{e}");
+    // Not wallpapers: Workshop assets and editor templates.
+    let e = p(r#"{"category": "Asset", "title": "t", "file": "assets.json"}"#).unwrap_err();
+    assert!(
+        matches!(e, LoadError::NotAWallpaper(NotAWallpaper::WorkshopAsset)),
+        "{e}"
+    );
+    assert!(e.to_string().starts_with("not a wallpaper: "), "{e}");
+    let e = p(r#"{"title": "t", "file": "assets.json"}"#).unwrap_err();
+    assert!(matches!(e, LoadError::NotAWallpaper(_)), "{e}");
+    let e = p(r#"{"file": "scene.json", "templateoptions": []}"#).unwrap_err();
+    assert!(
+        matches!(e, LoadError::NotAWallpaper(NotAWallpaper::Template)),
+        "{e}"
+    );
+    // A wallpaper made from a template keeps its own type.
+    assert_eq!(
+        p(r#"{"type": "video", "title": "t", "file": "v.mp4", "templateoptions": []}"#)
+            .unwrap()
+            .kind,
+        ProjectKind::Video
+    );
     let e = p(r#"{"type": "web", "title": 3, "file": "x"}"#).unwrap_err();
     assert_eq!(data_err(&e).1, "$.title");
     let e = p(r#"{"type": "web", "title": "t", "file": "x",}"#).unwrap_err();
@@ -332,7 +381,8 @@ fn overrides_3_3_and_3_5() {
             .get(p.property("schemecolor").unwrap())
             .value()
             .vec4(),
-        Vec4::new(1.0 / 255.0, 0.0, 0.0, 1.0)
+        // Q1 (Lumenwall): no component above 1, read as 0-1 values (red).
+        Vec4::new(1.0, 0.0, 0.0, 1.0)
     );
 
     // Q13: invalid slider / colour / combo texts are refused with a warning.
@@ -1642,16 +1692,20 @@ fn snapshot_sees_overrides_q18() {
 #[test]
 fn colors_q1_q2_q3() {
     let objects = img_obj(r#", "color": "1 1 1", "effects": [] "#);
+    // Q1 (Lumenwall, parity rule 5): no component above 1 → 0-1 values, as WE shows them.
+    let p = load(&base_files(&scene_with(ortho(), &objects)));
+    assert_eq!(p.value(image(&p, 0).color).vec4(), Vec4::ONE);
+    let objects = img_obj(r#", "color": "255 128 0" "#);
     let p = load(&base_files(&scene_with(ortho(), &objects)));
     assert_eq!(
         p.value(image(&p, 0).color).vec4(),
-        Vec4::new(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0)
+        Vec4::new(1.0, 128.0 / 255.0, 0.0, 1.0)
     );
     let objects = img_obj(r#", "color": "1, 0, 0" "#);
     let p = load(&base_files(&scene_with(ortho(), &objects)));
     assert_eq!(
         p.value(image(&p, 0).color).vec4(),
-        Vec4::new(1.0 / 255.0, 0.0, 0.0, 0.0)
+        Vec4::new(1.0, 0.0, 0.0, 0.0)
     );
     let objects = img_obj(r##", "color": "#ffffffff" "##);
     let p = load(&base_files(&scene_with(ortho(), &objects)));
@@ -1759,4 +1813,33 @@ fn hostile_inputs_do_not_panic() {
         &base_files(&scene_with("", &deep)),
         PropertyOverrides::new(),
     );
+}
+
+#[test]
+fn user_shader_values_bind_material_constants() {
+    // `usershadervalues` (eagleflag, shimmering_particles, neon_sunset): property → constant.
+    let mut f = base_files(&scene_with(ortho(), &img_obj("")));
+    f.insert(
+        "materials/fond.json".into(),
+        br#"{ "passes": [ { "shader": "flag", "textures": [ "fond" ],
+              "constantshadervalues": { "color1": "0 0 0", "Strength": 0.3 },
+              "usershadervalues": { "schemecolor": "color1", "speed": "color2",
+                                    "missing": "color3", "bad": 4 } } ] }"#
+            .to_vec(),
+    );
+    let mut p = load(&f);
+    let b = p.build(&f, &BuildOptions::new(1920, 1080)).unwrap();
+    let passes = b.image_passes[0].clone().unwrap();
+    let o = ObjectIndex::new(0);
+    let c = p.pass_constants(o, &passes, 0, &["color1", "color2", "color3", "Strength"]);
+    let ConstantSource::Setting(color1) = c[0] else {
+        panic!("color1 not bound: {:?}", c[0]);
+    };
+    assert_eq!(p.value(color1).vec3(), Vec3::new(0.2, 0.4, 0.8));
+    assert!(matches!(c[1], ConstantSource::Setting(id) if p.value(id).float() == 1.5));
+    assert_eq!(c[2], ConstantSource::Default);
+    assert!(matches!(c[3], ConstantSource::Setting(id) if p.value(id).float() == 0.3));
+    // The constant follows the property.
+    p.set_property_text("schemecolor", "1 0 0").unwrap();
+    assert_eq!(p.value(color1).vec3(), Vec3::new(1.0, 0.0, 0.0));
 }

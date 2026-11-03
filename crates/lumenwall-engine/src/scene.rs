@@ -205,6 +205,8 @@ struct PreparedPass {
     pass: ImagePass,
     /// `(uniform, values, setting)` written once the pass exists.
     constants: Vec<(ConstantParam, Value, Option<SettingId>)>,
+    /// Slot 0 samples the image's animated main texture (spec 04 §16.3).
+    animated_slot0: bool,
 }
 
 struct PendingImage {
@@ -781,7 +783,7 @@ pub fn build_scene(
                 {
                     uses_time = true;
                     for (k, &pass) in handle.passes.iter().enumerate() {
-                        if img.passes[k].pass.slot0_variants.is_empty() {
+                        if !img.passes[k].animated_slot0 {
                             continue;
                         }
                         animated_passes.push(AnimatedPass {
@@ -1101,6 +1103,13 @@ fn prepare_image(
     let img = obj.as_layer().ok_or("not an image layer")?;
     let model = scene.model(img.model.ok_or("image without model")?);
     let (fullscreen, passthrough, solid) = (model.fullscreen, model.passthrough, model.solid_layer);
+    // parity: rule 5 (spec 02 Q26): the model's `width`/`height` size an image without `size`
+    // before the texture does. The reference ignores them; deep_space's `background` model
+    // (1920×1080 over a 480×270 flow mask) covers the screen in its WE preview.
+    let model_size = match (model.width, model.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some(Vec2::new(w as f32, h as f32)),
+        _ => None,
+    };
     // GPU skinning of the mesh pass through the shader's own path (spec 08 §9.8).
     let bones = puppet.map_or(0, PuppetModel::bone_count);
     let mut skinning = (1..=MAX_GPU_BONES).contains(&bones);
@@ -1174,7 +1183,7 @@ fn prepare_image(
         }
     };
     if s.x == 0.0 || s.y == 0.0 {
-        s = Vec2::new(main_sizes.1.0 as f32, main_sizes.1.1 as f32);
+        s = model_size.unwrap_or(Vec2::new(main_sizes.1.0 as f32, main_sizes.1.1 as f32));
     }
     if fullscreen {
         s = scene_size;
@@ -1329,10 +1338,11 @@ fn prepare_image(
                 }
             };
         }
-        if k == 0
+        let animated_slot0 =
+            k == 0 && pass.slots[0].is_none() && main_tex.as_ref().is_some_and(|t| t.is_animated());
+        if animated_slot0
             && let Some(t) = &main_tex
-            && t.is_animated()
-            && pass.slots[0].is_none()
+            && t.has_image_variants()
         {
             pass.slot0_variants = t.ids.iter().map(|&i| TextureRef::Texture(i)).collect();
         }
@@ -1357,7 +1367,11 @@ fn prepare_image(
             };
             constants.push((param.clone(), value, setting));
         }
-        prepared.push(PreparedPass { pass, constants });
+        prepared.push(PreparedPass {
+            pass,
+            constants,
+            animated_slot0,
+        });
     }
 
     // Puppet mesh (spec 04 §20) with its bone weights when it has a skeleton (spec 08).
@@ -1838,7 +1852,7 @@ impl SceneRuntime {
         if let Some(id) = project.property(name) {
             let json = property_json(project.properties.get(id).value());
             for p in &mut self.particles {
-                p.set_property(name, &json);
+                p.set_property(&mut self.scene, name, &json);
             }
         }
         if let Some(s) = &mut self.scripts {

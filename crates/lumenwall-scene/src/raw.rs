@@ -782,6 +782,10 @@ raw_struct! {
         file: Json<'a> = "file",
         workshopid: Json<'a> = "workshopid",
         general: RawProjectGeneral<'a> = "general",
+        /// `"Asset"` for Workshop items made for the editor (not wallpapers).
+        category: Json<'a> = "category",
+        /// Present in the editor's project templates (`projects/templates`).
+        templateoptions: Json<'a> = "templateoptions",
     }
 }
 
@@ -1041,6 +1045,7 @@ raw_struct! {
         usertextures: RawSeq<RawTexEntry<'a>> = "usertextures",
         combos: RawMap<'a, Json<'a>> = "combos",
         constantshadervalues: RawMap<'a, RawSetting<'a>> = "constantshadervalues",
+        usershadervalues: RawMap<'a, Json<'a>> = "usershadervalues",
     }
 }
 

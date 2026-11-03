@@ -12,6 +12,9 @@
 //!   --software         CPU adapter
 //!   --scaling MODE     stretch | fit | fill | default (default: default)
 //!   --hwdec MODE       video decoding: auto | nvdec-copy | no (default: auto)
+//!   --no-particles     particle systems are not created
+//!   --debug VALUE      render debug switch (repeatable): base-only | pass-log |
+//!                      no-solid-final | object=<id> | skip-object=<id> | skip-effect=<id>
 //! ```
 
 use std::collections::BTreeMap;
@@ -61,6 +64,21 @@ fn main() {
             "--assets" => assets = Some(PathBuf::from(val())),
             "--software" => opts.software = true,
             "--no-particles" => opts.particles = false,
+            "--debug" => {
+                let v = val();
+                let d = &mut opts.debug;
+                match v.split_once('=') {
+                    Some(("object", id)) => d.only_object = id.parse().ok(),
+                    Some(("skip-object", id)) => d.skip_objects.extend(id.parse::<u32>().ok()),
+                    Some(("skip-effect", id)) => d.skip_effects.extend(id.parse::<u32>().ok()),
+                    _ => match v.as_str() {
+                        "base-only" => d.base_only = true,
+                        "pass-log" => d.pass_log = true,
+                        "no-solid-final" => d.no_solid_final = true,
+                        _ => eprintln!("--debug: unknown value '{v}'"),
+                    },
+                }
+            }
             "--scaling" => {
                 opts.scaling = match val().as_str() {
                     "stretch" => lumenwall_engine::ScalingMode::Stretch,

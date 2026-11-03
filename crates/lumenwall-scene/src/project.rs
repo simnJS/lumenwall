@@ -4,7 +4,7 @@ use serde::Deserialize as _;
 
 use crate::asset::AssetSource;
 use crate::convert::{opt_bool, req_str};
-use crate::error::{At, DataErr, DataError, Fail, LoadError, Warning, Warnings};
+use crate::error::{At, DataErr, DataError, Fail, LoadError, NotAWallpaper, Warning, Warnings};
 use crate::intern::Interner;
 use crate::load::{Arenas, Loader};
 use crate::property::{
@@ -83,8 +83,9 @@ impl LoadContext {
         let raw: RawProject<'_> = parse_doc(PROJECT_FILE, &bytes)?;
         // The counter moves for every project, with or without `workshopid` (§2.2).
         self.last_id = self.last_id.wrapping_sub(1);
+        let kind = project_kind(&raw)?;
         let mut warnings = Warnings::default();
-        let mut project = project_doc(&raw, self.last_id, &mut warnings)
+        let mut project = project_doc(&raw, kind, self.last_id, &mut warnings)
             .map_err(|e| e.into_load(PROJECT_FILE))?;
         self.overrides
             .apply(&mut project.properties, &mut warnings, PROJECT_FILE);
@@ -116,27 +117,92 @@ pub fn load_project(
     LoadContext::new(overrides).load(src)
 }
 
+/// Extensions of the video files Wallpaper Engine plays as video wallpapers.
+const VIDEO_EXTENSIONS: [&str; 8] = ["mp4", "webm", "m4v", "mov", "avi", "mkv", "wmv", "ogv"];
+
+/// Project type (spec 02 §2.1), with what the spec leaves out (Lumenwall, parity rule 4):
+///
+/// - Workshop assets (`"category": "Asset"`, or `file` = `assets.json` without `type`) and
+///   editor templates (`templateoptions` without `type`) are Wallpaper Engine content but not
+///   wallpapers:
+///   [`LoadError::NotAWallpaper`] instead of a parsing error;
+/// - without `type`, the type follows the extension of `file`, as Wallpaper Engine does for
+///   its own projects (`.json` scene, video files, `.html` web, `.exe` application);
+/// - `application` (a Windows program) is [`LoadError::Unsupported`].
+fn project_kind(raw: &RawProject<'_>) -> Result<ProjectKind, LoadError> {
+    if raw.kind != JsonKind::Object {
+        return Err(
+            crate::convert::kind_error(raw.kind, crate::error::Expected::Object)
+                .into_load(PROJECT_FILE),
+        );
+    }
+    let file = match &raw.file {
+        Json::Str(s) => Some(&**s),
+        _ => None,
+    };
+    let file_name = file.map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f));
+    let asset = matches!(&raw.category, Json::Str(c) if c.eq_ignore_ascii_case("asset"))
+        || (matches!(raw.ty, Json::Absent | Json::Null)
+            && file_name.is_some_and(|f| f.eq_ignore_ascii_case("assets.json")));
+    if asset {
+        return Err(LoadError::NotAWallpaper(NotAWallpaper::WorkshopAsset));
+    }
+    // A wallpaper made from a template has its own `type`; the template itself has none.
+    if raw.templateoptions != Json::Absent && matches!(raw.ty, Json::Absent | Json::Null) {
+        return Err(LoadError::NotAWallpaper(NotAWallpaper::Template));
+    }
+    let application = || LoadError::Unsupported {
+        kind: "application",
+        file: file.unwrap_or_default().to_owned(),
+    };
+    let ty = match &raw.ty {
+        Json::Absent | Json::Null => None,
+        other => Some(
+            req_str(other)
+                .at("type")
+                .map_err(|e| e.into_load(PROJECT_FILE))?,
+        ),
+    };
+    if let Some(ty) = ty {
+        return if ty.eq_ignore_ascii_case("scene") {
+            Ok(ProjectKind::Scene)
+        } else if ty.eq_ignore_ascii_case("video") {
+            Ok(ProjectKind::Video)
+        } else if ty.eq_ignore_ascii_case("web") {
+            Ok(ProjectKind::Web)
+        } else if ty.eq_ignore_ascii_case("application") {
+            Err(application())
+        } else {
+            Err(key_error(DataError::ProjectType(ty.to_owned()), "type"))
+        };
+    }
+    let file = req_str(&raw.file)
+        .at("file")
+        .map_err(|e| e.into_load(PROJECT_FILE))?;
+    let ext = file_name
+        .and_then(|f| f.rsplit_once('.'))
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "json" => Ok(ProjectKind::Scene),
+        "html" | "htm" => Ok(ProjectKind::Web),
+        "exe" => Err(application()),
+        e if VIDEO_EXTENSIONS.contains(&e) => Ok(ProjectKind::Video),
+        _ => Err(key_error(DataError::ProjectFile(file.to_owned()), "file")),
+    }
+}
+
+/// `error` at `$.<key>` of `project.json`.
+fn key_error(error: DataError, key: &'static str) -> LoadError {
+    DataErr::new(error).at(key).into_load(PROJECT_FILE)
+}
+
 fn project_doc(
     raw: &RawProject<'_>,
+    kind: ProjectKind,
     synthetic_id: i32,
     warnings: &mut Warnings,
 ) -> Result<Project, DataErr> {
-    if raw.kind != JsonKind::Object {
-        return Err(crate::convert::kind_error(
-            raw.kind,
-            crate::error::Expected::Object,
-        ));
-    }
-    let ty = req_str(&raw.ty).at("type")?;
-    let kind = if ty.eq_ignore_ascii_case("scene") {
-        ProjectKind::Scene
-    } else if ty.eq_ignore_ascii_case("video") {
-        ProjectKind::Video
-    } else if ty.eq_ignore_ascii_case("web") {
-        ProjectKind::Web
-    } else {
-        return Err(DataErr::new(DataError::ProjectType(ty.to_owned()))).at("type");
-    };
     let title = req_str(&raw.title).at("title")?.to_owned();
     let file = req_str(&raw.file).at("file")?.to_owned();
     let workshop_id = match &raw.workshopid {
