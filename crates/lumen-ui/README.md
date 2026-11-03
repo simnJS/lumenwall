@@ -9,7 +9,7 @@ lumen-ui --background    # start the daemon if needed, then the tray (what autos
 lumen-ui --demo-library --fake-daemon   # generated library + in-process fake daemon over real IPC
 ```
 
-Other developer options: `--page`, `--select`, `--search`, `--lang`, `--size`, `--screenshot <png>` (saves the window once loaded, then exits), `--bench-animate`. Environment: `LUMEN_UI_RENDERER=software`, `LUMEN_LOG`, `LUMEN_IPC_ENDPOINT`, `LUMEN_WE_WORKSHOP`.
+Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screenshot-delay`, `--page`, `--select`, `--search`, `--lang`, `--size`, `--screenshot <png>` (saves the window once loaded, then exits), `--bench-animate`. Environment: `LUMEN_UI_RENDERER=software`, `LUMEN_LOG`, `LUMEN_IPC_ENDPOINT`, `LUMEN_WE_WORKSHOP`.
 
 ## Layout
 
@@ -22,6 +22,7 @@ Other developer options: `--page`, `--select`, `--search`, `--lang`, `--size`, `
 | `catalog/` | Library scan, lenient `project.json` reading, Steam / Workshop / Wallpaper Engine discovery (`Discovery` trait, native, Flatpak, Snap, Windows registry), resolution from `scene.pkg` / MP4 headers |
 | `thumbs.rs`, `previews.rs` | Preview decoding (16:9 crop, LZ4 frames, disk cache) and animation |
 | `daemon.rs` | IPC worker thread and the UI's view of the daemon |
+| `workshop/` | Steam Workshop: public Web API client (allow-listed hosts, TTL disk cache), BBCode renderer, API key storage (0600), folder watcher (`notify`), page state, fake Steam server (`--fake-steam`) |
 | `tray/` | StatusNotifierItem + dbusmenu over zbus (Linux), `tray-icon` (Windows) |
 | `config.rs`, `i18n.rs`, `picker.rs`, `platform.rs` | Preferences and autostart, EN/FR strings, file chooser portal / dialog, OS helpers |
 | `fake.rs`, `demo.rs` | Fake daemon and generated demo library for development and screenshots |
@@ -33,6 +34,10 @@ The catalog lives here behind `catalog::Discovery` until `lumen-assets` / `lumen
 - `specs/02-modele-scene.md` §2–3: `project.json` keys and user property kinds.
 - `specs/01-formats-binaires.md` §1: `.pkg` layout (to read `scene.json` for the resolution filter).
 - `specs/07-plateforme-audio-video-web.md` §3.1: Workshop id or path.
+
+## Network
+
+Only the Workshop page talks to the network, only while it is displayed, only to Steam's hosts, with a generic `Lumen/<version>` User-Agent and the user's own key (never bundled, never logged). Details in [`docs/UI.md`](../../docs/UI.md#workshop).
 
 ## Deviations
 

@@ -505,6 +505,21 @@ pub fn monitor(selected: bool, drop_target: bool) -> impl Fn(&Theme) -> containe
     }
 }
 
+/// Discreet one-line explanation bar.
+pub fn hint_bar(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(t.accent_soft.into()),
+        text_color: Some(t.text),
+        border: Border {
+            color: with_alpha(t.accent, 0.25),
+            width: 1.0,
+            radius: radius::M.into(),
+        },
+        ..Default::default()
+    }
+}
+
 pub fn toast(error: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let t = tokens(theme);

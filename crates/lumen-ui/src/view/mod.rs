@@ -6,6 +6,7 @@ mod library;
 mod screens;
 mod settings;
 pub mod widgets;
+mod workshop;
 
 use iced::widget::{button, column, container, pin, row, slider, space, stack, text};
 use iced::{Alignment, Color, Element, Length, Padding};
@@ -27,6 +28,7 @@ impl App {
         let t = self.tokens();
         let page: Element<'_, Message> = match self.page {
             Page::Library => self.library_view(t),
+            Page::Workshop => self.workshop_view(t),
             Page::Screens => self.screens_view(t),
             Page::Settings => self.settings_view(t),
         };
@@ -34,23 +36,32 @@ impl App {
             self.sidebar(t),
             container(page).width(Length::Fill).height(Length::Fill)
         ];
-        if self.page == Page::Library {
+        if matches!(self.page, Page::Library | Page::Workshop) {
+            let has_selection = if self.page == Page::Library {
+                self.selected.is_some()
+            } else {
+                self.ws.selected.is_some()
+            };
             // The wall clock, not the last frame time: if frames stop (hidden
             // window), the panel still ends fully open or closed.
             let now = std::time::Instant::now();
             let open = if self.panel.is_animating(now) {
                 self.panel.interpolate(0.0, 1.0, now)
-            } else if self.selected.is_some() {
+            } else if has_selection {
                 1.0
             } else {
                 0.0
             };
             if open > 0.0 {
                 body = body.push(
-                    container(self.details(t))
-                        .width(layout::PANEL_W * open)
-                        .height(Length::Fill)
-                        .clip(true),
+                    container(if self.page == Page::Library {
+                        self.details(t)
+                    } else {
+                        self.ws_details(t)
+                    })
+                    .width(layout::PANEL_W * open)
+                    .height(Length::Fill)
+                    .clip(true),
                 );
             }
         }
@@ -145,6 +156,7 @@ impl App {
         let col = column![
             container(logo).padding(Padding::from([sp::XL, sp::S])),
             nav(Page::Library, Icon::Library, K::NavLibrary),
+            nav(Page::Workshop, Icon::Workshop, K::NavWorkshop),
             nav(Page::Screens, Icon::Screens, K::NavScreens),
             nav(Page::Settings, Icon::Settings, K::NavSettings),
             space().height(Length::Fill),

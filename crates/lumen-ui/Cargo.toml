@@ -27,6 +27,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 dirs = "7.0.0"
 sys-locale = "0.3.2"
+# Steam Workshop browsing (public Steam Web API) and preview downloads.
+# rustls with the ring provider and the OS certificate store (no bundled roots).
+ureq = { version = "3.5.1", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+# New Workshop subscriptions are noticed through file-system events (inotify,
+# ReadDirectoryChangesW), never by polling.
+notify = { version = "8.2.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Tray icon (StatusNotifierItem) and the file chooser portal, both over D-Bus.

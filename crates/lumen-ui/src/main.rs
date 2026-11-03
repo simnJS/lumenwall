@@ -26,6 +26,7 @@ mod theme;
 mod thumbs;
 mod tray;
 mod view;
+mod workshop;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -43,6 +44,10 @@ struct Args {
     fake_daemon: bool,
     demo_library: bool,
     bench_animate: bool,
+    fake_steam: bool,
+    ws_select: Option<String>,
+    no_key: bool,
+    screenshot_delay: Option<f32>,
     page: Option<Page>,
     select: Option<String>,
     search: Option<String>,
@@ -62,11 +67,22 @@ fn parse_args() -> Result<Args, String> {
             "--fake-daemon" => a.fake_daemon = true,
             "--demo-library" => a.demo_library = true,
             "--bench-animate" => a.bench_animate = true,
+            "--fake-steam" => a.fake_steam = true,
+            "--ws-select" => a.ws_select = Some(value("--ws-select")?),
+            "--no-key" => a.no_key = true,
+            "--screenshot-delay" => {
+                a.screenshot_delay = Some(
+                    value("--screenshot-delay")?
+                        .parse()
+                        .map_err(|_| "bad delay")?,
+                )
+            }
             "--page" => {
                 a.page = Some(match value("--page")?.as_str() {
                     "library" => Page::Library,
                     "screens" => Page::Screens,
                     "settings" => Page::Settings,
+                    "workshop" => Page::Workshop,
                     other => return Err(format!("unknown page {other}")),
                 })
             }
@@ -176,6 +192,10 @@ fn run_window(args: Args) -> ExitCode {
         screenshot: args.screenshot,
         lang: args.lang,
         bench_animate: args.bench_animate,
+        ws_select: args.ws_select,
+        screenshot_delay: args
+            .screenshot_delay
+            .map(std::time::Duration::from_secs_f32),
         ..Launch::default()
     };
     let mut playing = Vec::new();
@@ -201,6 +221,19 @@ fn run_window(args: Args) -> ExitCode {
         }
     }
 
+    if args.fake_steam {
+        match workshop::mock::start() {
+            Ok(mock) => {
+                workshop::api::use_mock_server(mock.base.clone());
+                launch.workshop_key =
+                    Some((!args.no_key).then(|| workshop::mock::MOCK_KEY.to_owned()));
+                launch.keep_alive = Some(Box::new((launch.keep_alive.take(), mock.hits)));
+            }
+            Err(e) => tracing::error!("fake Steam: {e}"),
+        }
+    } else if args.no_key {
+        launch.workshop_key = Some(None);
+    }
     let font = theme::init_font(&installed_families());
     let size = args
         .size

@@ -33,10 +33,39 @@ Screenshots (generated demo library, no Workshop content): [`docs/ui-screenshots
 
 - **Library** (the heart): large 16:9 previews edge to edge with rounded corners, a dark gradient with the title and resolution/tags over the image, a type badge (scene, video, web), an accent "On screen 1, 2" badge, warning badges when it cannot play, a soft hover wash and an accent glow on the selection. Previews animate on hover by default. Instant search (title, tag, Workshop id), type chips, tag and resolution filters, sort.
 - **Details panel** (slides in when a wallpaper is selected): big preview, title, metadata, tag chips (click to filter), *Apply* card with the monitor map, *All screens*, scaling (fill / fit / stretch, with tooltips) and one primary button, then *Customize*: sliders with their value, colour swatches with an inline editor (presets, RGB, hex), switches, lists, text fields, file pickers, *Reset*. Changes show live on the desktop and are saved 0.7 s after the last change.
+- **Workshop**: community wallpapers for Wallpaper Engine on Steam (see [Workshop](#workshop) below): browse with the user's own Steam Web API key, subscribe through the Steam client, new subscriptions appear by themselves with a *New* badge.
 - **Screens**: the monitors drawn to scale with the wallpaper of each, then one card per screen (status, scaling, fps, *Change*, *Remove*). A click on a screen opens the library with only that screen targeted.
 - **Settings**: cards for performance (fps limit with presets, pause on fullscreen / battery / lock), sound, startup, library folders and detected Steam / Wallpaper Engine paths, appearance (language, theme, preview animation), about.
 - **Status bar** (always visible): engine state, real fps (per screen × number of screens), CPU, GPU, engine RAM, the app's own RAM, pause, mute, volume; *Start engine* when it is off. Performance is the product's selling point.
 - **Tray** (`lumen-ui --tray`, separate process, ~10 MB, no GPU): open, pause/resume, mute, start engine, quit. Linux: StatusNotifierItem + dbusmenu over D-Bus (KDE, most panels, GNOME with the AppIndicator extension, which Ubuntu ships). Without a tray host everything stays reachable from the window.
+
+## Workshop
+
+Lumen is **not a Steam application**: no Steamworks, no `steam_api`, and it never subscribes on the user's behalf nor presents itself as Wallpaper Engine. The Workshop of app 431960 is only *read* through Steam's public Web API.
+
+- **Subscribe** opens the item in the Steam client (`steam://url/CommunityFilePage/<id>`), or in the browser (`https://steamcommunity.com/sharedfiles/filedetails/?id=<id>`) when no Steam installation was found. The UI says next to the button that owning Wallpaper Engine is required and that Steam does the download.
+- **New subscriptions**: the `workshop/content/431960` folders are watched through file events (`notify`: inotify, ReadDirectoryChangesW), never polled. A new item folder gets its own watch; once it has been quiet for 2 s with a readable `project.json` it joins the library with a *New* badge, a "Just arrived" strip and a toast. Items newer than the previous session are *New* too. A deleted folder (unsubscribed) leaves the library.
+- **Browsing** (`IPublishedFileService/QueryFiles`, needs the user's **personal** key): trending (7 days), most popular (total subscribers), most recent, text search (debounced 450 ms), type chips, genre tag, resolution tag, cursor pagination as the user scrolls ("Load more" too). Only "Everyone" items by default; "Questionable" and "Mature" are separate opt-ins in Settings and get a visible badge. Cards: 16:9 preview animated on hover, title, author, rating, subscribers, type, *Installed* (or *New*) badge.
+- **Details panel**: big preview and up to 3 screenshots (click to enlarge), author and profile link, 5-star rating with vote count, subscribers, favourites, size, last update, tags (click to filter), *Subscribe in Steam* or, when installed, *Apply* and *Show in library*, *Open in browser*, and the description: Steam BBCode rendered as plain rich text (headings, bold/italic/underline/strike, lists, quotes, safe `http(s)`/`steam:` links; images, embeds and unknown tags dropped, no HTML).
+- **Without a key** the page stays useful: an explanation with *Add my key* / *Get a key* / *Open in browser* / *Browse in Steam*, the "Just arrived" strip, and the installed Workshop wallpapers enriched by `ISteamRemoteStorage/GetPublishedFileDetails` (POST, no key): subscribers, size, update date, description. Names and ratings need the key.
+- **Key**: entered in Settings (masked field, *Get a key* opens https://steamcommunity.com/dev/apikey, explanation of where it goes). Stored only in `<config>/lumen/steam-web-api-key` with mode 0600 on Unix (tightened if a hand-made file is looser), never in `ui.json`, never logged (requests log the endpoint only; HTTP errors keep only their status), never part of a cache file name. Lumen ships no key.
+
+**Network rules.** Requests go only to `api.steampowered.com`, `steamcommunity.com` and Steam's image CDNs (`*.steamusercontent.com`, `*.steamstatic.com`, `steamuserimages-a.akamaihd.net`), over HTTPS with the system certificate store (rustls + `rustls-platform-verifier`, ring provider); any other URL, including image URLs returned by the API, is refused. User-Agent `Lumen/<version>`, nothing else about the user. Timeouts 6 s (connect) / 20 s (total), 8 MB JSON and 16 MB image limits. The network worker exists only while the Workshop page is displayed (its subscription is dropped when the user leaves, and queued downloads are cancelled): no request can start from another page. Disk cache with TTL: query results 15 min, item details 6 h, author names 24 h, images 7 days. Offline, rate limit (HTTP 429), rejected key (401/403) and other errors each have their own message and *Retry*; what was loaded stays visible.
+
+Requests per action, counted on the fake server (cold cache, 1360×860 window):
+
+| Action | Requests |
+|---|---|
+| Open the page (key) | 1 `QueryFiles` + 1 `GetPlayerSummaries` + 1 preview per card on screen and one row ahead (9 here; installed items use their local preview) + 1 `GetPublishedFileDetails` per 100 installed items (then cached 6 h) |
+| Open it again within 15 min | 0 |
+| Open an item | its screenshots (2–3); the preview is already cached |
+| Change sort, filter or search / reach the end of the list | 1 `QueryFiles` + 1 `GetPlayerSummaries` + previews of the new cards on screen |
+| Open the page without a key | 1 `GetPublishedFileDetails` (POST) per 100 installed items, no image (local previews) |
+| Any other page | 0 |
+
+Cost of the page (same machine, wgpu): idle 33 MB private / 201 MB RSS, the same as the library (+1 MB); +2.2 % CPU while the selected item's GIF plays; private memory flat (35 MB) over 45 s with every visible Workshop GIF animated. One worker thread while the page is shown, none otherwise.
+
+**Testing without a key or the Internet.** `lumen-ui --fake-steam` (with `--no-key` for the keyless page) starts a local HTTP server that answers the three endpoints in their documented JSON shapes, with 48 made-up items, generated GIF previews and screenshots, and a made-up key (in memory only). `cargo test` runs the client end to end against it (pagination, filters, caching, rejected key, host allow-list, downloads) and the folder watcher against real file events. The screenshots in `docs/ui-screenshots/workshop-*.png` come from it.
 
 ## Practical
 
@@ -62,6 +91,8 @@ Screenshots (generated demo library, no Workshop content): [`docs/ui-screenshots
 | Unsupported (application, Workshop asset, unknown type) | Red badge and an explanation in the panel |
 | Search/filters match nothing | Illustration + *Clear filters* |
 | Daemon reports an error for a screen | Red status and message on the screen card |
+| Workshop without key | Explanation, *Add my key*, *Browse in Steam*, installed items with their Workshop details |
+| Steam unreachable / rate limited / key refused | Illustration or notice naming the cause, *Retry*, loaded results kept |
 
 ## Performance design
 

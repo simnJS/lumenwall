@@ -436,6 +436,20 @@ impl App {
         .style(theme::glass_badge);
         let mut top = row![kind, space().width(Length::Fill)].align_y(Alignment::Center);
         let screens = self.screen_numbers(&w.dir);
+        if screens.is_empty() && self.ws.new_items.contains(&w.dir) {
+            top = top.push(
+                container(
+                    row![
+                        icons::icon(Icon::Sparkle, 13.0, t.on_accent),
+                        strong(self.t(K::NewBadge), size::MICRO, t.on_accent)
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+                )
+                .padding(Padding::from([3.0, 9.0]))
+                .style(theme::accent_badge),
+            );
+        }
         if !screens.is_empty() {
             let list: Vec<String> = screens.iter().map(usize::to_string).collect();
             top = top.push(

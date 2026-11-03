@@ -76,7 +76,8 @@ struct Queue {
 
 #[derive(Default)]
 struct QueueState {
-    jobs: VecDeque<PathBuf>,
+    /// Local file, and the URL to download it from first for remote previews.
+    jobs: VecDeque<(PathBuf, Option<String>)>,
     queued: HashSet<PathBuf>,
     closed: bool,
 }
@@ -101,8 +102,14 @@ impl ThumbLoader {
             let spawned = std::thread::Builder::new()
                 .name(format!("lumen-ui-thumb{i}"))
                 .spawn(move || {
-                    while let Some(path) = queue.pop() {
-                        let result = match load(&path, cache_dir.as_deref()) {
+                    while let Some((path, url)) = queue.pop() {
+                        let fetched = match &url {
+                            Some(url) => crate::workshop::api::download(url, &path)
+                                .map_err(|e| e.to_string()),
+                            None => Ok(()),
+                        };
+                        let result = match fetched.and_then(|()| load(&path, cache_dir.as_deref()))
+                        {
                             Ok(t) => ThumbResult::Ready(path.clone(), Arc::new(t)),
                             Err(e) => ThumbResult::Failed(path.clone(), e),
                         };
@@ -127,9 +134,40 @@ impl ThumbLoader {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if s.queued.insert(path.to_owned()) {
-            s.jobs.push_front(path.to_owned());
+            s.jobs.push_front((path.to_owned(), None));
             self.queue.ready.notify_one();
         }
+    }
+
+    /// Queues a remote preview: downloaded (Steam hosts only) into `path`, then
+    /// decoded like a local one.
+    pub fn request_remote(&self, path: &Path, url: &str) {
+        let mut s = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if s.queued.insert(path.to_owned()) {
+            s.jobs.push_front((path.to_owned(), Some(url.to_owned())));
+            self.queue.ready.notify_one();
+        }
+    }
+
+    /// Drops queued downloads (the Workshop page was left); returns their paths.
+    pub fn cancel_remote(&self) -> Vec<PathBuf> {
+        let mut s = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (remote, local): (Vec<_>, Vec<_>) =
+            s.jobs.drain(..).partition(|(_, url)| url.is_some());
+        s.jobs.extend(local);
+        let paths: Vec<PathBuf> = remote.into_iter().map(|(p, _)| p).collect();
+        for p in &paths {
+            s.queued.remove(p);
+        }
+        paths
     }
 }
 
@@ -145,7 +183,7 @@ impl Drop for ThumbLoader {
 }
 
 impl Queue {
-    fn pop(&self) -> Option<PathBuf> {
+    fn pop(&self) -> Option<(PathBuf, Option<String>)> {
         let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if s.closed {
@@ -244,9 +282,12 @@ fn crop_and_fit(img: &image::RgbaImage, max: u32) -> image::RgbaImage {
 }
 
 fn decode(path: &Path) -> Result<Thumb, String> {
-    let is_gif = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+    // By signature: Steam's preview URLs often have no extension.
+    let mut magic = [0u8; 4];
+    let is_gif = File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && &magic == b"GIF8";
     if is_gif {
         let file = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
         let decoder = GifDecoder::new(file).map_err(|e| e.to_string())?;

@@ -62,6 +62,11 @@ pub struct UiConfig {
     pub filter_kind: Option<crate::catalog::Kind>,
     pub filter_tag: Option<String>,
     pub filter_res: Option<crate::catalog::ResClass>,
+    /// Workshop results beyond "Everyone" content (explicit opt-in).
+    pub workshop_questionable: bool,
+    pub workshop_mature: bool,
+    /// End of the previous session (Unix seconds), for "New" badges.
+    pub last_session: Option<u64>,
 }
 
 impl Default for UiConfig {
@@ -78,6 +83,9 @@ impl Default for UiConfig {
             filter_kind: None,
             filter_tag: None,
             filter_res: None,
+            workshop_questionable: false,
+            workshop_mature: false,
+            last_session: None,
         }
     }
 }

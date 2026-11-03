@@ -147,6 +147,33 @@ impl Previews {
         }
     }
 
+    /// Like [`Self::touch`] for remote previews (`(local file, URL)`): downloaded
+    /// first, only when on screen.
+    pub fn touch_remote<'a>(&mut self, items: impl IntoIterator<Item = (&'a Path, &'a str)>) {
+        let now = Instant::now();
+        for (path, url) in items {
+            match self.entries.get_mut(path) {
+                Some(Entry::Ready(r)) => r.last_seen = now,
+                Some(_) => {}
+                None => {
+                    if let Some(l) = &self.loader {
+                        self.entries.insert(path.to_owned(), Entry::Loading);
+                        l.request_remote(path, url);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Forgets queued downloads (leaving the Workshop page): nothing more is fetched.
+    pub fn cancel_remote(&mut self) {
+        if let Some(l) = &self.loader {
+            for p in l.cancel_remote() {
+                self.entries.remove(&p);
+            }
+        }
+    }
+
     /// Marks previews as on screen; unknown ones are queued for decoding.
     pub fn touch<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) {
         let now = Instant::now();

@@ -24,6 +24,7 @@ impl App {
             self.engine_section(t),
             self.audio_section(t),
             self.startup_section(t),
+            self.workshop_section(t),
             self.library_section(t),
             self.appearance_section(t),
             self.about_section(t),
@@ -319,6 +320,102 @@ impl App {
             )
         ]);
         widgets::section(t, self.t(K::SecLibrary), col)
+    }
+
+    fn workshop_section(&self, t: &'static Tokens) -> Element<'_, Message> {
+        use crate::workshop::state::WsMsg;
+        let ws_msg = |m: WsMsg| Message::Ws(m);
+        let mut col = column![
+            row![
+                icons::icon(Icon::Key, 18.0, t.accent),
+                strong(self.t(K::ApiKey), size::BODY, t.text),
+                space().width(Length::Fill),
+                widgets::ghost_button(
+                    t,
+                    Some(Icon::External),
+                    self.t(K::WsGetKey),
+                    Some(Message::Open(crate::workshop::API_KEY_PAGE.into()))
+                ),
+            ]
+            .spacing(sp::S)
+            .align_y(Alignment::Center),
+            label(self.t(K::ApiKeyHelp), size::CAPTION, t.muted),
+        ]
+        .spacing(sp::M);
+        match &self.ws.key {
+            Some(k) => {
+                col = col.push(
+                    row![
+                        icons::icon(Icon::Check, 16.0, t.success),
+                        label(
+                            self.t(K::KeyStored)
+                                .replace("{k}", &crate::workshop::key::masked(k)),
+                            size::BODY,
+                            t.text
+                        )
+                        .width(Length::Fill),
+                        widgets::secondary_button(
+                            t,
+                            Some(Icon::Close),
+                            self.t(K::Remove),
+                            Some(ws_msg(WsMsg::RemoveKey))
+                        ),
+                    ]
+                    .spacing(sp::S)
+                    .align_y(Alignment::Center),
+                );
+            }
+            None => {
+                let valid = crate::workshop::key::is_valid(self.ws.key_input.trim());
+                col = col.push(
+                    row![
+                        text_input(self.t(K::ApiKeyPlaceholder), &self.ws.key_input)
+                            .secure(!self.ws.key_visible)
+                            .on_input(|s| Message::Ws(WsMsg::KeyInput(
+                                crate::workshop::state::Secret(s)
+                            )))
+                            .on_submit(ws_msg(WsMsg::SaveKey))
+                            .padding(Padding::from([7.0, 10.0]))
+                            .size(size::BODY)
+                            .style(theme::search),
+                        widgets::ghost_button(
+                            t,
+                            Some(Icon::Eye),
+                            self.t(if self.ws.key_visible {
+                                K::HideKey
+                            } else {
+                                K::ShowKey
+                            }),
+                            Some(ws_msg(WsMsg::ToggleKeyVisible))
+                        ),
+                        widgets::secondary_button(
+                            t,
+                            Some(Icon::Check),
+                            self.t(K::Save),
+                            valid.then(|| ws_msg(WsMsg::SaveKey))
+                        ),
+                    ]
+                    .spacing(sp::S)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        col = col.push(widgets::divider(t));
+        col = col.push(self.toggle_row(
+            t,
+            self.t(K::ShowQuestionable),
+            Some(self.t(K::ContentHelp)),
+            self.cfg.workshop_questionable,
+            Some(move |b| Message::Ws(WsMsg::Questionable(b))),
+        ));
+        col = col.push(self.toggle_row(
+            t,
+            self.t(K::ShowMature),
+            None,
+            self.cfg.workshop_mature,
+            Some(move |b| Message::Ws(WsMsg::Mature(b))),
+        ));
+        widgets::section(t, self.t(K::SecWorkshop), col)
     }
 
     fn appearance_section(&self, t: &'static Tokens) -> Element<'_, Message> {

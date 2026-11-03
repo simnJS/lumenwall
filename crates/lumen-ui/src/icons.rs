@@ -30,6 +30,18 @@ pub enum Icon {
     Plus,
     Gauge,
     Sparkle,
+    Workshop,
+    Download,
+    Star,
+    StarHalf,
+    StarEmpty,
+    Users,
+    Clock,
+    Key,
+    Package,
+    Heart,
+    Eye,
+    Store,
 }
 
 fn path(icon: Icon) -> &'static str {
@@ -82,6 +94,36 @@ fn path(icon: Icon) -> &'static str {
         Icon::Gauge => {
             r#"<path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13l3.5-4"/><circle cx="12" cy="13" r="1.2" fill="black"/>"#
         }
+        Icon::Workshop => {
+            r#"<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z" fill="black"/>"#
+        }
+        Icon::Download => r#"<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>"#,
+        Icon::Star => {
+            r#"<path d="M12 3.5l2.6 5.5 6 .8-4.4 4.1 1.1 5.9L12 17l-5.3 2.8 1.1-5.9L3.4 9.8l6-.8z" fill="black"/>"#
+        }
+        Icon::StarHalf => {
+            r#"<path d="M12 3.5l2.6 5.5 6 .8-4.4 4.1 1.1 5.9L12 17l-5.3 2.8 1.1-5.9L3.4 9.8l6-.8z"/><path d="M12 3.5V17l-5.3 2.8 1.1-5.9L3.4 9.8l6-.8z" fill="black"/>"#
+        }
+        Icon::StarEmpty => {
+            r#"<path d="M12 3.5l2.6 5.5 6 .8-4.4 4.1 1.1 5.9L12 17l-5.3 2.8 1.1-5.9L3.4 9.8l6-.8z"/>"#
+        }
+        Icon::Users => {
+            r#"<circle cx="9" cy="8.5" r="3.5"/><path d="M3 19.5c.8-3.3 3.1-5 6-5s5.2 1.7 6 5M16 5.5a3.5 3.5 0 0 1 0 6.5M18 14.8c1.6.8 2.6 2.4 3 4.7"/>"#
+        }
+        Icon::Clock => r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>"#,
+        Icon::Key => {
+            r#"<circle cx="7.5" cy="15.5" r="4"/><path d="M10.5 12.5L20 3M16 7l3 3M14 9l2 2"/>"#
+        }
+        Icon::Package => {
+            r#"<path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5L12 12l8.5-4.5M12 12v9"/>"#
+        }
+        Icon::Heart => {
+            r#"<path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.2 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z"/>"#
+        }
+        Icon::Store => r#"<path d="M5 8h14l-1.2 12H6.2z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/>"#,
+        Icon::Eye => {
+            r#"<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>"#
+        }
         Icon::Sparkle => r#"<path d="M12 3l2 6.5L20.5 12 14 14l-2 7-2-7-6.5-2L10 9.5z"/>"#,
     }
 }
@@ -120,6 +162,10 @@ pub enum Illustration {
     Search,
     /// A plug: "engine not running".
     Engine,
+    /// A globe of cards with a key: "browse the Workshop".
+    Workshop,
+    /// A cloud with a slash: "Steam unreachable".
+    Offline,
 }
 
 pub fn illustration<'a, M: 'a>(kind: Illustration, t: &theme::Tokens) -> Element<'a, M> {
@@ -139,6 +185,18 @@ pub fn illustration<'a, M: 'a>(kind: Illustration, t: &theme::Tokens) -> Element
                <rect x="18" y="78" width="54" height="40" rx="8" fill="{s}" stroke="{m}" stroke-width="3" opacity="0.6"/>
                <circle cx="104" cy="96" r="20" fill="none" stroke="{a}" stroke-width="5"/>
                <path d="M118 110l16 16" stroke="{a}" stroke-width="6" stroke-linecap="round"/>"#
+        ),
+        Illustration::Workshop => format!(
+            r#"<circle cx="72" cy="64" r="40" fill="{s}" stroke="{m}" stroke-width="3"/>
+               <path d="M32 64h80M72 24c14 12 18 26 18 40s-4 28-18 40c-14-12-18-26-18-40s4-28 18-40z" fill="none" stroke="{m}" stroke-width="3"/>
+               <rect x="96" y="70" width="40" height="26" rx="5" fill="{s}" stroke="{a}" stroke-width="3"/>
+               <path d="M108 83l6 6 10-11" stroke="{a}" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+               <circle cx="122" cy="34" r="9" fill="none" stroke="{a}" stroke-width="3"/>
+               <path d="M115 41l-14 14M106 50l4 4" stroke="{a}" stroke-width="3" stroke-linecap="round"/>"#
+        ),
+        Illustration::Offline => format!(
+            r#"<path d="M44 92h70a22 22 0 0 0 0-44 30 30 0 0 0-57-6 24 24 0 0 0-13 50z" fill="{s}" stroke="{m}" stroke-width="3"/>
+               <path d="M40 28l84 84" stroke="{a}" stroke-width="5" stroke-linecap="round"/>"#
         ),
         Illustration::Engine => format!(
             r#"<path d="M30 70h28M102 70h28" stroke="{m}" stroke-width="4" stroke-linecap="round"/>
@@ -212,6 +270,18 @@ mod tests {
             Icon::Plus,
             Icon::Gauge,
             Icon::Sparkle,
+            Icon::Workshop,
+            Icon::Download,
+            Icon::Star,
+            Icon::StarHalf,
+            Icon::StarEmpty,
+            Icon::Users,
+            Icon::Clock,
+            Icon::Key,
+            Icon::Package,
+            Icon::Heart,
+            Icon::Eye,
+            Icon::Store,
         ] {
             let src = source(icon);
             assert_eq!(

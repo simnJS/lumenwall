@@ -31,6 +31,7 @@ pub const GRID_ID: &str = "grid";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Library,
+    Workshop,
     Screens,
     Settings,
 }
@@ -46,6 +47,13 @@ pub struct Launch {
     pub lang: Option<LangPref>,
     /// Benchmark: animate visible previews even without window focus.
     pub bench_animate: bool,
+    /// Minimum wait before the screenshot (to let a scripted change land).
+    pub screenshot_delay: Option<Duration>,
+    /// `Some(None)`: behave as if no Steam Web API key was saved; `Some(Some(k))`:
+    /// use `k` for this run only (fake Steam server). `None`: the saved key.
+    pub workshop_key: Option<Option<String>>,
+    /// Open the first Workshop result whose title contains this.
+    pub ws_select: Option<String>,
     pub discovery: Option<Arc<dyn Discovery>>,
     pub endpoint: Option<Endpoint>,
     pub keep_alive: Option<Box<dyn std::any::Any + Send>>,
@@ -121,12 +129,15 @@ pub struct App {
     rss: std::cell::Cell<(Option<u64>, Option<Instant>)>,
     screenshot: Option<(PathBuf, Instant, bool)>,
     bench_animate: bool,
+    screenshot_delay: Duration,
     select_title: Option<String>,
     _keep_alive: Option<Box<dyn std::any::Any + Send>>,
+    pub ws: crate::workshop::state::WorkshopState,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    Ws(crate::workshop::state::WsMsg),
     Scan(Arc<ScanEvent>),
     Thumb(ThumbEvent),
     Daemon(DaemonEvent),
@@ -156,6 +167,9 @@ pub enum Message {
     Hover(PathBuf, bool),
     ClosePanel,
     Apply,
+    /// Apply a library wallpaper by folder (from the Workshop page).
+    ApplyDir(PathBuf),
+    ShowInLibrary(PathBuf),
     TargetToggle(String),
     TargetOnly(String),
     AllScreens,
@@ -267,12 +281,20 @@ impl App {
             screenshot: launch.screenshot.take().map(|p| (p, Instant::now(), false)),
             select_title: launch.select.take(),
             bench_animate: launch.bench_animate,
+            screenshot_delay: launch
+                .screenshot_delay
+                .unwrap_or(Duration::from_millis(1800)),
             _keep_alive: launch.keep_alive.take(),
+            ws: crate::workshop::state::WorkshopState::new(&cfg),
             cfg,
         };
         // Engine stats are wanted while the window exists; the daemon samples
         // them only while at least one client asks.
         app.daemon.want_stats(true);
+        if let Some(k) = launch.workshop_key.take() {
+            app.ws.key = k;
+        }
+        app.ws.pending_select = launch.ws_select.take();
         let scan = app.rescan();
         let theme = iced::system::theme().map(Message::SystemTheme);
         (app, Task::batch([scan, theme]))
@@ -475,10 +497,28 @@ impl App {
             seen.extend(extra);
         }
         self.previews.touch(seen.iter().map(PathBuf::as_path));
+        let targets = if self.page == Page::Workshop {
+            self.ws_preview_targets()
+        } else {
+            crate::workshop::state::PreviewTargets::default()
+        };
+        self.previews.touch_remote(
+            targets
+                .remote
+                .iter()
+                .map(|(p, u)| (p.as_path(), u.as_str())),
+        );
+        self.previews
+            .touch(targets.local.iter().map(PathBuf::as_path));
+        let remote_anim = targets.animate;
+        if self.cfg.preview_mode == PreviewMode::Visible {
+            seen.extend(targets.remote.into_iter().map(|(p, _)| p));
+            seen.extend(targets.local);
+        }
         let animating: Vec<PathBuf> = match self.cfg.preview_mode {
             PreviewMode::Never => Vec::new(),
             PreviewMode::Hover => {
-                let mut v: Vec<PathBuf> = Vec::new();
+                let mut v: Vec<PathBuf> = remote_anim;
                 for dir in [self.hovered.as_ref(), self.selected.as_ref()]
                     .into_iter()
                     .flatten()
@@ -505,7 +545,11 @@ impl App {
         self.previews.evict();
     }
 
-    fn toast(&mut self, text: impl Into<String>, error: bool) {
+    pub(crate) fn bump_library(&mut self) {
+        self.library_gen += 1;
+    }
+
+    pub(crate) fn toast(&mut self, text: impl Into<String>, error: bool) {
         self.toasts.push(Toast {
             text: text.into(),
             error,
@@ -513,7 +557,7 @@ impl App {
         });
     }
 
-    fn save_cfg(&mut self) {
+    pub(crate) fn save_cfg(&mut self) {
         self.cfg.targets = self.targets.iter().cloned().collect();
         self.cfg.save();
     }
@@ -673,6 +717,10 @@ impl App {
                         self.library = Some(lib);
                     }
                     self.library_gen += 1;
+                    self.ws_mark_new_since_last_session();
+                    if self.page == Page::Workshop {
+                        self.ws_refresh();
+                    }
                 }
                 ScanEvent::Resolutions(found) => {
                     if let Some(lib) = &mut self.library {
@@ -712,8 +760,10 @@ impl App {
             Message::Tick => {}
             // Only there to keep frames coming while a micro-animation runs.
             Message::Frame => {}
+            Message::Ws(m) => return self.ws_update(m),
             Message::Housekeeping(now) => {
                 self.toasts.retain(|t| t.until > now);
+                let ws_task = self.ws_housekeeping(now);
                 if let Some((at, dir)) = self.save_at.clone()
                     && now >= at
                 {
@@ -724,7 +774,7 @@ impl App {
                         }
                     }
                 }
-                return self.check_screenshot();
+                return Task::batch([ws_task, self.check_screenshot()]);
             }
             Message::Key(key, mods) => return self.on_key(key, mods),
             Message::Window(id, ev) => match ev {
@@ -740,6 +790,10 @@ impl App {
                 window::Event::Unfocused => self.focused = false,
                 window::Event::CloseRequested => {
                     self.cfg.window = Some([self.window.width, self.window.height]);
+                    self.cfg.last_session = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs());
                     self.daemon.want_stats(false);
                     self.save_cfg();
                     return window::close(id);
@@ -770,6 +824,16 @@ impl App {
             }
 
             Message::Nav(page) => {
+                if self.page == Page::Workshop && page != Page::Workshop {
+                    self.ws_leave();
+                }
+                if page == Page::Workshop && self.page != Page::Workshop {
+                    let open = self.ws.selected.is_some();
+                    self.panel = Animation::new(open).duration(Duration::from_millis(220));
+                } else if page == Page::Library && self.page != Page::Library {
+                    let open = self.selected.is_some();
+                    self.panel = Animation::new(open).duration(Duration::from_millis(220));
+                }
                 self.page = page;
                 self.viewport = None;
             }
@@ -846,6 +910,27 @@ impl App {
                 }
             }
             Message::ClosePanel => self.select(None),
+            Message::ApplyDir(dir) => {
+                let outs = self.apply_targets();
+                self.apply(&dir, outs);
+            }
+            Message::ShowInLibrary(dir) => {
+                if self.page == Page::Workshop {
+                    self.ws_leave();
+                }
+                self.page = Page::Library;
+                self.search.clear();
+                self.panel =
+                    Animation::new(self.selected.is_some()).duration(Duration::from_millis(220));
+                self.select(Some(dir.clone()));
+                if let Some(i) = self.library.as_ref().and_then(|l| {
+                    self.filtered
+                        .iter()
+                        .position(|&i| l.wallpapers[i].dir == dir)
+                }) {
+                    return self.ensure_visible(i);
+                }
+            }
             Message::Apply => {
                 if let Some(dir) = self.selected.clone() {
                     let outs = self.apply_targets();
@@ -1020,9 +1105,18 @@ impl App {
     fn on_key(&mut self, key: keyboard::Key, mods: keyboard::Modifiers) -> Task<Message> {
         use keyboard::key::Named;
         match key.as_ref() {
-            keyboard::Key::Character("f") if mods.command() => {
+            keyboard::Key::Character("f") if mods.command() && self.page != Page::Workshop => {
                 self.page = Page::Library;
                 return operation::focus(Id::new(SEARCH_ID));
+            }
+            keyboard::Key::Named(Named::Escape) if self.page == Page::Workshop => {
+                if !self.ws.search_input.is_empty() {
+                    return self.ws_update(crate::workshop::state::WsMsg::Search(String::new()));
+                }
+                return self.ws_update(crate::workshop::state::WsMsg::Close);
+            }
+            keyboard::Key::Character("f") if mods.command() && self.page == Page::Workshop => {
+                return operation::focus(Id::new("ws-search"));
             }
             keyboard::Key::Named(Named::Escape) => {
                 if self.drag.take().is_some() {
@@ -1070,8 +1164,8 @@ impl App {
             && (!self.daemon.is_online()
                 || self.daemon.stats.is_some()
                 || started.elapsed() > Duration::from_secs(4));
-        if (settled && started.elapsed() > Duration::from_millis(1800))
-            || started.elapsed() > Duration::from_secs(15)
+        if (settled && started.elapsed() > self.screenshot_delay)
+            || started.elapsed() > self.screenshot_delay.max(Duration::from_secs(15))
         {
             self.screenshot = Some((path, started, true));
             return window::latest()
@@ -1098,6 +1192,22 @@ impl App {
         if let Some(tick) = self.anim_tick {
             subs.push(time::every(tick).map(|_| Message::Tick));
         }
+        // The Workshop network worker exists only while its page is shown.
+        if self.page == Page::Workshop {
+            subs.push(
+                crate::workshop::state::worker()
+                    .map(|e| Message::Ws(crate::workshop::state::WsMsg::Worker(e))),
+            );
+        }
+        // New subscriptions arrive through file events, on every page.
+        if let Some(lib) = &self.library
+            && !lib.steam.workshop_dirs.is_empty()
+        {
+            subs.push(
+                crate::workshop::watch::subscription(lib.steam.workshop_dirs.clone())
+                    .map(|e| Message::Ws(crate::workshop::state::WsMsg::Watch(e))),
+            );
+        }
         let now = Instant::now();
         if self.hover_in.is_animating(now)
             || self.hover_out.is_animating(now)
@@ -1105,7 +1215,11 @@ impl App {
         {
             subs.push(window::frames().map(|_| Message::Frame));
         }
-        if !self.toasts.is_empty() || self.save_at.is_some() || self.screenshot.is_some() {
+        if !self.toasts.is_empty()
+            || self.save_at.is_some()
+            || self.screenshot.is_some()
+            || self.ws.wants_timer()
+        {
             subs.push(time::every(Duration::from_millis(250)).map(Message::Housekeeping));
         }
         // Pointer tracking only while a card is pressed (possible drag).
