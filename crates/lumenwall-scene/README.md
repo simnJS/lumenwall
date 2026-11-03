@@ -84,6 +84,9 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
   `{"user": …}` constant) and replaces a `constantshadervalues` entry of the same name. Unknown
   properties are a warning. Used by eagleflag (flag colours), neon_sunset, shimmering_particles
   (particle materials, read by `lumenwall-engine`).
+- A quoted `bool` (`"true"`, `"1"` → true, other text → false) or quoted number on a `slider`
+  property value is read like override text instead of failing the load: Wallpaper Engine
+  ships such a `project.json` (the default web wallpaper corsair_o_tron).
 - Object `dependencies` also accept objects `{ "id", "index", "type" }` (written by Wallpaper Engine for particle links, spec 05 A7.8): their `id` is used as the dependency (strict integer); `index` and `type` are not kept. Spec 02 §7.2 only describes integers.
 - Spec ambiguity: §13.3 says "group" scale/angles for types other than image and text, while §7.2 says particles use their re-read settings. Particles use their own settings (§7.2).
 - A passthrough image with at least one effect is created even when all its effects are hidden at setup. `ImagePasses::draws` is then false (nothing drawn), so it can appear when an effect becomes visible.

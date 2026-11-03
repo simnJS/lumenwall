@@ -63,10 +63,13 @@ impl Wallpaper {
                 "'{}' is a video wallpaper: this build has no video support (lumenwall-video without FFmpeg)",
                 self.project.title
             )),
-            ProjectKind::Web => Err(format!(
-                "'{}' is a web wallpaper: web wallpapers are not integrated yet (lumenwall-web)",
-                self.project.title
-            )),
+            ProjectKind::Web => match crate::web::unsupported_reason() {
+                None => Ok(()),
+                Some(reason) => Err(format!(
+                    "'{}' is a web wallpaper: {reason}",
+                    self.project.title
+                )),
+            },
         }
     }
 

@@ -8,20 +8,47 @@ use std::time::{Duration, Instant};
 use cef::*;
 
 use super::{PAGE_MESSAGE, RELEASED_MESSAGE, Shared, UiAction};
-use crate::ipc::{FrameInfo, HostEvent, PixelFormat, PlaneInfo};
+use crate::ipc::{FrameInfo, HostEvent, PixelFormat};
 
 /// Longest time the browser's paint is held waiting for the main process to copy a frame.
 pub const FRAME_RELEASE_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Set to print the page's console messages on standard error (debugging wallpapers).
+pub const CONSOLE_ENV: &str = "LUMENWALL_WEB_CONSOLE";
+
 pub fn build_client(shared: Arc<Shared>) -> Client {
+    let console = std::env::var_os(CONSOLE_ENV).is_some_and(|v| v != "0");
     LumenClient::new(
         LumenRenderHandler::new(shared.clone()),
         LumenLifeSpanHandler::new(shared.clone()),
         LumenLoadHandler::new(shared.clone()),
         LumenRequestHandler::new(shared.clone()),
         LumenAudioHandler::new(shared.clone()),
+        console.then(|| LumenDisplayHandler::new(0)),
         shared,
     )
+}
+
+wrap_display_handler! {
+    pub struct LumenDisplayHandler {
+        _unused: u8,
+    }
+
+    impl DisplayHandler {
+        fn on_console_message(
+            &self,
+            _browser: Option<&mut Browser>,
+            _level: LogSeverity,
+            message: Option<&CefString>,
+            source: Option<&CefString>,
+            line: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            let message = message.map(|m| m.to_string()).unwrap_or_default();
+            let source = source.map(|s| s.to_string()).unwrap_or_default();
+            eprintln!("web console: {message} ({source}:{line})");
+            1
+        }
+    }
 }
 
 wrap_client! {
@@ -31,10 +58,15 @@ wrap_client! {
         load: LoadHandler,
         request: RequestHandler,
         audio: AudioHandler,
+        display: Option<DisplayHandler>,
         shared: Arc<Shared>,
     }
 
     impl Client {
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            self.display.clone()
+        }
+
         fn render_handler(&self) -> Option<RenderHandler> {
             Some(self.render.clone())
         }
@@ -114,13 +146,29 @@ wrap_render_handler! {
         fn on_paint(
             &self,
             _browser: Option<&mut Browser>,
-            _type_: PaintElementType,
+            type_: PaintElementType,
             _dirty_rects: Option<&[Rect]>,
-            _buffer: *const u8,
-            _width: ::std::os::raw::c_int,
-            _height: ::std::os::raw::c_int,
+            buffer: *const u8,
+            width: ::std::os::raw::c_int,
+            height: ::std::os::raw::c_int,
         ) {
-            // Only called when GPU compositing is unavailable.
+            if type_ != PaintElementType::from(sys::cef_paint_element_type_t::PET_VIEW) {
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            if self.shared.params.transport == crate::ipc::FrameTransport::Memory {
+                if buffer.is_null() || width <= 0 || height <= 0 {
+                    return;
+                }
+                let len = width as usize * height as usize * 4;
+                // SAFETY: CEF passes a BGRA buffer of width × height pixels (stride width × 4),
+                // valid for the duration of the callback.
+                let pixels = unsafe { std::slice::from_raw_parts(buffer, len) };
+                forward_memory_frame(&self.shared, pixels, width as u32, height as u32);
+                return;
+            }
+            let _ = (buffer, width, height);
+            // Shared textures requested but GPU compositing is unavailable.
             if !self.shared.software_warned.swap(true, Ordering::Relaxed) {
                 self.shared.send_event(&HostEvent::Error {
                     message: "browser fell back to software painting; shared textures unavailable".into(),
@@ -163,6 +211,7 @@ fn forward_frame(shared: &Shared, info: &AcceleratedPaintInfo) {
         modifier: 0,
         planes: Vec::new(),
         handle: 0,
+        memory: false,
     };
 
     #[cfg(unix)]
@@ -178,7 +227,7 @@ fn forward_frame(shared: &Shared, info: &AcceleratedPaintInfo) {
         frame.modifier = info.modifier;
         frame.planes = planes
             .iter()
-            .map(|p| PlaneInfo {
+            .map(|p| crate::ipc::PlaneInfo {
                 offset: p.offset,
                 stride: p.stride,
                 size: p.size,
@@ -203,9 +252,61 @@ fn forward_frame(shared: &Shared, info: &AcceleratedPaintInfo) {
         shared.send_frame(&HostEvent::Frame(frame), &[])
     };
 
-    if !sent {
-        return;
+    if sent {
+        wait_release(shared, id);
     }
+}
+
+/// Software painting: copies the pixels into the shared memory buffer, sends it and waits for
+/// the main process to upload it (the next paint overwrites the same buffer).
+#[cfg(target_os = "linux")]
+fn forward_memory_frame(shared: &Shared, pixels: &[u8], width: u32, height: u32) {
+    use std::os::fd::AsFd;
+    let Ok(mut memory) = shared.memory.lock() else {
+        return;
+    };
+    if memory.as_ref().is_none_or(|m| m.len() != pixels.len()) {
+        *memory = None;
+        match super::memory::SharedPixels::new(pixels.len()) {
+            Ok(m) => *memory = Some(m),
+            Err(e) => {
+                if !shared.software_warned.swap(true, Ordering::Relaxed) {
+                    shared.send_event(&HostEvent::Error {
+                        message: format!("shared memory for frames: {e}"),
+                    });
+                }
+                return;
+            }
+        }
+    }
+    let Some(buffer) = memory.as_mut() else {
+        return;
+    };
+    buffer.as_mut_slice().copy_from_slice(pixels);
+    let id = shared.next_frame.fetch_add(1, Ordering::Relaxed) + 1;
+    let frame = FrameInfo {
+        id,
+        width,
+        height,
+        visible: [0, 0, width as i32, height as i32],
+        format: PixelFormat::Bgra8,
+        modifier: 0,
+        planes: vec![crate::ipc::PlaneInfo {
+            offset: 0,
+            stride: width * 4,
+            size: pixels.len() as u64,
+        }],
+        handle: 0,
+        memory: true,
+    };
+    if shared.send_frame(&HostEvent::Frame(frame), &[buffer.fd().as_fd()]) {
+        wait_release(shared, id);
+    }
+}
+
+/// Holds the browser (UI thread) until the main process released frame `id`, at most
+/// [`FRAME_RELEASE_TIMEOUT`].
+fn wait_release(shared: &Shared, id: u64) {
     let Ok(releases) = shared.releases.lock() else {
         return;
     };

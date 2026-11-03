@@ -15,7 +15,11 @@
 //!   --no-particles     particle systems are not created
 //!   --debug VALUE      render debug switch (repeatable): base-only | pass-log |
 //!                      no-solid-final | object=<id> | skip-object=<id> | skip-effect=<id>
+//!   --pointer X,Y      pointer in output pixels from the top-left corner (default: none)
 //! ```
+//!
+//! Web wallpapers run in real time: frame `i` is taken `1 + i / fps` seconds after the page
+//! painted its first frame (`lumenwall-web-host` must be built, see lumenwall-web's README).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -62,6 +66,14 @@ fn main() {
                 props.insert(k.to_owned(), v.to_owned());
             }
             "--assets" => assets = Some(PathBuf::from(val())),
+            "--pointer" => {
+                let v = val();
+                if let Some((x, y)) = v.split_once(',')
+                    && let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse())
+                {
+                    opts.pointer = Some(glam::Vec2::new(x, y));
+                }
+            }
             "--software" => opts.software = true,
             "--no-particles" => opts.particles = false,
             "--debug" => {

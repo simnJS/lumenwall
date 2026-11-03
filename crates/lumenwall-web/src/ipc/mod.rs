@@ -46,6 +46,18 @@ pub enum FramePacing {
     Internal,
 }
 
+/// How painted frames travel from the browser to the main process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FrameTransport {
+    /// GPU textures shared by handle (Linux DMA-BUF, Windows NT handle): zero copy.
+    #[default]
+    Gpu,
+    /// Software painting copied into one shared memory buffer (Linux `memfd`), uploaded by the
+    /// main process: the fallback when the GPU texture cannot be imported.
+    Memory,
+}
+
 /// Effective audio state of the page (`--volume`, `--silent`, automute, pause).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioOutput {
@@ -79,6 +91,8 @@ pub struct LaunchParams {
     pub fps: u32,
     #[serde(default)]
     pub pacing: FramePacing,
+    #[serde(default)]
+    pub transport: FrameTransport,
     pub properties: PropertySet,
     #[serde(default)]
     pub audio: AudioOutput,
@@ -231,6 +245,7 @@ mod tests {
             height: 1080,
             fps: 30,
             pacing: FramePacing::External,
+            transport: FrameTransport::Memory,
             properties: PropertySet::new(),
             audio: AudioOutput::default(),
             paused: false,
@@ -273,6 +288,7 @@ mod tests {
                 size: 7680 * 1080,
             }],
             handle: 0,
+            memory: false,
         }));
         roundtrip(HostEvent::MediaListeners {
             listeners: MediaListeners::default(),

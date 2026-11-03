@@ -14,6 +14,8 @@
 mod app;
 mod audio_out;
 mod client;
+#[cfg(target_os = "linux")]
+mod memory;
 mod scheme;
 
 use std::cell::RefCell;
@@ -26,7 +28,7 @@ use cef::*;
 use crate::access::LocalFileAccess;
 use crate::audio::AUDIO_FRAME_LEN;
 use crate::files::{FileService, initial_url, scheme_name};
-use crate::ipc::{AudioOutput, FramePacing, HostCommand, HostEvent, LaunchParams};
+use crate::ipc::{AudioOutput, FramePacing, FrameTransport, HostCommand, HostEvent, LaunchParams};
 use crate::mouse::{MouseButton, MouseInput};
 use crate::process::HOST_ARG;
 use crate::properties::GeneralProperties;
@@ -50,6 +52,9 @@ pub struct Shared {
     software_warned: AtomicBool,
     audio: audio_out::AudioOut,
     audio_channels: AtomicU32,
+    /// Software-painted frames ([`FrameTransport::Memory`]).
+    #[cfg(target_os = "linux")]
+    memory: Mutex<Option<memory::SharedPixels>>,
     params: LaunchParams,
 }
 
@@ -258,8 +263,10 @@ fn execute(browser: &Browser, call: BrowserCall) {
         }
         BrowserCall::MouseMove(x, y, left) => {
             if let Some(host) = host {
+                // The C enum is signed on Windows, unsigned elsewhere.
+                #[allow(clippy::unnecessary_cast)]
                 let modifiers = if left {
-                    sys::cef_event_flags_t::EVENTFLAG_LEFT_MOUSE_BUTTON.0
+                    sys::cef_event_flags_t::EVENTFLAG_LEFT_MOUSE_BUTTON.0 as u32
                 } else {
                     0
                 };
@@ -420,7 +427,9 @@ fn create_browser(shared: &Arc<Shared>) {
     let (width, height) = shared.size();
     let window_info = WindowInfo {
         windowless_rendering_enabled: 1,
-        shared_texture_enabled: 1,
+        // Software painting into shared memory is the fallback when the main process cannot
+        // import the browser's GPU textures.
+        shared_texture_enabled: i32::from(params.transport == FrameTransport::Gpu),
         external_begin_frame_enabled: i32::from(params.pacing == FramePacing::External),
         bounds: Rect {
             x: 0,
@@ -561,6 +570,8 @@ fn host_browser(
         software_warned: AtomicBool::new(false),
         audio: audio_out::AudioOut::new(params.audio),
         audio_channels: AtomicU32::new(0),
+        #[cfg(target_os = "linux")]
+        memory: Mutex::new(None),
         params: params.clone(),
     });
     shared.set_size(params.width.max(1), params.height.max(1));

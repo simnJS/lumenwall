@@ -104,6 +104,9 @@ pub fn render_headless(
     if video {
         return crate::video::render_headless_video(&ctx, &wp, opts, t0);
     }
+    if wp.kind() == lumenwall_scene::ProjectKind::Web {
+        return crate::web::render_headless_web(&ctx, &wp, opts, t0);
+    }
     let mut shaders = default_provider();
     let mut rt = build_scene(
         &ctx,

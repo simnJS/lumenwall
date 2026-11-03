@@ -63,6 +63,10 @@ pub struct FrameInfo {
     pub planes: Vec<PlaneInfo>,
     /// Windows: shared NT handle value in the host process (0 elsewhere).
     pub handle: u64,
+    /// The single plane is a shared memory buffer with the pixels (software painting,
+    /// [`crate::ipc::FrameTransport::Memory`]), not a GPU texture.
+    #[serde(default)]
+    pub memory: bool,
 }
 
 /// A DMA-BUF plane owned by the main process.
@@ -75,6 +79,79 @@ pub struct DmaBufPlane {
     pub size: u64,
 }
 
+#[cfg(unix)]
+impl DmaBufPlane {
+    /// Identity of the buffer behind the descriptor (device, inode): the same for every
+    /// descriptor the host sends for one buffer of the browser's pool, so an import can be
+    /// cached and reused instead of being redone for every frame.
+    pub fn buffer_id(&self) -> std::io::Result<(u64, u64)> {
+        buffer_id(&self.fd)
+    }
+}
+
+/// (device, inode) of an open descriptor.
+#[cfg(unix)]
+pub fn buffer_id(fd: &std::os::fd::OwnedFd) -> std::io::Result<(u64, u64)> {
+    let stat = rustix::fs::fstat(fd)?;
+    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+    Ok((stat.st_dev as u64, stat.st_ino as u64))
+}
+
+/// Read-only mapping of a shared memory frame ([`SharedTexture::Memory`]).
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct MappedMemory {
+    ptr: std::ptr::NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and owned by this value; it is only unmapped on drop.
+#[cfg(unix)]
+unsafe impl Send for MappedMemory {}
+
+#[cfg(unix)]
+impl MappedMemory {
+    /// Maps `len` bytes of `fd` read-only. The host keeps writing into the same buffer between
+    /// frames, so the contents are only stable between a [`SharedFrame`] and its release.
+    pub fn map(fd: &std::os::fd::OwnedFd, len: usize) -> std::io::Result<Self> {
+        use rustix::mm::{MapFlags, ProtFlags, mmap};
+        if len == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "empty mapping",
+            ));
+        }
+        // SAFETY: a fresh shared, read-only mapping chosen by the kernel; it aliases no Rust
+        // object and is unmapped in Drop.
+        let ptr = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                len,
+                ProtFlags::READ,
+                MapFlags::SHARED,
+                fd,
+                0,
+            )?
+        };
+        let ptr = std::ptr::NonNull::new(ptr.cast::<u8>())
+            .ok_or_else(|| std::io::Error::other("null mapping"))?;
+        Ok(Self { ptr, len })
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: `len` readable bytes mapped in `map`, alive until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MappedMemory {
+    fn drop(&mut self) {
+        // SAFETY: the mapping created in `map`, unmapped once.
+        let _ = unsafe { rustix::mm::munmap(self.ptr.as_ptr().cast(), self.len) };
+    }
+}
+
 /// GPU handle of a shared frame, owned by the receiving process.
 #[derive(Debug)]
 pub enum SharedTexture {
@@ -84,6 +161,14 @@ pub enum SharedTexture {
     DmaBuf {
         planes: Vec<DmaBufPlane>,
         modifier: u64,
+    },
+    /// Linux, software painting: pixels in a shared memory buffer (`stride` bytes per row,
+    /// `size` bytes), to map with [`MappedMemory`] and upload.
+    #[cfg(unix)]
+    Memory {
+        fd: std::os::fd::OwnedFd,
+        stride: u32,
+        size: u64,
     },
     /// Windows: NT handle of an `ID3D11Texture2D` created without keyed mutex; open with
     /// `ID3D12Device::OpenSharedHandle` (wgpu DX12) or `ID3D11Device1::OpenSharedResource1`.

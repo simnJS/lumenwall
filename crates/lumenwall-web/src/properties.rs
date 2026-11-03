@@ -313,7 +313,13 @@ fn parse_definition(key: &str, def: &Value) -> Option<UserProperty> {
     let raw = def.get("value");
     let text_of = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_owned();
     let value = match kind {
-        "bool" => PropertyValue::Bool(raw.and_then(Value::as_bool).unwrap_or(false)),
+        "bool" => PropertyValue::Bool(match raw {
+            Some(Value::Bool(b)) => *b,
+            // Quoted booleans exist in shipped wallpapers (corsair_o_tron: `"value": "true"`).
+            Some(Value::String(s)) => s == "true" || s == "1",
+            Some(Value::Number(n)) => n.as_f64().is_some_and(|v| v != 0.0),
+            _ => false,
+        }),
         "slider" => PropertyValue::Slider(match raw {
             Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
             Some(Value::Bool(b)) => f64::from(u8::from(*b)),

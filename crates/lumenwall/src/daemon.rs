@@ -1160,19 +1160,7 @@ fn wallpaper_dir(path: &Path) -> Result<PathBuf, RemoteError> {
             ),
         ));
     }
-    // Web wallpapers are refused here with a clear code; other checks happen in the engine.
-    if let Ok(bytes) = std::fs::read(&project)
-        && let Ok(json) = serde_json::from_slice::<serde_json::Value>(strip_bom(&bytes))
-        && json
-            .get("type")
-            .and_then(|t| t.as_str())
-            .is_some_and(|t| t.eq_ignore_ascii_case("web"))
-    {
-        return Err(RemoteError::new(
-            ErrorCode::UnsupportedWallpaper,
-            "web wallpapers are not supported yet",
-        ));
-    }
+    // Scene, video and web wallpapers: the engine checks what this build can show.
     Ok(dir)
 }
 
@@ -1195,10 +1183,6 @@ fn wallpaper_folder(path: &Path) -> Result<PathBuf, RemoteError> {
             ),
         ))
     }
-}
-
-fn strip_bom(b: &[u8]) -> &[u8] {
-    b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b)
 }
 
 /// Integral numbers without decimals (combo values, `rain = 0`).
@@ -1443,12 +1427,11 @@ mod tests {
             wallpaper_dir(dir.path()).unwrap_err().code,
             ErrorCode::NotFound
         );
+        // Web wallpapers go through like the others (the engine decides).
         std::fs::write(dir.path().join("project.json"), r#"{"type":"web"}"#).unwrap();
         assert_eq!(
-            wallpaper_dir(&dir.path().join("project.json"))
-                .unwrap_err()
-                .code,
-            ErrorCode::UnsupportedWallpaper
+            wallpaper_dir(&dir.path().join("project.json")).unwrap(),
+            dir.path()
         );
         std::fs::write(dir.path().join("project.json"), r#"{"type":"scene"}"#).unwrap();
         assert_eq!(

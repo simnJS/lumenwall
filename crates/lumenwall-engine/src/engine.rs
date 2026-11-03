@@ -36,6 +36,7 @@ use crate::scene::{FrameState, SceneOptions, SceneRuntime, ScreenState, build_sc
 use crate::shaders::default_provider;
 use crate::video::{VideoSlot, notify_from};
 use crate::wallpaper::Wallpaper;
+use crate::web::WebSlot;
 use crate::{WallpaperResolver, cache_dir};
 
 /// Wakes the engine loop from any thread; usable before the platform exists and while the
@@ -122,7 +123,8 @@ struct Output {
     /// The surface must be presented again (resize, first frame).
     dirty: bool,
     frame_requested: bool,
-    /// Video wallpapers: serial of the last presented frame, output image generation bound.
+    /// Video and web wallpapers: serial of the last presented frame, output image
+    /// generation bound.
     shown_serial: u64,
     video_generation: u64,
 }
@@ -138,6 +140,7 @@ struct SceneSlot {
 enum Renderer {
     Scene(Box<SceneSlot>),
     Video(Box<VideoSlot>),
+    Web(Box<WebSlot>),
 }
 
 /// Debug counters (enabled with `LUMENWALL_STATS=1`).
@@ -162,6 +165,7 @@ struct Running {
     outputs: Vec<Output>,
     scenes: Vec<Option<SceneSlot>>,
     videos: Vec<Option<VideoSlot>>,
+    webs: Vec<Option<WebSlot>>,
     compositor: Compositor,
     timer: Option<GpuTimer>,
     /// A timer was requested (unsupported devices are not asked again every frame).
@@ -449,6 +453,7 @@ impl Engine {
             outputs: Vec::new(),
             scenes: (0..self.wallpapers.len()).map(|_| None).collect(),
             videos: (0..self.wallpapers.len()).map(|_| None).collect(),
+            webs: (0..self.wallpapers.len()).map(|_| None).collect(),
             compositor: Compositor::new(&ctx),
             timer,
             timer_tried: stats_enabled,
@@ -491,6 +496,9 @@ impl Engine {
         }
         for v in running.videos.iter().flatten() {
             v.log_stats();
+        }
+        for w in running.webs.iter().flatten() {
+            w.log_stats();
         }
         running.ctx.wait_idle();
         self.waker.detach();
@@ -535,6 +543,7 @@ impl Engine {
                 break Ok(s);
             }
             request_due_videos(r);
+            pump_webs(r);
         };
         if let Some(r) = running.take() {
             self.close_running(r);
@@ -578,6 +587,9 @@ impl Engine {
             for v in r.videos.iter().flatten() {
                 v.player.set_max_fps(self.plan.fps);
             }
+            for w in r.webs.iter_mut().flatten() {
+                w.set_fps(self.plan.fps);
+            }
         }
     }
 
@@ -587,7 +599,14 @@ impl Engine {
         let mut any = false;
         for (i, wp) in self.wallpapers.iter_mut().enumerate() {
             let changed = wp.set_properties(&self.plan.properties);
-            if changed.is_empty() {
+            // Web pages: `applyUserProperties` with the properties whose value changed.
+            let web_changed = r
+                .as_deref_mut()
+                .and_then(|r| r.webs.get_mut(i))
+                .and_then(Option::as_mut)
+                .map(|w| w.set_properties(&self.plan.properties))
+                .unwrap_or_default();
+            if changed.is_empty() && web_changed.is_empty() {
                 continue;
             }
             any = true;
@@ -736,12 +755,17 @@ impl Engine {
             .into_iter()
             .map(Some)
             .collect();
-        let (mut old_scenes, mut old_videos) = match running.as_mut() {
-            Some(r) => (std::mem::take(&mut r.scenes), std::mem::take(&mut r.videos)),
-            None => (Vec::new(), Vec::new()),
+        let (mut old_scenes, mut old_videos, mut old_webs) = match running.as_mut() {
+            Some(r) => (
+                std::mem::take(&mut r.scenes),
+                std::mem::take(&mut r.videos),
+                std::mem::take(&mut r.webs),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
         let mut scenes = Vec::with_capacity(staged.len());
         let mut videos = Vec::with_capacity(staged.len());
+        let mut webs = Vec::with_capacity(staged.len());
         for s in staged {
             match s {
                 Staged::Keep(j) => {
@@ -750,17 +774,20 @@ impl Engine {
                     self.states.push(old_states[j].clone());
                     scenes.push(old_scenes.get_mut(j).and_then(Option::take));
                     videos.push(old_videos.get_mut(j).and_then(Option::take));
+                    webs.push(old_webs.get_mut(j).and_then(Option::take));
                 }
                 Staged::New(wp, renderer) => {
                     log_loaded(&self.plan.targets[self.wallpapers.len()].key, &wp);
                     self.wallpapers.push(*wp);
-                    let (scene, video, state) = match renderer {
-                        Some(Renderer::Scene(s)) => (Some(*s), None, TargetState::Running),
-                        Some(Renderer::Video(v)) => (None, Some(*v), TargetState::Running),
-                        None => (None, None, TargetState::Loading),
+                    let (scene, video, web, state) = match renderer {
+                        Some(Renderer::Scene(s)) => (Some(*s), None, None, TargetState::Running),
+                        Some(Renderer::Video(v)) => (None, Some(*v), None, TargetState::Running),
+                        Some(Renderer::Web(w)) => (None, None, Some(*w), TargetState::Running),
+                        None => (None, None, None, TargetState::Loading),
                     };
                     scenes.push(scene);
                     videos.push(video);
+                    webs.push(web);
                     self.states.push(state);
                 }
             }
@@ -774,8 +801,12 @@ impl Engine {
         for wp in old_wallpapers.iter().flatten() {
             tracing::info!("'{}' released", wp.project.title);
         }
+        for w in old_webs.iter().flatten() {
+            w.log_stats();
+        }
         drop(old_scenes);
         drop(old_videos);
+        drop(old_webs);
         drop(old_wallpapers);
         self.assets = assets;
         let targets_changed = added > 0 || released > 0 || old_plan.targets != self.plan.targets;
@@ -804,8 +835,12 @@ impl Engine {
             {
                 r.scenes = scenes;
                 r.videos = videos;
+                r.webs = webs;
                 // Property values of the reused wallpapers.
                 for (i, wp) in self.wallpapers.iter_mut().enumerate() {
+                    if let Some(w) = r.webs.get_mut(i).and_then(Option::as_mut) {
+                        w.set_properties(&self.plan.properties);
+                    }
                     let changed = wp.set_properties(&self.plan.properties);
                     if let Some(slot) = r.scenes.get_mut(i).and_then(Option::as_mut) {
                         for name in &changed {
@@ -817,6 +852,9 @@ impl Engine {
                     r.surfaces.set_max_fps(self.plan.fps);
                     for v in r.videos.iter().flatten() {
                         v.player.set_max_fps(self.plan.fps);
+                    }
+                    for w in r.webs.iter_mut().flatten() {
+                        w.set_fps(self.plan.fps);
                     }
                 }
                 match surfaces {
@@ -848,6 +886,9 @@ impl Engine {
                         v.set_volume(&r.audio, self.plan.audio.volume);
                     }
                 }
+                for w in r.webs.iter_mut().flatten() {
+                    w.set_audio(&self.plan.audio);
+                }
                 sync_video_pause(r);
             }
         }
@@ -878,7 +919,7 @@ impl Engine {
                 i += 1;
                 continue;
             };
-            if r.scenes[t].is_none() && r.videos[t].is_none() {
+            if r.scenes[t].is_none() && r.videos[t].is_none() && r.webs[t].is_none() {
                 let size = r.outputs[i].size;
                 match build_renderer(
                     r,
@@ -890,6 +931,7 @@ impl Engine {
                 ) {
                     Ok(Renderer::Scene(s)) => r.scenes[t] = Some(*s),
                     Ok(Renderer::Video(v)) => r.videos[t] = Some(*v),
+                    Ok(Renderer::Web(w)) => r.webs[t] = Some(*w),
                     Err(e) => {
                         tracing::error!("{name}: {e}");
                         self.states[t] = TargetState::Error(e);
@@ -899,7 +941,7 @@ impl Engine {
                 }
                 self.states[t] = TargetState::Running;
             }
-            let Some(source) = target_source(&r.videos, &r.scenes, t) else {
+            let Some(source) = target_source(&r.videos, &r.scenes, &r.webs, t) else {
                 i += 1;
                 continue;
             };
@@ -909,7 +951,7 @@ impl Engine {
                 clamp: tplan.clamp,
                 flip_vertical: false,
             };
-            let generation = r.videos[t].as_ref().map_or(0, |v| v.player.generation());
+            let generation = media_generation(r, t);
             let o = &mut r.outputs[i];
             r.compositor
                 .rebind(&r.ctx, &mut o.composer, source, settings);
@@ -1063,6 +1105,9 @@ impl Engine {
                     o.size = physical_size;
                     o.dirty = true;
                     request(r.surfaces.as_mut(), o);
+                    if let Some(w) = r.webs.get_mut(o.target).and_then(Option::as_mut) {
+                        w.resize(physical_size);
+                    }
                 }
                 self.note_output(r, output);
                 self.publish(Some(r), Change::Outputs);
@@ -1105,6 +1150,13 @@ impl Engine {
                     .find(|o| o.id == p.output)
                     .map_or(0.0, |o| f64::from(o.size.1));
                 r.pointer.handle(&p, h);
+                // Web pages get the pointer and its buttons (spec 07 §10.4).
+                if let Some(o) = r.outputs.iter().find(|o| o.id == p.output)
+                    && let Some(w) = r.webs.get_mut(o.target).and_then(Option::as_mut)
+                {
+                    let s = r.pointer.state(o.id, o.size);
+                    w.pointer((s.x, s.y), s.left, s.right, o.size, o.uv);
+                }
                 for o in &mut r.outputs {
                     let uses_pointer = r
                         .scenes
@@ -1147,7 +1199,7 @@ impl Engine {
         };
         let size = info.physical_size;
         let surface = OutputSurface::new(&r.ctx, surface, size).map_err(|e| e.to_string())?;
-        if r.videos[target].is_none() && r.scenes[target].is_none() {
+        if r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none() {
             match build_renderer(
                 r,
                 &mut self.wallpapers[target],
@@ -1161,6 +1213,7 @@ impl Engine {
                     r.videos[target] = Some(*v);
                 }
                 Ok(Renderer::Scene(s)) => r.scenes[target] = Some(*s),
+                Ok(Renderer::Web(w)) => r.webs[target] = Some(*w),
                 Err(e) => {
                     self.states[target] = TargetState::Error(e.clone());
                     return Err(e);
@@ -1168,12 +1221,10 @@ impl Engine {
             }
             self.states[target] = TargetState::Running;
         }
-        let Some(source) = target_source(&r.videos, &r.scenes, target) else {
+        let Some(source) = target_source(&r.videos, &r.scenes, &r.webs, target) else {
             return Ok(());
         };
-        let video_generation = r.videos[target]
-            .as_ref()
-            .map_or(0, |v| v.player.generation());
+        let video_generation = media_generation(r, target);
         let tplan = &self.plan.targets[target];
         let composer = r.compositor.create_output(
             &r.ctx,
@@ -1259,6 +1310,12 @@ impl Engine {
         let target = r.outputs[oi].target;
         if r.videos[target].is_some() {
             if let Some((cpu, gpu)) = render_video(r, oi, start) {
+                self.sample_frame(r, oi, cpu, gpu);
+            }
+            return;
+        }
+        if r.webs[target].is_some() {
+            if let Some((cpu, gpu)) = render_web(r, oi, start) {
                 self.sample_frame(r, oi, cpu, gpu);
             }
             return;
@@ -1470,6 +1527,16 @@ fn build_renderer(
         );
         return Ok(Renderer::Video(Box::new(slot)));
     }
+    if wp.kind() == lumenwall_scene::ProjectKind::Web {
+        let w = waker.clone();
+        let slot = WebSlot::open(&r.ctx, wp, plan, size, Arc::new(move || w.wake()))?;
+        tracing::info!(
+            "web wallpaper '{}' started in {:.0} ms",
+            wp.project.title,
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
+        return Ok(Renderer::Web(Box::new(slot)));
+    }
     // One provider per scene: the shader ids it hands out belong to that scene's builder
     // (translations still come from the on-disk cache).
     let mut shaders = default_provider();
@@ -1513,12 +1580,23 @@ fn build_renderer(
 fn target_source<'a>(
     videos: &'a [Option<VideoSlot>],
     scenes: &'a [Option<SceneSlot>],
+    webs: &'a [Option<WebSlot>],
     t: usize,
 ) -> Option<&'a RenderTarget> {
-    match (&videos[t], &scenes[t]) {
-        (Some(v), _) => Some(v.player.output()),
-        (None, Some(slot)) => Some(slot.runtime.scene.targets().get(slot.runtime.full)),
-        (None, None) => None,
+    match (&videos[t], &scenes[t], &webs[t]) {
+        (Some(v), _, _) => Some(v.player.output()),
+        (None, Some(slot), _) => Some(slot.runtime.scene.targets().get(slot.runtime.full)),
+        (None, None, Some(w)) => Some(w.output()),
+        (None, None, None) => None,
+    }
+}
+
+/// Generation of a video's or web page's output image (0 for scenes).
+fn media_generation(r: &Running, t: usize) -> u64 {
+    match (&r.videos[t], &r.webs[t]) {
+        (Some(v), _) => v.player.generation(),
+        (None, Some(w)) => w.generation(),
+        (None, None) => 0,
     }
 }
 
@@ -1645,6 +1723,17 @@ fn sync_video_pause(r: &mut Running) {
             v.set_paused(paused, &r.audio);
         }
     }
+    for (target, slot) in r.webs.iter_mut().enumerate() {
+        let Some(w) = slot else {
+            continue;
+        };
+        let mut outputs = r.outputs.iter().filter(|o| o.target == target).peekable();
+        let paused = outputs.peek().is_none() || outputs.all(|o| o.paused || o.held);
+        if paused != w.is_paused() {
+            tracing::info!("web page {}", if paused { "paused" } else { "resumed" });
+            w.set_paused(paused);
+        }
+    }
 }
 
 /// Earliest instant a playing video needs a frame, for videos whose outputs have no frame
@@ -1685,6 +1774,111 @@ fn request_due_videos(r: &mut Running) {
             }
         }
     }
+}
+
+/// Copies the frames web pages sent since the last wake-up (each is released to the browser
+/// as soon as its copy completed) and asks the outputs showing them for a frame.
+fn pump_webs(r: &mut Running) {
+    for (target, slot) in r.webs.iter_mut().enumerate() {
+        let Some(w) = slot else {
+            continue;
+        };
+        if w.pump(&r.ctx) {
+            for o in r
+                .outputs
+                .iter_mut()
+                .filter(|o| o.target == target && !o.paused)
+            {
+                request(r.surfaces.as_mut(), o);
+            }
+        }
+    }
+}
+
+/// One frame of a web wallpaper on one output: the page's latest frame, composed like a
+/// scene. Pages listening to audio get the spectrum here, at most once per loop iteration,
+/// and keep frames coming while they listen. Returns the CPU and GPU time when a frame was
+/// presented.
+fn render_web(r: &mut Running, oi: usize, start: Instant) -> Option<(Duration, Option<Duration>)> {
+    let id = r.outputs[oi].id;
+    let target = r.outputs[oi].target;
+    let spectrum = r.audio.spectrum_enabled();
+    let w = r.webs[target].as_mut()?;
+    if w.updated_at != r.iteration {
+        w.updated_at = r.iteration;
+        let time = r.clock.elapsed().as_secs_f64();
+        let dt = if w.last_time == 0.0 {
+            0.0
+        } else {
+            (time - w.last_time) as f32
+        };
+        w.last_time = time;
+        if w.wants_audio_steps(spectrum) {
+            r.audio.update(dt, false);
+            w.audio_step(Instant::now(), r.audio.bands().2);
+        }
+    }
+    let o = &mut r.outputs[oi];
+    let mut measured = None;
+    if o.dirty || o.shown_serial != w.serial {
+        match o.surface.acquire(&r.ctx) {
+            Ok(Some(frame)) => {
+                let mut enc =
+                    r.ctx
+                        .device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("lumenwall.frame.web"),
+                        });
+                if let Some(t) = &mut r.timer {
+                    t.begin(&mut enc);
+                }
+                if o.video_generation != w.generation() {
+                    o.video_generation = w.generation();
+                    let settings = o.composer.settings();
+                    r.compositor
+                        .rebind(&r.ctx, &mut o.composer, w.output(), settings);
+                }
+                let size = frame.size();
+                o.uv = o.composer.update(&r.ctx, size, w.size());
+                r.compositor.encode(
+                    &mut enc,
+                    &o.composer,
+                    frame.view(),
+                    [0.0, 0.0, size.0 as f32, size.1 as f32],
+                    Some(wgpu::Color::BLACK),
+                );
+                if let Some(t) = &mut r.timer {
+                    t.end(&mut enc);
+                }
+                r.ctx.queue().submit(std::iter::once(enc.finish()));
+                if let Some(t) = &mut r.timer {
+                    t.after_submit();
+                }
+                r.surfaces.pre_present(id);
+                frame.present(&r.ctx);
+                o.dirty = false;
+                o.shown_serial = w.serial;
+                r.rendered += 1;
+                let cpu = start.elapsed();
+                let gpu = r.timer.as_mut().and_then(|t| t.poll(&r.ctx));
+                record_stats(&mut r.stats, cpu, gpu, &r.ctx, 0);
+                measured = Some((cpu, gpu));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("output {id}: {e}"),
+        }
+        if r.screenshot
+            .as_ref()
+            .is_some_and(|(_, delay)| r.rendered > u64::from(*delay))
+            && let Some((path, _)) = r.screenshot.take()
+        {
+            write_screenshot(&r.ctx, w.output(), &path);
+        }
+    }
+    if w.wants_audio_steps(spectrum) {
+        request(r.surfaces.as_mut(), o);
+    }
+    measured
 }
 
 /// Asks the platform for a frame, unless one is pending or the output is held by a user

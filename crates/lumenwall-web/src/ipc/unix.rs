@@ -208,6 +208,7 @@ mod tests {
                 size: 32,
             }],
             handle: 0,
+            memory: false,
         });
         let writer = std::thread::spawn(move || {
             tx.send(&HostEvent::Started { pid: 1 }, &[]).unwrap();

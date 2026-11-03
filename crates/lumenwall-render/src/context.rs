@@ -249,6 +249,12 @@ impl GpuContext {
             // Plane views of decoded NV12 images (zero-copy video).
             wanted |= wgpu::Features::TEXTURE_FORMAT_NV12;
         }
+        // DMA-BUF imports (web wallpaper frames shared by the browser). wgpu enables the
+        // extensions whenever the driver has them; the feature only unlocks the import call.
+        #[cfg(unix)]
+        {
+            wanted |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+        }
         let features = available & wanted;
         let caps = GpuCaps {
             bc: features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),

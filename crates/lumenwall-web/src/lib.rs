@@ -30,6 +30,6 @@ pub mod cef_host;
 pub use bridge::BRIDGE_JS;
 pub use files::{FileService, initial_url, scheme_name};
 pub use ipc::frame::{PixelFormat, SharedFrame, SharedTexture};
-pub use ipc::{AudioOutput, FramePacing, HostCommand, LaunchParams};
+pub use ipc::{AudioOutput, FramePacing, FrameTransport, HostCommand, LaunchParams};
 pub use process::{WebEvent, WebHost};
 pub use properties::{PropertySet, PropertyValue, UserProperty};
