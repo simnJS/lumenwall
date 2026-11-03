@@ -27,6 +27,7 @@ pub mod text;
 mod texture;
 mod video;
 mod wallpaper;
+mod web;
 
 use std::path::PathBuf;
 

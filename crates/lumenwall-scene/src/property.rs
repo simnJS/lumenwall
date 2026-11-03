@@ -417,6 +417,9 @@ fn parse_property(
         PropertyKind::Bool => match raw_value {
             None => Value::from_bool(false),
             Some(serde_json::Value::Bool(b)) => Value::from_bool(*b),
+            // Wallpaper Engine accepts quoted booleans (`"value": "true"` in the default web
+            // wallpaper corsair_o_tron); read them like override text.
+            Some(serde_json::Value::String(s)) => Value::from_bool(s == "true" || s == "1"),
             other => return Err(type_err(Expected::Bool, other)).at("value"),
         },
         PropertyKind::Slider { min, max, step } => {
@@ -428,6 +431,10 @@ fn parse_property(
                     Value::from_float(n.as_f64().unwrap_or(0.0) as f32)
                 }
                 Some(serde_json::Value::Bool(b)) => Value::from_float(if *b { 1.0 } else { 0.0 }),
+                // Quoted numbers exist in shipped wallpapers (corsair_o_tron: `"value": "150"`).
+                Some(serde_json::Value::String(s)) if s.trim().parse::<f32>().is_ok() => {
+                    Value::from_float(s.trim().parse::<f32>().unwrap_or(0.0))
+                }
                 other => return Err(type_err(Expected::Float, other)).at("value"),
             }
         }

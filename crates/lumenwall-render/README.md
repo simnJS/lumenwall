@@ -18,7 +18,7 @@ No upstream code, fork or snippet was consulted.
 
 | Module | Content |
 |---|---|
-| `context` | `GpuInstance` (surfaces from raw-window-handle 0.6) → `GpuContext`: Vulkan on Linux, Vulkan then DX12 on Windows (adapter ranking `adapter_rank`), one device for every output, `MemoryHints::MemoryUsage`, optional features `TEXTURE_COMPRESSION_BC`, `ADDRESS_MODE_CLAMP_TO_BORDER`, `DEPTH_CLIP_CONTROL`, `PIPELINE_CACHE`, timestamps. On-disk `PipelineCache` (Vulkan), shared sampler cache, GPU memory and resource counters, uncaptured GPU errors logged instead of aborting. |
+| `context` | `GpuInstance` (surfaces from raw-window-handle 0.6) → `GpuContext`: Vulkan on Linux, Vulkan then DX12 on Windows (adapter ranking `adapter_rank`), one device for every output, `MemoryHints::MemoryUsage`, optional features `TEXTURE_COMPRESSION_BC`, `ADDRESS_MODE_CLAMP_TO_BORDER`, `DEPTH_CLIP_CONTROL`, `PIPELINE_CACHE`, timestamps, `VULKAN_EXTERNAL_MEMORY_DMA_BUF` (Unix: unlocks wgpu-hal's DMA-BUF import for web frames; the extensions are enabled by wgpu whenever the driver has them, so it costs nothing). On-disk `PipelineCache` (Vulkan), shared sampler cache, GPU memory and resource counters, uncaptured GPU errors logged instead of aborting. |
 | `surface` | `OutputSurface`: `PresentMode::Fifo`, opaque alpha, never sRGB (non-sRGB view of an sRGB-only swap chain), occlusion/timeout → skip the frame, lost/outdated → reconfigure. |
 | `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; `VolumeUpload` (3D, uncompressed, all mips) → volume `GpuTexture` (`is_volume`, `depth`); sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. |
 | `targets` | `RenderTargetPool`: RGBA8 UNORM targets, scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. |
@@ -167,7 +167,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 
 ## Not done yet (wired later)
 
-- Text objects (R8 glyph texture, `text_matrix` is ready), web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks). Video wallpapers use `yuv` + `video_device` (lumenwall-video).
+- Text objects (R8 glyph texture, `text_matrix` is ready). Video wallpapers use `yuv` + `video_device` (lumenwall-video). Web wallpapers (lumenwall-engine `web`) import the browser's DMA-BUFs through wgpu-hal into a `RenderTargetPool` target (`resize` + `Compositor::rebind` on size changes).
 - Added for the integration (`lumenwall-engine`): vertex streams for particles (`SceneBuilder::add_stream`, `Geometry::Stream`, `RenderScene::write_stream`, inputs matched by name through `ShaderInterface::vertex_input_names`, never bundled) and puppet meshes (`add_image_with_puppet`, `PuppetGeometry`). A `PuppetGeometry` with one `SkinVertex` per vertex becomes `Geometry::Skinned`: slot 0 and the skin buffer (slot 1) are both bound at the mesh's first vertex, indices drawn with base 0, still bundled. `ImageHandle::puppet_vertices` / `puppet_passes` give the caller the vertex range (CPU skinning through `set_vertices`) and the passes whose `g_Bones` it writes (GPU skinning). The engine supplies the palette; nothing here knows about bones.
 - Real WE shaders: depends on `lumenwall-shader` emitting the binding contract above.
 - Lazy allocation of image B composites when the chain never writes B (memory).

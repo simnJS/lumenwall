@@ -10,10 +10,12 @@ The `lumenwall` binary drives it; `examples/render_png.rs` renders wallpapers of
   bloom, composition, §18 text objects), `specs/02-modele-scene.md` (§7.7 text objects, §12–§14
   through `lumenwall-scene`), `specs/05-particules.md` §12 (vertex formats, uniforms),
   `specs/06-scripting.md` (§1.2, §8, §9, §12, §14 through `lumenwall-script`),
-  `specs/07-plateforme-audio-video-web.md` §1, §4, §9, §11–§13, §18,
+  `specs/07-plateforme-audio-video-web.md` §1, §4, §9, §10.4, §11–§13, §15, §18,
   `specs/08-puppet-squelette.md` §9–§11 (puppet animation, skinning, attachments).
 - The README contracts of the other crates (`lumenwall-render` "Integration contract" first,
-  `lumenwall-script` "Use" and its `SceneHost` trait).
+  `lumenwall-script` "Use" and its `SceneHost` trait, `lumenwall-web` "Main process integration").
+- Web frames: public documentation of wgpu-hal 30 (`vulkan::Device::texture_from_dmabuf_fd`,
+  `wgpu::Device::create_texture_from_hal`).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/TESTING.md`.
 - Text: Wallpaper Engine's own font material (`assets/materials/fonts/basefont.json`, shader
   `font`), the `size`/`padding` values the WE editor writes for text objects and the preview
@@ -50,6 +52,7 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
 | `puppet` | Spec 08 §9 as pure CPU math (public, unit tested with the §10 vectors): `Rig` (bones, inverse bind matrices, rest poses, attachments, animations), `Layer` (clock, loop/mirror/single, ramps), `Puppet::advance` / `evaluate` (sampling, additive/replace blending, `W`, `K`), `write_palette` (`g_Bones`), `skin_vertices` (CPU path), `decompose_attachment`. A module rather than a crate: its state is per-scene runtime state advanced by this crate's frame loop, which will also host the SceneScript bone API; it depends only on `lumenwall-formats` data and `glam`. |
+| `web` | Web wallpapers: `WebSlot` per target (one `lumenwall-web` host process, page at the size of the first output showing it), frames copied into an RGBA8 render target (DMA-BUF imported once per buffer of the browser's pool, one draw that crops to the visible rectangle, wait for that submission, release; shared-memory upload as fallback, restarting the host), composition like a scene, pause/fps/volume/properties/resize/mouse forwarded, spectrum to `wallpaperRegisterAudioListener`, host restarts, `render_headless_web`. |
 | `video` | Video wallpapers: one `lumenwall-video` player per target (zero-copy Vulkan Video on the render device when possible), its sound track through the `lumenwall-audio` player (mapped file, loop, cubic volume, automute), pause with its outputs, frame deadlines for the loop (`Wait::Until`, decoder wake-up through the engine waker). |
 
 ### Frame loop
@@ -117,6 +120,13 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   measurements in `crates/lumenwall-video/README.md`. Engine side: the device gets video decode
   queues when a video is loaded (`ContextOptions::video_decode`), a video target is rendered
   by `render_video` (convert on a new frame, compose per output like a scene).
+- Web wallpapers (`type: web`, needs `lumenwall-web-host` built with the `cef` feature next to
+  `lumenwall`, see `crates/lumenwall-web/README.md`): offscreen Chromium in its own process,
+  frames shared on the GPU and composed on every output with the target's scaling, the Wallpaper
+  Engine web API (`applyUserProperties` with `--set-property` and live changes, `setPaused`,
+  `applyGeneralProperties`, audio listener fed with the spectrum), pointer and buttons, page
+  sound under `--volume`/`--silent`, pause freezing the page, hot switching scene ↔ web through
+  `EngineControl::Reload` (IPC `apply`). Frames and wake-ups only when the page paints.
 - Particles (sprites, trails, ropes), sounds, audio spectrum, automute.
 - SceneScript (see below): property scripts, dynamic text layers, timers, events.
 - Window (`-w XxYxWxH`, or `LUMENWALL_WINDOWED=1` for the 640×480 window), desktop on every output
@@ -136,7 +146,9 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
 | Puppet extras (spec 08 §11) | Bone physics, inverse kinematics, blend rules, blend shapes (`MORPHING`) and `SKINNING_ALPHA` have no known format: not implemented. Particles attached to bones are not wired (images only). The SceneScript bone and layer API waits for `lumenwall-script` integration. |
 | Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumenwall-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
-| Web wallpapers | Load error (`lumenwall-web` not integrated). |
+| Web wallpapers on Windows | Refused (`unsupported_reason`): the Direct3D shared texture import is not written. |
+| Web page audio and automute | `--volume`, `--silent` and pause apply; automute does not (the page's stream comes from the host process, which the detector would count as another application and mute the page in a loop), and that stream can automute the scene sounds of other outputs (spec 07 §15.6). |
+| Web media integration | Listeners register, but no MPRIS / Windows media source feeds them. |
 | `thisScene.createLayer` / `destroyLayer` / `sortLayer` | Neutral results (`undefined` / `false`): layers cannot be added to the render graph after load. Scripts that build layers in `init` (audio visualizers) fail there. |
 | Media events | No media source (MPRIS / Windows media session) yet: `SceneRuntime::media_changed` / `media_status` are the entry points. |
 | Script effects on fixed state | Effect visibility, particle `origin`/`scale`/`angles` (read by `lumenwall-particles` at creation), camera/bloom/clear-colour members: scripts can read and write them, the image is unchanged. |
@@ -277,7 +289,13 @@ cargo run --release -p lumenwall -- -w 0x0x1720x720 3018340632 # borderless wind
 LUMENWALL_WINDOWED=1 cargo run --release -p lumenwall -- 3018340632 # 640x480 window
 LUMENWALL_STATS=1 ...                                          # fps, CPU/GPU ms per frame, memory every 5 s
 cargo run -p lumenwall-engine --example render_png -- --size 1720x720 --frames 60 --save 0,30,59 3018340632
+cargo run --release -p lumenwall-engine --example render_png -- --frames 90 --save 0,45,89 --pointer 1400,300 <web wallpaper>
 ```
+
+Web wallpapers run in real time off screen (frame `i` at `1 + i/fps` s after the first painted
+frame); `--pointer` sends a mouse move, `LUMENWALL_WEB_TEST_AUDIO=1` feeds a synthetic beat to
+pages that listen to audio, `LUMENWALL_WEB_FRAMES=memory` forces the shared-memory frames,
+`LUMENWALL_WEB_CONSOLE=1` prints the page console.
 
 PNG files go to `target/agent-integration/shots/` by default (never into the repository: the
 content is copyrighted, `docs/TESTING.md`).
@@ -307,6 +325,8 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Desktop on DP-4 + DP-5 (2560×1440 each, X11 via XWayland) | 30.0 fps, 1.6 % of one core, RSS 240 MiB (anonymous 49 MiB, the rest is file-backed driver libraries and the mapped `.pkg`), VRAM 268 MiB (nvidia-smi), 127 MiB tracked by lumenwall-render |
 | Fullscreen window on top | paused, 0.2 % of one core (sound thread) |
 | Video wallpaper 3655057993 (4K60 H.264, 30 fps cap), zero copy | 30.0 fps, 2.3–2.6 % of one core, RSS 325 MiB, VRAM 318 MiB; paused: 0.00 % |
+| Web wallpapers in a visible 1920×1080 window (all processes of the instance, details in `crates/lumenwall-web/README.md`) | clock 3044696375: 11.7 % of one core (lumenwall 1.7 %), PSS 493 MiB, VRAM 145 MiB; CORSAIR collection 8.1 %; Corsair-O-Tron 15.9 %; paused 0.5 %. Frame copy 0.33 ms (DMA-BUF), 3.9 ms (shared-memory fallback, ≈ 2× the total CPU). Scene 3018340632 in the same window: 2.2 %, PSS 113 MiB, VRAM 302 MiB |
+| Hot switch over IPC (`apply`) | scene → web 2–3 ms (host started, page painted ≈ 0.4–1 s later), web → scene 96–122 ms (scene load) |
 | Covered output | paused (`OCCLUDED`), no frame |
 | Puppets, 3463520581 at 1920×1080 (16 skeletons, 78 bones, 58 attached objects), 600 frames, particles off | puppet work (clocks, blending, matrices, palettes, attachment chains) **8.5–9 µs CPU per frame**; whole frame CPU 0.37 vs 0.34–0.41 ms and GPU 0.77 vs 0.77–0.79 ms before/after (noise); no allocation per frame (`tests/puppet_alloc.rs`); 5 `BONECOUNT` variants of `genericimage4` compiled once (shader cache) |
 
@@ -348,4 +368,7 @@ Text (release, same machine, `cargo test -p lumenwall-engine --release --test te
   one regeneration per `set_text` change, none for the same string.
 - Spec 08 §10 vectors (V1–V10, GPU palette, two-bone mix, attached child) in `puppet::tests`;
   `tests/puppet_alloc.rs`: the per-frame puppet path allocates nothing.
+- `tests/web_content.rs` (`--ignored`, needs `lumenwall-web-host`, set `LUMENWALL_WEB_HOST`
+  when it is not next to the test binary): the clock 3044696375 renders through the CEF host
+  at the output size; corsair_o_tron loads with its quoted property values.
 - `cargo run -p lumenwall-engine --example render_png -- <ids>`: visual checks.
