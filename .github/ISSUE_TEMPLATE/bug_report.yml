@@ -1,0 +1,114 @@
+name: Bug report
+description: Something renders wrong, crashes, costs too much, or does not start.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please **do not attach Wallpaper Engine or Workshop files** (`.pkg`, `.tex`, someone else's `project.json`): the Workshop ID is enough. Screenshots of the problem are welcome.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. lumen --fps 30 <workshop id>
+        2. Open a fullscreen window
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: workshop
+    attributes:
+      label: Workshop ID(s)
+      description: The number in the Workshop URL (`...filedetails/?id=<this>`), or "own wallpaper" with its type.
+      placeholder: "1234567890"
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Wallpaper type
+      options:
+        - Scene
+        - Video
+        - Web
+        - Not about a specific wallpaper
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Lumen version or commit
+      description: Output of `lumen --version`, or the commit you built (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 26.04 / Arch (2026-11-01) / Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop and compositor, with versions
+      placeholder: "GNOME 50.1 (Mutter) / KDE Plasma 6.5 (KWin) / sway 1.11 / Hyprland 0.52 / Windows Explorer"
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session type
+      description: On Linux, `echo $XDG_SESSION_TYPE`.
+      options:
+        - Wayland
+        - X11
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: On Linux, `vulkaninfo --summary` (deviceName, driverName, driverInfo) or `nvidia-smi`; on Windows, the adapter and driver version from Device Manager.
+      placeholder: "RTX 4080 SUPER, NVIDIA 580.95 / Radeon 780M, Mesa 25.2 RADV / Intel Arc A750"
+    validations:
+      required: true
+  - type: input
+    id: screens
+    attributes:
+      label: Screens
+      description: Number of screens, resolution, refresh rate and scale of each.
+      placeholder: "2 × 2560×1440 165 Hz, scale 1"
+  - type: textarea
+    id: command
+    attributes:
+      label: Command line and configuration
+      description: The `lumen` command you ran and the content of `~/.config/lumen/config.toml` (or `%APPDATA%\Lumen\config.toml`), if any.
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `LUMEN_LOG=debug` and paste the output. For performance problems, add a few lines of `LUMEN_STATS=1`. Remove your user name from paths if you prefer.
+      render: text
+  - type: textarea
+    id: reference
+    attributes:
+      label: How it looks in Wallpaper Engine
+      description: For rendering differences, what the wallpaper looks like or does in Wallpaper Engine (a description or a screenshot).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I own Wallpaper Engine and the wallpaper was installed by Steam (or it is my own wallpaper).
+          required: true
+        - label: I searched the existing issues.
+          required: true
