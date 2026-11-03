@@ -7,13 +7,20 @@
 //! - [`parse_model`]: the whole file (spec 08): structured mesh with bone weights, skeleton
 //!   (`MDLS`), attachment points (`MDAT`), animations (`MDLA`) and editor pose (`MDLE`),
 //!   falling back to the heuristic for layouts other than the observed puppet one.
+//! - [`parse_static_model`]: static models of 3D model objects (spec 09 §1.10), versions
+//!   `0004`, `0014`, `0017`, `0023`, several meshes and skins, raw interleaved vertices.
 
 mod model;
+mod static_model;
 
 pub use model::{
     Animation, AnimationMode, Attachment, Bone, BoneBox, BoneSample, MdlWarning,
     PUPPET_VERTEX_FORMAT, PartRange, PuppetModel, SectionInfo, Skeleton, SkeletonEditorData,
     VertexSkin, parse_model,
+};
+pub use static_model::{
+    StaticMesh, StaticModel, StaticModelError, VertexFormatError, VertexLayout, parse_static_model,
+    vertex_format,
 };
 
 use thiserror::Error;

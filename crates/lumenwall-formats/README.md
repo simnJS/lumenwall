@@ -1,11 +1,12 @@
 # lumenwall-formats
 
-Readers for Wallpaper Engine binary formats: `.pkg` archives, `.tex` textures, `MDLV` puppets (mesh, skeleton, attachments, animations).
+Readers for Wallpaper Engine binary formats: `.pkg` archives, `.tex` textures, `MDLV` puppets (mesh, skeleton, attachments, animations) and static 3D models.
 
 ## Sources (clean room)
 
 - `specs/01-formats-binaires.md` §0–§3, §6, fixtures §7 (F1–F11), open questions §8, amendments A.1–A.5 (2026-11-03).
 - `specs/08-puppet-squelette.md` §0–§8 and §10 (structured `.mdl` reader, fixture F-P1 and its variants, F-P2).
+- `specs/09-scenes-3d.md` §1.10 and §4.1–§4.4, §4.7 (static `.mdl` reader, fixtures F-3D1 to F-3D3 and their variants, installed models).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`.
 - Public documentation of `memmap2`, `lz4_flex`, `bcdec_rs`, `image`, `serde_json`, and Adobe's public PSD file format documentation (section layout only).
 - Real Wallpaper Engine files, used only as test input (`docs/TESTING.md`, ignored tests, nothing copied).
@@ -21,8 +22,9 @@ Readers for Wallpaper Engine binary formats: `.pkg` archives, `.tex` textures, `
 | Embedded images | Content sniffing (A.2): PNG (1–16 bits, grey, grey + alpha, RGB, RGBA, palette, `tRNS`, Adam7; 16 bits keep the high byte; no gamma/ICC) and baseline/progressive JPEG via `image`; GIF (first frame), BMP, TGA; optional HDR and PNM; PSD composite through an in-crate decoder (`tex/psd.rs`: RGB, 8/16 bits, raw or PackBits RLE, up to 16 channels, white matte removal). |
 | BCn fallback | `PreparedTexture::requires_cpu_decode` / `decode_compressed` (slice by slice for volumes), `decode_block_compressed` (bcdec_rs). |
 | `mdl` | `parse_puppet`: the spec 01 §3.1 heuristic, byte for byte (unchanged). `parse_model` (spec 08): structured `MDLV0023` mesh when the layout is the observed puppet one (`nm` = 1, `vf` = `0x0180000F`), else the heuristic with weights read at +40/+56 (§2.8); per-vertex `VertexSkin` (normal, tangent, bone indices, weights); mesh tail (layout positions, part ranges); section chain of §3 (`SectionInfo`); `MDLS0004` bones (parents, local rest `mat4`) and editor data; `MDAT0001` attachments; `MDLA0006` animations (id, name, `loop`/`mirror`/`single`, fps, N, one track of N + 1 samples per bone); `MDLE0002` editor pose. Every §8 failure is a `MdlWarning` (section + absolute offset) that drops only its section; a weight on a missing bone rejects the skeleton. |
+| `mdl` (3D) | `parse_static_model` (spec 09 §1.10): `MDLV` + any 4 digits (`0004`, `0014`, `0017`, `0023` observed, others tried with the same thresholds and a warning), `S` skins (one material path per skin and mesh, `StaticModel::material` falls back to skin 0), several meshes, bounding box and per-mesh `vf` from `N ≥ 17`, mesh tail skipped from `N ≥ 23`, the spec 08 §3 section chain (shared with `parse_model`). `VertexLayout`: field offsets of the format word in table order (position, normal, tangent, joints, weights, UV or the two UV sets of bit `0x20`); unknown bits, `0x8` with `0x20` and a missing position are refused. Vertices stay **raw interleaved bytes** (uploaded as is) with typed accessors (`position`, `normal`, `tangent`, `uv`, `uv4`). Every failure is a `StaticModelError` with mesh, offset and cause. |
 
-Tests: fixtures F1–F11 with their variants (`tests/fixtures.rs`), F-P1 of spec 08 (SHA-256 checked against the spec) with its seven negative variants and the `mirror`/`single` versions (`tests/puppet.rs`), A.2 image variants built byte by byte (`tests/embedded.rs`), proptest fuzzing on random and mutated `.pkg`, `.tex`, PNG, PSD and puppet inputs, including random section contents behind a valid mesh (`tests/fuzz.rs`; `PROPTEST_CASES=300000` on a **debug** build, so overflows panic), real content (`tests/real_data.rs`, `tests/puppet.rs`, `--ignored`: the 8 puppets of 3463520581 match F-P2 with no warning and the same mesh both ways; the 28 static models of the installation have no section).
+Tests: fixtures F1–F11 with their variants (`tests/fixtures.rs`), F-P1 of spec 08 (SHA-256 checked against the spec) with its seven negative variants and the `mirror`/`single` versions (`tests/puppet.rs`), A.2 image variants built byte by byte (`tests/embedded.rs`), proptest fuzzing on random and mutated `.pkg`, `.tex`, PNG, PSD and puppet inputs, including random section contents behind a valid mesh (`tests/fuzz.rs`; `PROPTEST_CASES=300000` on a **debug** build, so overflows panic), real content (`tests/real_data.rs`, `tests/puppet.rs`, `--ignored`: the 8 puppets of 3463520581 match F-P2 with no warning and the same mesh both ways; the 28 static models of the installation have no section). Static models (`tests/static_model.rs`): F-3D1, F-3D2 and F-3D3 rebuilt byte by byte and checked against the SHA-256 printed in spec 09 (test-local FIPS 180-4 implementation, no new dependency), the seven F-3D1 variants of §4.4, an `MDLV0023` tail case, and with `--ignored` the 28 installed models of §4.7 (version, skins, format, vertex and index counts per mesh, end of reading, F-3D-R1 winding, inward sphere normals, top-left UV origin, `grid` skin 1); `tests/fuzz.rs` also runs the static reader on random, prefixed and mutated inputs.
 
 Benchmarks (`cargo bench -p lumenwall-formats`, dev machine, release):
 
@@ -46,6 +48,7 @@ Real content: the reference `scene.pkg` (70 entries) opens in about 30 µs. Its 
 - Anisotropy is 8 for linear filtering and 1 for nearest (wgpu refuses anisotropy with nearest filters).
 - PSD 16-bit RLE is decoded too (A.2 only guarantees 16-bit without compression).
 - Puppets (spec 08): a structured `MDLV0023` read whose tail flags are neither 0 nor 1 falls back to the heuristic; a layout block whose size is not `12 × nv` is ignored with a warning; a second `MDLS` section is ignored; an `MDLE` whose matrix count differs from the bone count is dropped. Names are read as UTF-8 (invalid bytes become U+FFFD).
+- Static models (spec 09): a vertex format without the position bit is refused like an unknown bit (the spec only lists unknown bits and `0x8` + `0x20`). Spec 09 §1.10 counts 29 installed `.mdl` files; its table, and the installation, have 28.
 - `UploadOptions::extended_formats` (off by default) maps RGB888 and RGB565 (CPU expansion), RG1616f, R16f, RGBA16161616f, RGB161616f, BC7, RGBA1010102 and WEBP images instead of failing.
 
 ## Not implemented (optional in A.2)

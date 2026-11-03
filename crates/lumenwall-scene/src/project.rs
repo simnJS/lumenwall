@@ -80,7 +80,8 @@ impl LoadContext {
             path: PROJECT_FILE.into(),
             source,
         })?;
-        let raw: RawProject<'_> = parse_doc(PROJECT_FILE, &bytes)?;
+        let mut scratch = None;
+        let raw: RawProject<'_> = parse_doc(PROJECT_FILE, &bytes, &mut scratch)?;
         // The counter moves for every project, with or without `workshopid` (§2.2).
         self.last_id = self.last_id.wrapping_sub(1);
         let kind = project_kind(&raw)?;
@@ -102,6 +103,7 @@ impl LoadContext {
                 },
                 warnings: &mut project.warnings,
                 arenas: &mut arenas,
+                model_states: false,
             };
             project.scene = Some(loader.load_scene(&file)?);
         }

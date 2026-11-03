@@ -200,6 +200,9 @@ fn all_workshop_scenes_load_and_build() {
                             ObjectKind::Sound(_) => "sound",
                             ObjectKind::Particle(_) => "particle",
                             ObjectKind::Text(_) => "text",
+                            ObjectKind::Model3d(_) => "model",
+                            ObjectKind::Light(_) => "light",
+                            ObjectKind::Sprite(_) => "sprite",
                             ObjectKind::Generic(_) => "generic",
                         };
                         *kinds.entry(k).or_default() += 1;

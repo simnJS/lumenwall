@@ -43,13 +43,14 @@ pub use context::{ContextOptions, GpuCaps, GpuContext, GpuInstance};
 pub use dynbuf::{FrameInputs, UniformSlot};
 pub use error::{RenderError, Result};
 pub use graph::{
-    Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding,
-    StreamAttribute, StreamId, StreamLayout, TextureId, TextureRef,
+    DEPTH_FORMAT, DepthState, Geometry, MeshAttribute, MeshId, MeshLayout, Op, PassDesc, PassId,
+    RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding, StreamAttribute, StreamId,
+    StreamLayout, TextureId, TextureRef,
 };
 pub use headless::HeadlessOutput;
 pub use image::{
-    ImageFrame, ImageHandle, ImagePass, ImageSpec, PuppetGeometry, SlotSource, add_image,
-    add_image_with_puppet,
+    ImageFrame, ImageHandle, ImageOptions, ImagePass, ImageSpec, PuppetGeometry, SlotSource,
+    add_image, add_image_with_options, add_image_with_puppet,
 };
 pub use math::{SkinVertex, UvRange, Vertex};
 pub use shader::ShaderDesc;

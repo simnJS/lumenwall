@@ -6,6 +6,7 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 
 - `specs/03-shaders.md` (whole document), `specs/02-modele-scene.md` §9–§12 (material passes, overrides, combos, constants, texture maps).
 - `specs/01-formats-binaires.md` amendment A.1 (volume textures, for `sampler3D` slots).
+- `specs/09-scenes-3d.md` §0.3, §1.12, §2.10 (3D shaders: `HLSL` combo, varyings of `generic`).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`.
 - Binding contract of `crates/lumenwall-render/README.md` ("Integration contract" > "Shaders").
 - Public documentation only: Khronos GLSL 4.50 / Vulkan GLSL, naga and wgpu API docs. No upstream code was read.
@@ -53,6 +54,8 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 
 Dialect macros (§3.3) are textual macros with C semantics in the assembled header: `mul`, swapped `max`, `lerp`, `frac`, `saturate`, `CAST2/3/4/3X3`, `float2…4`, `int2…4`, `texSample2D(Lod)`, `log10`, `atan2`, `fmod`, `ddx`, `ddy`, `GLSL` (`compat_macros`). Not in §3.3: `texSample3D(Lod)`, the volume lookup of `ccsimple.frag` (superset). Includes, `#require LightingV1`, combos, annotations, workshop/zcompat substitution and the virtual `commands/copy` shader have unit tests.
 
+`#require LightingV1` (spec 09 §2.4): when `ComputePBRLightShadow` (`common_pbr_2.h`) appears earlier in the unit, the module is the sum of `ComputePBRLightShadow` over four engine lights, `uniform vec4 g_LumenLightPosition[4]` (position, exponent) and `g_LumenLightColor[4]` (colour × intensity, radius; radius 0 = unused), shadow factor 1; rim lighting, toon gradient and double-sided lighting stay inside WE's own function. Passes the engine does not feed read zeros, so their result is 0 like the reference's module (still used when the helpers are absent).
+
 ## Decisions on the open questions (spec 03 §17)
 
 | Q | Decision | Policy |
@@ -73,6 +76,7 @@ Dialect macros (§3.3) are textual macros with C semantics in the assembled head
 
 ## Deviations
 
+- §9.1 widening (spec 09, 3D shaders): a vertex unit that declares `varying vec4 NAME` in one conditional branch and `varying vec2 NAME` in another (`generic.vert` with `LIGHTMAP`, `genericimage2.vert` with `PBRMASKS`) is left alone. The textual rule would wrap its vec4 assignments as `vec4(vec4, 0.0, 1.0)`, which no compiler accepts (`generic` with `LIGHTMAP` could not compile); both units already agree in every combo. The output of `genericimage2` is unchanged (its vertex unit only writes swizzles). 3D passes get `HLSL` = 1 from the engine as an override combo (spec 09 §0.3).
 - Objects the reference abandons are kept when the cause is data, not code (policy 2): `[COMBO]` without `combo` (ignored) or with a non-integer default (truncated), malformed vector defaults (missing components 0, a number is broadcast), missing defaults (0), non-numeric `float`/`int` string defaults (0). Each case is a warning in `PassShader::warnings`.
 - Supersets of the reference language (never change a shader the reference accepts): `int → uint` in assignments, GLSL 4.00 tie-break when two strict candidates exist, `texture2D`/`texture2DLod`, integer `in` redeclarations of `gl_InstanceID`/`gl_VertexID`, global initialisers that are not constant (run at the start of `main`).
 - `sampler3D` slots are bound as `texture3D` + sampler (spec 03 §8.1 binds 2D textures only, and the reference cannot load the volume textures they read, spec 01 A.1): the colour LUT of `ccsimple` works instead of failing (policy 4).

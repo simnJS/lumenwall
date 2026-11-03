@@ -106,7 +106,15 @@ pub fn widen_vertex_varyings(vertex: &str, fragment: &str) -> String {
         .collect();
     let mut out = vertex.to_string();
     for name in wide {
-        let decls: Vec<_> = varying_decls(&out)
+        let all = varying_decls(&out);
+        // Lumenwall: a vertex unit that also declares `varying vec4 NAME` (in another
+        // conditional branch, e.g. `generic.vert` with `LIGHTMAP`) already matches the fragment
+        // in every combo; widening its `vec2` branch would wrap vec4 expressions as
+        // `vec4(vec4, 0, 1)` (spec 03 §9.1 is textual), which no compiler accepts.
+        if all.iter().any(|d| d.0 == "vec4" && d.1 == name) {
+            continue;
+        }
+        let decls: Vec<_> = all
             .into_iter()
             .filter(|d| d.0 == "vec2" && d.1 == name)
             .collect();
@@ -219,6 +227,15 @@ mod tests {
         assert!(out.contains("    v_TexCoord = vec4(a_TexCoord, 0.0, 1.0);"));
         assert!(out.contains("v_TexCoord.x += 1.0;"));
         assert!(out.contains("    v_TexCoord += 1.0;"));
+    }
+
+    #[test]
+    fn both_widths_declared_are_left_alone() {
+        // generic.vert: vec4 with LIGHTMAP, vec2 otherwise, in both units.
+        let vs = "#if LIGHTMAP\nvarying vec4 v_TexCoord;\n#else\nvarying vec2 v_TexCoord;\n#endif\nvoid main() {\n#if LIGHTMAP\n    v_TexCoord = a_TexCoordVec4;\n#else\n    v_TexCoord = a_TexCoord;\n#endif\n}\n";
+        let fs =
+            "#if LIGHTMAP\nvarying vec4 v_TexCoord;\n#else\nvarying vec2 v_TexCoord;\n#endif\n";
+        assert_eq!(widen_vertex_varyings(vs, fs), vs);
     }
 
     #[test]

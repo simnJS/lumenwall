@@ -695,6 +695,111 @@ fn read_editor_pose(s: &mut Section<'_>) -> Result<Vec<[f32; 16]>, UnexpectedEof
     Ok(out)
 }
 
+/// Sections found after the mesh block (spec 08 §3), before the load-time validation of
+/// [`parse_model`].
+#[derive(Default)]
+pub(crate) struct SectionChain {
+    pub sections: Vec<SectionInfo>,
+    pub skeleton: Option<Skeleton>,
+    pub attachments: Vec<Attachment>,
+    pub animations: Vec<Animation>,
+    pub editor_pose: Option<Vec<[f32; 16]>>,
+}
+
+/// Reads the section chain starting at `p` (spec 08 §3): stops at the end of the file, at a
+/// `0x00` byte or at the first invalid header (with a warning).
+pub(crate) fn read_section_chain(
+    data: &[u8],
+    mut p: usize,
+    warnings: &mut Vec<MdlWarning>,
+) -> SectionChain {
+    let mut chain = SectionChain::default();
+    let mut seen_skeleton = false;
+    loop {
+        if p >= data.len() || data[p] == 0 {
+            break;
+        }
+        let Some(header) = data.get(p..p + 13) else {
+            warnings.push(MdlWarning {
+                section: String::from_utf8_lossy(&data[p..data.len().min(p + 8)]).into_owned(),
+                offset: p,
+                message: "truncated section header, chain stopped".into(),
+            });
+            break;
+        };
+        let magic = &header[..8];
+        let name = magic.escape_ascii().to_string();
+        if header[8] != 0 {
+            if chain.sections.is_empty() {
+                warnings.push(MdlWarning {
+                    section: name,
+                    offset: p,
+                    message: "no section magic after the mesh".into(),
+                });
+            }
+            break;
+        }
+        let end = u32_at(header, 9).unwrap_or(0) as usize;
+        if end <= p + 13 || end > data.len() {
+            warnings.push(MdlWarning {
+                section: name,
+                offset: p + 9,
+                message: format!("invalid section end 0x{end:X}, chain stopped"),
+            });
+            break;
+        }
+        chain.sections.push(SectionInfo {
+            magic: name.clone(),
+            start: p,
+            end,
+        });
+        let mut section = Section {
+            name: name.clone(),
+            start: p + 13,
+            reader: Reader::new(&data[p + 13..end]),
+        };
+        let (kind, version) = magic.split_at(4);
+        match (kind, version) {
+            (b"MDLS", b"0004") => {
+                if seen_skeleton {
+                    section.warn(warnings, "second skeleton section ignored");
+                } else {
+                    seen_skeleton = true;
+                    chain.skeleton = read_skeleton(&mut section, warnings).ok();
+                }
+            }
+            (b"MDAT", b"0001") => match read_attachments(&mut section) {
+                Ok(a) => chain.attachments = a,
+                Err(e) => {
+                    warnings.push(section.eof_warning(e, "no attachment kept"));
+                    chain.attachments.clear();
+                }
+            },
+            (b"MDLA", b"0006") => {
+                chain.animations = read_animations(&mut section, warnings);
+            }
+            (b"MDLE", b"0002") => match read_editor_pose(&mut section) {
+                Ok(pose) => chain.editor_pose = Some(pose),
+                Err(e) => warnings.push(section.eof_warning(e, "editor pose ignored")),
+            },
+            (b"MDLS" | b"MDAT" | b"MDLA" | b"MDLE", _) => {
+                section.warn(
+                    warnings,
+                    match kind {
+                        b"MDLS" => "unsupported version: no skeleton",
+                        b"MDAT" => "unsupported version: no attachment",
+                        b"MDLA" => "unsupported version: no animation",
+                        _ => "unsupported version, ignored",
+                    },
+                );
+            }
+            _ => {}
+        }
+        p = end;
+    }
+    chain
+}
+
 /// Reads a whole puppet file: mesh (structured when possible, otherwise the spec 01
 /// heuristic), bone weights and every chained section (spec 08).
 ///
@@ -736,6 +841,7 @@ pub fn parse_model(data: &[u8]) -> Result<PuppetModel, MdlError> {
             }
         };
 
+    let chain = read_section_chain(data, start.unwrap_or(data.len()), &mut warnings);
     let mut model = PuppetModel {
         mesh,
         skin,
@@ -743,99 +849,13 @@ pub fn parse_model(data: &[u8]) -> Result<PuppetModel, MdlError> {
         layout_positions,
         part_ranges,
         sections_start: start,
-        sections: Vec::new(),
-        skeleton: None,
-        attachments: Vec::new(),
-        animations: Vec::new(),
-        editor_pose: None,
+        sections: chain.sections,
+        skeleton: chain.skeleton,
+        attachments: chain.attachments,
+        animations: chain.animations,
+        editor_pose: chain.editor_pose,
         warnings: Vec::new(),
     };
-
-    // Section chain (§3).
-    let mut p = start.unwrap_or(data.len());
-    let mut seen_skeleton = false;
-    loop {
-        if p >= data.len() || data[p] == 0 {
-            break;
-        }
-        let Some(header) = data.get(p..p + 13) else {
-            warnings.push(MdlWarning {
-                section: String::from_utf8_lossy(&data[p..data.len().min(p + 8)]).into_owned(),
-                offset: p,
-                message: "truncated section header, chain stopped".into(),
-            });
-            break;
-        };
-        let magic = &header[..8];
-        let name = magic.escape_ascii().to_string();
-        if header[8] != 0 {
-            if model.sections.is_empty() {
-                warnings.push(MdlWarning {
-                    section: name,
-                    offset: p,
-                    message: "no section magic after the mesh".into(),
-                });
-            }
-            break;
-        }
-        let end = u32_at(header, 9).unwrap_or(0) as usize;
-        if end <= p + 13 || end > data.len() {
-            warnings.push(MdlWarning {
-                section: name,
-                offset: p + 9,
-                message: format!("invalid section end 0x{end:X}, chain stopped"),
-            });
-            break;
-        }
-        model.sections.push(SectionInfo {
-            magic: name.clone(),
-            start: p,
-            end,
-        });
-        let mut section = Section {
-            name: name.clone(),
-            start: p + 13,
-            reader: Reader::new(&data[p + 13..end]),
-        };
-        let (kind, version) = magic.split_at(4);
-        match (kind, version) {
-            (b"MDLS", b"0004") => {
-                if seen_skeleton {
-                    section.warn(&mut warnings, "second skeleton section ignored");
-                } else {
-                    seen_skeleton = true;
-                    model.skeleton = read_skeleton(&mut section, &mut warnings).ok();
-                }
-            }
-            (b"MDAT", b"0001") => match read_attachments(&mut section) {
-                Ok(a) => model.attachments = a,
-                Err(e) => {
-                    warnings.push(section.eof_warning(e, "no attachment kept"));
-                    model.attachments.clear();
-                }
-            },
-            (b"MDLA", b"0006") => {
-                model.animations = read_animations(&mut section, &mut warnings);
-            }
-            (b"MDLE", b"0002") => match read_editor_pose(&mut section) {
-                Ok(pose) => model.editor_pose = Some(pose),
-                Err(e) => warnings.push(section.eof_warning(e, "editor pose ignored")),
-            },
-            (b"MDLS" | b"MDAT" | b"MDLA" | b"MDLE", _) => {
-                section.warn(
-                    &mut warnings,
-                    match kind {
-                        b"MDLS" => "unsupported version: no skeleton",
-                        b"MDAT" => "unsupported version: no attachment",
-                        b"MDLA" => "unsupported version: no animation",
-                        _ => "unsupported version, ignored",
-                    },
-                );
-            }
-            _ => {}
-        }
-        p = end;
-    }
 
     // Load-time validation (§8): weights on missing bones reject the skeleton.
     if let Some(skeleton) = &model.skeleton {

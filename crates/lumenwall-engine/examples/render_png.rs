@@ -5,6 +5,8 @@
 //!   --size WxH         output size (default 1920x1080)
 //!   --frames N         frames simulated (default 1)
 //!   --fps F            simulated frame rate (default 30)
+//!   --start T          scene time of the first frame in seconds (default 1)
+//!   --audio L          constant audio spectrum level in every band (default 0)
 //!   --save a,b,c       frames written (default: the last one)
 //!   --out DIR          output folder (default target/agent-integration/shots)
 //!   --set name=value   property override (repeatable)
@@ -53,6 +55,8 @@ fn main() {
             }
             "--frames" => opts.frames = val().parse().unwrap_or(1),
             "--fps" => opts.fps = val().parse().unwrap_or(30.0),
+            "--start" => opts.start_time = val().parse().unwrap_or(1.0),
+            "--audio" => opts.audio_level = val().parse().unwrap_or(0.0),
             "--save" => {
                 opts.save = val()
                     .split(',')
@@ -134,7 +138,7 @@ fn main() {
             .map_or_else(|| "wallpaper".into(), |n| n.to_string_lossy().into_owned());
         match render_headless(&path, &assets, &o) {
             Ok(r) => println!(
-                "{w}: OK {}x{} on {} | load {:.0} ms | {} image(s), {} pass(es), {} particle system(s) ({} live), {} texture(s) {:.1} MiB, {} stand-in shader(s), {} skipped object(s), {} puppet(s) ({} GPU-skinned, {} attached object(s)) | CPU {:.2} ms/frame, GPU {} | GPU memory {:.1} MiB | {}",
+                "{w}: OK {}x{} on {} | load {:.0} ms | {} image(s), {} pass(es), {} particle system(s) ({} live), {} texture(s) {:.1} MiB, {} stand-in shader(s), {} skipped object(s), {} puppet(s) ({} GPU-skinned, {} attached object(s)), {} 3D object(s) ({} mesh(es)) | CPU {:.2} ms/frame, GPU {} | GPU memory {:.1} MiB | {}",
                 r.scene_size.0,
                 r.scene_size.1,
                 r.adapter,
@@ -150,6 +154,8 @@ fn main() {
                 r.stats.puppets,
                 r.stats.gpu_skinned_puppets,
                 r.stats.attached_objects,
+                r.stats.models,
+                r.stats.meshes,
                 r.cpu_frame.as_secs_f64() * 1000.0,
                 r.gpu_frame.map_or("n/a".into(), |g| format!(
                     "{:.2} ms/frame",

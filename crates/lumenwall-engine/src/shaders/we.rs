@@ -16,8 +16,8 @@ use crate::assets::ShaderSource;
 /// `lumenwall-shader` provider with an on-disk cache and per-shader fallback.
 pub struct WeShaders {
     compiler: ShaderCompiler,
-    /// Program identity (`PassShader::key`) → compiled renderer shader.
-    ids: HashMap<[u8; 32], ShaderId>,
+    /// Program identity (`PassShader::key`) and clip convention (3D pass) → compiled shader.
+    ids: HashMap<([u8; 32], bool), ShaderId>,
     fallback: FallbackShaders,
     translated: usize,
 }
@@ -70,7 +70,9 @@ impl WeShaders {
         for w in &pass.warnings {
             tracing::debug!("shader '{}': {w}", req.name);
         }
-        let id = match self.ids.get(&pass.key) {
+        // 3D passes keep the Wallpaper Engine clip convention (spec 09 §0.3).
+        let model = req.kind == PassKind::Model;
+        let id = match self.ids.get(&(pass.key, model)) {
             Some(id) => *id,
             None => {
                 let desc = ShaderDesc {
@@ -78,10 +80,10 @@ impl WeShaders {
                     module: pass.program.module.clone(),
                     vertex_entry: lumenwall_shader::VERTEX_ENTRY.to_owned(),
                     fragment_entry: lumenwall_shader::FRAGMENT_ENTRY.to_owned(),
-                    upstream_clip_space: true,
+                    upstream_clip_space: !model,
                 };
                 let id = b.add_shader(desc).map_err(|e| e.to_string())?;
-                self.ids.insert(pass.key, id);
+                self.ids.insert((pass.key, model), id);
                 self.translated += 1;
                 id
             }

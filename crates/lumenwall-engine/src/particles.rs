@@ -2,7 +2,7 @@
 //! (spec 05 §12). The CPU writes the vertices into one reused buffer, uploaded with one
 //! `write_buffer` per system and frame; the index pattern is constant and uploaded once.
 
-use glam::{Mat4, Vec2};
+use glam::{Mat4, Vec2, Vec3};
 use lumenwall_assets::Vfs;
 use lumenwall_particles::{
     BlendMode as PBlend, DepthRange, FrameInput, GeometryKind, ParallaxInput, ParticleDefinition,
@@ -11,12 +11,13 @@ use lumenwall_particles::{
 };
 use lumenwall_render::dynbuf::UniformSlot;
 use lumenwall_render::{
-    BlendMode, Geometry, PassDesc, RenderScene, RtId, SceneBuilder, SlotBinding, StreamAttribute,
-    StreamId, StreamLayout,
+    BlendMode, DepthState, Geometry, PassDesc, RenderScene, RtId, SceneBuilder, SlotBinding,
+    StreamAttribute, StreamId, StreamLayout,
 };
 use lumenwall_scene::SettingId;
 use serde_json::Value as Json;
 
+use crate::model3d::{CameraFrame, local_matrix};
 use crate::shaders::{PassKind, ShaderProvider, ShaderRequest};
 use crate::texture::TextureCache;
 
@@ -31,6 +32,8 @@ struct ParticleMaterial {
     /// `usershadervalues`: `(user property, material constant)`; the constant follows the
     /// property (same key as for image materials, see `lumenwall-scene`).
     user_constants: Vec<(String, String)>,
+    /// `depthtest` / `depthwrite` (also their misspelt forms), used in 3D scenes only.
+    depth: DepthState,
 }
 
 fn read_material(vfs: &Vfs, path: &str) -> Result<ParticleMaterial, String> {
@@ -71,7 +74,17 @@ fn read_material(vfs: &Vfs, path: &str) -> Result<ParticleMaterial, String> {
         .and_then(|c| c.get("ui_editor_properties_overbright"))
         .and_then(|v| v.as_f64().or_else(|| v.get("value").and_then(Json::as_f64)))
         .unwrap_or(1.0) as f32;
+    let enabled = |keys: [&str; 2]| {
+        keys.iter()
+            .find_map(|k| pass.get(*k).and_then(Json::as_str))
+            .is_some_and(|v| v == "enabled")
+    };
+    let depth = DepthState {
+        test: enabled(["depthtest", "depthtesting"]),
+        write: enabled(["depthwrite", "depthwriting"]),
+    };
     Ok(ParticleMaterial {
+        depth,
         shader,
         blending: pass
             .get("blending")
@@ -154,6 +167,7 @@ pub struct PendingParticle {
     constants: Vec<(String, [f32; 4], bool)>,
     /// `(user property, uniform, integer)` of the `usershadervalues` constants.
     user_constants: Vec<(String, String, bool)>,
+    world: Option<Mat4>,
 }
 
 /// A particle system of a running scene.
@@ -168,6 +182,8 @@ pub struct ParticleRuntime {
     drawn: bool,
     /// `(user property, slot, integer)`: constants rewritten when the property changes.
     user_constants: Vec<(String, UniformSlot, bool)>,
+    /// World model matrix of a system of a perspective scene (see [`world_model`]).
+    world: Option<Mat4>,
 }
 
 fn blend(b: PBlend) -> BlendMode {
@@ -225,6 +241,8 @@ pub struct ParticleSetup<'a> {
     pub visible: Box<[SettingId]>,
     /// User properties as JSON values.
     pub properties: &'a [(String, Json)],
+    /// Perspective scene (spec 09 §3.9): the system lives in world space.
+    pub world: bool,
 }
 
 /// Builds the system, its stream and its pass description.
@@ -282,9 +300,16 @@ pub fn prepare(
     };
     let mut object = ParticleObject::from_json(s.object_json);
     bind_object_values(&mut object, s.properties);
+    let world = s.world.then(|| world_model(&object));
+    // In world space the system sees a zero-sized scene: no recentring of its origin.
+    let (width, height) = if s.world {
+        (0.0, 0.0)
+    } else {
+        (s.scene_size.x, s.scene_size.y)
+    };
     let opts = SystemOptions {
-        width: s.scene_size.x,
-        height: s.scene_size.y,
+        width,
+        height,
         sprite_sheet: sheet,
         texture: info,
         seed: None,
@@ -350,6 +375,10 @@ pub fn prepare(
     )?;
     let mut desc = PassDesc::new(label, shader.id, s.target, Geometry::Stream(stream));
     desc.blend = blend(render.blending);
+    if s.world {
+        // spec 09 §3.9: depth test according to the material, against the models.
+        desc.depth = material.depth;
+    }
     if let Some(t) = &texture {
         // spec 05 §12.1: slot 0 is forced to the material's first texture.
         desc = desc.with_slot(0, SlotBinding::texture(t.id()));
@@ -389,7 +418,24 @@ pub fn prepare(
         visible: s.visible.clone(),
         constants,
         user_constants,
+        world,
     })
+}
+
+/// World matrix of a particle system of a perspective scene (spec 09 §3.9): the model matrix of
+/// spec 09 §3.3, times `Sc(1, −1, 1)`.
+///
+/// Lumenwall deviation (`lumenwall-particles` is unchanged): the simulation keeps the Y
+/// inversions of spec 05 §2.2, which a world-space system must not have (QO-3D-33). The extra
+/// mirror cancels them for every Y-inverted field (emitter origins, box directions, velocities,
+/// gravity, turbulence frames); the fields spec 05 does not invert (sphere directions, control
+/// point offsets, vortex axes) come out mirrored.
+fn world_model(object: &ParticleObject) -> Mat4 {
+    local_matrix(
+        object.origin.vec3(),
+        object.angles.vec3(),
+        object.scale.vec3(),
+    ) * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
 }
 
 impl PendingParticle {
@@ -447,6 +493,7 @@ impl PendingParticle {
             visible: self.visible,
             drawn: false,
             user_constants,
+            world: self.world,
         })
     }
 }
@@ -462,6 +509,8 @@ pub struct ParticleFrame {
     pub near: f32,
     pub far: f32,
     pub parallax: Option<ParallaxInput>,
+    /// Camera of a perspective scene (spec 09 §3.9); `None` in 2D.
+    pub camera: Option<CameraFrame>,
 }
 
 impl ParticleRuntime {
@@ -481,10 +530,15 @@ impl ParticleRuntime {
             }
             return;
         }
+        let (width, height) = if self.world.is_some() {
+            (0.0, 0.0)
+        } else {
+            (f.size.x, f.size.y)
+        };
         let input = FrameInput {
             time: f.time,
-            width: f.size.x,
-            height: f.size.y,
+            width,
+            height,
             mouse: f.mouse,
         };
         let quads = if self.system.update(&input) {
@@ -503,7 +557,7 @@ impl ParticleRuntime {
         if quads == 0 {
             return;
         }
-        let u = self.system.uniforms(&UniformInput {
+        let mut u = self.system.uniforms(&UniformInput {
             width: f.size.x,
             height: f.size.y,
             scene_view_projection: f.view_projection,
@@ -515,6 +569,23 @@ impl ParticleRuntime {
             parallax: f.parallax,
             brightness: self.overbright,
         });
+        if let (Some(model), Some(cam)) = (self.world, f.camera) {
+            // spec 09 §3.9: world space, the scene camera, no fixed eye at (0, 0, 1000).
+            let inverse = model.inverse();
+            let local = |v: Vec3| inverse.transform_vector3(v);
+            u.model = model;
+            u.model_inverse = inverse;
+            u.view_projection = cam.view_projection_upstream;
+            u.model_view_projection = cam.view_projection_upstream * model;
+            u.model_view_projection_inverse = u.model_view_projection.inverse();
+            u.eye_position = cam.eye;
+            u.view_up = cam.up;
+            u.view_right = cam.right;
+            // Sprites face the camera: its axes in the system's local space.
+            u.orientation_right = local(cam.right);
+            u.orientation_up = local(cam.up);
+            u.orientation_forward = local(-cam.forward);
+        }
         let sh = scene.shadow_mut();
         let s = &self.slots;
         let m4 =

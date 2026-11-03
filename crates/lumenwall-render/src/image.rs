@@ -19,8 +19,8 @@ use crate::graph::{
     Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SlotBinding, TextureRef,
 };
 use crate::math::{
-    Alignment, NodeTransform, SkinVertex, Vertex, copy_matrix, copy_quad, copy_uv_max, image_rect,
-    rect_quad, screen_matrix, unit_quad,
+    Alignment, ImageRect, NodeTransform, SkinVertex, Vertex, copy_matrix, copy_quad, copy_uv_max,
+    image_rect, quad, rect_quad, screen_matrix, unit_quad,
 };
 use crate::shader::MAX_SLOTS;
 use crate::targets::{PingPong, RtId};
@@ -120,6 +120,16 @@ pub struct PuppetGeometry {
     pub skin: Vec<SkinVertex>,
 }
 
+/// Options of [`add_image_with_options`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImageOptions {
+    /// Images of a perspective scene (spec 09 §3.9): every pass receives its geometry already
+    /// in clip space (`a_Position` in `[-1, 1]²`, `z = 0`) and matrices compensated for it, so
+    /// shaders that write `gl_Position = vec4(a_Position, 1)` (`cloudsbg.vert`) cover the image
+    /// exactly while matrix-based shaders draw the same pixels as without the option.
+    pub clip_space: bool,
+}
+
 /// Handle returned by [`add_image`] to update the image every frame.
 #[derive(Clone, Debug)]
 pub struct ImageHandle {
@@ -137,6 +147,7 @@ pub struct ImageHandle {
     passthrough_geometry: Option<(VertexRange, bool)>,
     screen_passes: Vec<DynamicPass>,
     passthrough_passes: Vec<DynamicPass>,
+    clip_space: bool,
 }
 
 fn write_matrix(b: &mut SceneBuilder<'_>, pass: PassId, m: Mat4) {
@@ -169,6 +180,19 @@ pub fn add_image_with_puppet(
     passes: &[ImagePass],
     puppet: Option<&PuppetGeometry>,
 ) -> Result<ImageHandle> {
+    add_image_with_options(b, spec, passes, puppet, ImageOptions::default())
+}
+
+/// [`add_image_with_puppet`] with [`ImageOptions`].
+pub fn add_image_with_options(
+    b: &mut SceneBuilder<'_>,
+    spec: &ImageSpec,
+    passes: &[ImagePass],
+    puppet: Option<&PuppetGeometry>,
+    opts: ImageOptions,
+) -> Result<ImageHandle> {
+    // Puppet meshes keep their local-pixel geometry.
+    let clip_space = opts.clip_space && puppet.is_none();
     let puppet = puppet.filter(|m| !m.vertices.is_empty() && !m.indices.is_empty());
     let inputs: Vec<ChainPassInput<RtId>> = passes
         .iter()
@@ -212,6 +236,7 @@ pub fn add_image_with_puppet(
         passthrough_geometry: None,
         screen_passes: Vec::new(),
         passthrough_passes: Vec::new(),
+        clip_space,
     };
 
     let buffer = |c: ChainBuffer<RtId>| -> TextureRef {
@@ -249,7 +274,14 @@ pub fn add_image_with_puppet(
             }
             (geometry, _) => Geometry::Vertices(match geometry {
                 GeometryCase::Copy | GeometryCase::PuppetLocal => {
-                    *copy_geom.get_or_insert_with(|| b.add_vertices(&copy_quad(spec.size, uv_max)))
+                    *copy_geom.get_or_insert_with(|| {
+                        if clip_space {
+                            // `copy_quad` transformed by `M_copie`.
+                            b.add_vertices(&quad(-1.0, 1.0, -1.0, 1.0, uv_max.x, uv_max.y))
+                        } else {
+                            b.add_vertices(&copy_quad(spec.size, uv_max))
+                        }
+                    })
                 }
                 GeometryCase::Unit => {
                     *unit_geom.get_or_insert_with(|| b.add_vertices(&unit_quad()))
@@ -317,6 +349,7 @@ pub fn add_image_with_puppet(
             (MatrixKind::Copy, GeometryCase::Passthrough { .. }) => {
                 handle.passthrough_passes.push(dynamic(b))
             }
+            (MatrixKind::Copy, _) if clip_space => write_matrix(b, id, Mat4::IDENTITY),
             (MatrixKind::Copy, _) => write_matrix(b, id, model),
             (MatrixKind::Identity, _) => write_matrix(b, id, Mat4::IDENTITY),
             (MatrixKind::Screen, _) => handle.screen_passes.push(dynamic(b)),
@@ -352,8 +385,19 @@ impl ImageHandle {
     /// dirty the scene.
     pub fn update(&self, scene: &mut RenderScene, f: &ImageFrame) {
         let t = f.transform;
-        let rect = image_rect(t.origin, t.scale, self.size, self.alignment, f.scene_size);
+        let mut rect = image_rect(t.origin, t.scale, self.size, self.alignment, f.scene_size);
         let mut screen = screen_matrix(f.view_projection, &rect, t.angle, f.parallax);
+        if self.clip_space {
+            // RC → clip coordinates; the matrix gets the inverse scale (same pixels).
+            let h = (f.scene_size * 0.5).max(Vec2::splat(f32::MIN_POSITIVE));
+            rect = ImageRect {
+                x0: rect.x0 / h.x,
+                x1: rect.x1 / h.x,
+                y_top: rect.y_top / h.y,
+                y_bottom: rect.y_bottom / h.y,
+            };
+            screen *= Mat4::from_scale(Vec3::new(h.x, h.y, 1.0));
+        }
         if self.puppet_scene {
             // Mesh in local pixels → the image rectangle in RC (spec 04 Q22).
             let sx = (rect.x1 - rect.x0) / self.size.x.max(f32::MIN_POSITIVE);

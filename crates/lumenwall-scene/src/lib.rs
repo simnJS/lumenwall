@@ -51,9 +51,10 @@ pub use property::{
 pub use scene::{
     Alignment, AnimationLayer, Bind, BindSource, Blending, Camera, Combo, Command, Constant,
     CullMode, DepthMode, Effect, EffectId, EffectPass, Fbo, GenericKind, ImageEffect, ImageObject,
-    Material, MaterialId, MaterialPass, Model, ModelId, Object, ObjectIndex, ObjectKind,
-    OrthogonalProjection, ParticleObject, ParticleSource, PassOverride, Scene, SceneGeneral,
-    SoundObject, TEXT_TEXTURE_PREFIX, TextObject, TextureMap,
+    LightKind, LightObject, Material, MaterialId, MaterialPass, Model, ModelId, ModelObject,
+    Object, ObjectIndex, ObjectKind, OrthogonalProjection, ParticleObject, ParticleSource,
+    PassOverride, Scene, SceneGeneral, SoundObject, SpriteObject, TEXT_TEXTURE_PREFIX, TextObject,
+    TextureMap,
 };
 pub use setting::{Script, ScriptId, SettingId, SettingMeta, Settings};
 pub use text::ColorError;

@@ -25,9 +25,9 @@ use lumenwall_render::math::{
 use lumenwall_render::targets::{ScopeId, scaled_size};
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
-    BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImagePass, ImageSpec, Op,
-    PassId, PuppetGeometry, RenderScene, RtId, SceneBuilder, SkinVertex, SlotSource, TextureRef,
-    Vertex, add_image_with_puppet,
+    BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
+    ImageSpec, Op, PassId, PuppetGeometry, RenderScene, RtId, SceneBuilder, SkinVertex, SlotSource,
+    TextureRef, Vertex, add_image_with_options,
 };
 use lumenwall_scene::{
     BuildOptions, ConstantSource, ImagePasses, MAX_PARENT_DEPTH, MainTextureFormat, ObjectIndex,
@@ -37,6 +37,7 @@ use lumenwall_scene::{
 use serde_json::Value as Json;
 
 use crate::assets::SceneSource;
+use crate::model3d::{Builder3d, Scene3d};
 use crate::particles::{self, ParticleFrame, ParticleRuntime, PendingParticle};
 use crate::plan::DebugPlan;
 use crate::puppet::{Layer, MAX_GPU_BONES, MAX_STEP, Puppet, Rig, decompose_attachment};
@@ -86,13 +87,16 @@ pub struct SceneStats {
     pub gpu_skinned_puppets: usize,
     /// Objects hanging from a puppet attachment.
     pub attached_objects: usize,
+    /// 3D model and sprite objects drawn (spec 09), and their meshes.
+    pub models: usize,
+    pub meshes: usize,
 }
 
 /// A uniform fed by a setting, rewritten when the setting changes (properties, scripts).
-struct LiveUniform {
-    setting: SettingId,
-    slot: UniformSlot,
-    components: u8,
+pub(crate) struct LiveUniform {
+    pub(crate) setting: SettingId,
+    pub(crate) slot: UniformSlot,
+    pub(crate) components: u8,
 }
 
 /// Image-level settings written into every pass of an image (spec 04 §13.2).
@@ -268,6 +272,8 @@ pub struct SceneRuntime {
     /// Text changes reported by scripts ([`TextSink`]), applied to the glyph textures by the
     /// next update. Filled only when a script's string actually changes.
     text_changes: Rc<RefCell<Vec<(i32, String)>>>,
+    /// 3D content (spec 09); `None` (and no cost) for a 2D scene without models.
+    scene3d: Option<Box<Scene3d>>,
 }
 
 /// Text junction: queues the strings scripts compute for text layers.
@@ -455,8 +461,15 @@ pub fn build_scene(
         near: settings.value(scene.camera.nearz).float(),
         far: settings.value(scene.camera.farz).float(),
     };
-    let view_projection = camera.view_projection();
     let general = scene.general;
+    // Spec 09 §3.9: in a perspective scene the image chain keeps a plain 2D frame (images are
+    // laid out on the target); the 3D camera drives models, sprites and particles.
+    let perspective = general.orthogonal_projection.is_none();
+    let view_projection = if perspective {
+        OrthoCamera::canonical(size.x, size.y).view_projection()
+    } else {
+        camera.view_projection()
+    };
     let ambient = settings.value(general.ambient_color).vec3();
     let skylight = settings.value(general.skylight_color).vec3();
 
@@ -475,6 +488,18 @@ pub fn build_scene(
     // Puppet skeletons by object index (spec 08 §9), drawn or not: attachments need them.
     let mut puppets: Vec<PuppetRuntime> = Vec::new();
     let mut puppet_of: HashMap<usize, usize> = HashMap::new();
+    // 3D content (spec 09): meshes, materials, shaders, `_rt_Reflection`, depth buffer.
+    let mut scene3d = Builder3d::prepare(
+        &mut b,
+        project,
+        vfs,
+        &mut textures,
+        shaders,
+        &build,
+        root,
+        st.full,
+        logical,
+    );
 
     // Phase 1: creation order.
     let mut pending: HashMap<usize, Pending> = HashMap::new();
@@ -566,6 +591,7 @@ pub fn build_scene(
                             target: st.full,
                             visible: visibility_chain(project, &build, idx),
                             properties: &props,
+                            world: perspective,
                         },
                     )
                 });
@@ -633,16 +659,22 @@ pub fn build_scene(
     });
 
     // Phase 2: render order.
+    if let Some(s3d) = &mut scene3d {
+        s3d.emit_reflection(&mut b, project, &build);
+    }
     let clear = build.clear_color;
-    b.push(Op::Clear {
-        target: st.full,
-        color: [
-            f64::from(clear.x),
-            f64::from(clear.y),
-            f64::from(clear.z),
-            1.0,
-        ],
-    });
+    // `clearenabled` (spec 09 §1.2) is honoured in perspective scenes.
+    if !perspective || project.settings.value(general.clear_enabled).boolean() {
+        b.push(Op::Clear {
+            target: st.full,
+            color: [
+                f64::from(clear.x),
+                f64::from(clear.y),
+                f64::from(clear.z),
+                1.0,
+            ],
+        });
+    }
     let mut images = Vec::new();
     let mut texts = Vec::new();
     let mut particle_rts = Vec::new();
@@ -651,7 +683,10 @@ pub fn build_scene(
     let mut uses_time = false;
     let mut uses_pointer = false;
     let mut frame_inputs = false;
-    let render_order = build.render_order.clone();
+    let mut render_order = build.render_order.clone();
+    if let Some(s3d) = &scene3d {
+        s3d.sort_render_order(project, &build, &mut render_order);
+    }
     for idx in render_order {
         if let Some((bl, targets, composites)) = &bloom
             && bl.object == idx
@@ -671,19 +706,32 @@ pub fn build_scene(
             stats.passes += 5;
             continue;
         }
+        if let Some(s3d) = &mut scene3d
+            && s3d.emit(&mut b, project, &build, idx)
+        {
+            stats.models += 1;
+            continue;
+        }
         match pending.remove(&idx.index()) {
             Some(Pending::Image(img)) => {
                 let img = *img;
                 let label = img.spec.label.clone();
                 let passes: Vec<ImagePass> = img.passes.iter().map(|p| p.pass.clone()).collect();
-                let handle =
-                    match add_image_with_puppet(&mut b, &img.spec, &passes, img.puppet.as_ref()) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            tracing::warn!("{label} not rendered: {e}");
-                            continue;
-                        }
-                    };
+                let handle = match add_image_with_options(
+                    &mut b,
+                    &img.spec,
+                    &passes,
+                    img.puppet.as_ref(),
+                    ImageOptions {
+                        clip_space: perspective,
+                    },
+                ) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!("{label} not rendered: {e}");
+                        continue;
+                    }
+                };
                 stats.images += 1;
                 stats.passes += handle.passes.len();
                 for (k, &pass) in handle.passes.iter().enumerate() {
@@ -832,6 +880,10 @@ pub fn build_scene(
         }
     }
 
+    if let Some(s3d) = &mut scene3d {
+        // Spec 09 §3.4 step 8: camera fade after the bloom.
+        s3d.emit_fade(&mut b);
+    }
     stats.texts = texts.len();
     // Children hanging from puppet attachments (spec 08 §9.10).
     let mut attached = attachments(project, &build, &raw, &puppet_of, &puppets);
@@ -869,6 +921,12 @@ pub fn build_scene(
         }
     }
 
+    let scene3d = scene3d.map(|s| {
+        uses_time |= s.uses_time;
+        frame_inputs |= s.frame_inputs;
+        stats.meshes = s.meshes;
+        Box::new(s.finish(&mut live))
+    });
     stats.textures = textures.len();
     stats.texture_bytes = textures.uploaded_bytes;
     stats.stand_in_shaders = shaders.replaced();
@@ -889,6 +947,7 @@ pub fn build_scene(
         || !particle_rts.is_empty()
         || !animated_passes.is_empty()
         || puppets.iter().any(|p| p.puppet.is_animated())
+        || scene3d.as_ref().is_some_and(|s| s.camera_moves())
         || scene_rt.accumulates();
     // Spec 06 §8.1: scripts load once every object exists; what they write at load reaches
     // the renderer with the first update.
@@ -938,6 +997,7 @@ pub fn build_scene(
         frame_inputs,
         scripts,
         text_changes,
+        scene3d,
     })
 }
 
@@ -1761,6 +1821,12 @@ impl SceneRuntime {
                 p.write_output(&mut self.scene);
             }
         }
+        // 3D content (spec 09 §3.4 steps 1, 2): camera, lights, objects.
+        let camera3d = self.scene3d.as_mut().map(|s| {
+            let cam = s.camera(project, f.time, (self.size.x, self.size.y));
+            s.update(ctx, &mut self.scene, project, &cam, f.time);
+            cam
+        });
         let center = Vec3::new(self.size.x * 0.5, self.size.y * 0.5, 0.0);
         for img in &mut self.images {
             let shown = chain_visible(settings, &img.visible);
@@ -1835,6 +1901,7 @@ impl SceneRuntime {
                     displacement: self.parallax.displacement,
                     amount,
                 }),
+                camera: camera3d,
             };
             for p in &mut self.particles {
                 p.update(ctx, &mut self.scene, settings, &pf);

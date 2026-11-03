@@ -9,6 +9,7 @@ GPU foundation of the Lumenwall scene renderer (wgpu 30): device and outputs, te
 - `specs/05-particules.md` §12 (vertex formats, used for sizing only; particles are not wired yet).
 - `specs/01-formats-binaires.md` amendment A.1 (volume textures, as prepared by `lumenwall-formats`).
 - `specs/08-puppet-squelette.md` §9.7–§9.8 (skinning attributes, `mat4x3` bone palette).
+- `specs/09-scenes-3d.md` §0.3, §3.1, §3.2.2, §3.5, §3.7, §3.9, §4.5, §4.6 (depth buffers, static meshes, Wallpaper Engine clip convention for 3D passes, culling, clip-space images).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`, `docs/TESTING.md` (reference wallpaper used only to size the benchmark: pass count and target scales).
 - Public documentation and API of `wgpu` 30.0.1 and `naga` 30.0.1.
 
@@ -35,6 +36,13 @@ No upstream code, fork or snippet was consulted.
 | `stats` | `GpuTimer` (timestamps, 3-slot async readback, never stalls), `FrameStats`, `allocator_bytes`. |
 | `yuv` | Video frames: `YuvConverter` (8-bit UNORM planes sampled, 9–16-bit `R16Uint`/`Rg16Uint` planes filtered in the shader), `YuvPlanes` (uploaded planes) or `source_from_views` (zero-copy planes), `conversion_matrix` (BT.601/709/2020/240M/FCC, limited/full range, bit depth, MSB/LSB alignment), chroma siting and decoder padding crop; one draw into an RGBA8 target. |
 | `video_device` | Optional device creation through wgpu-hal with Vulkan Video decode queues (`ContextOptions::video_decode`): decode/compute/transfer families other than wgpu's, `synchronization2`, decode extensions; `GpuContext::video_queues` for lumenwall-video's zero-copy decoder. |
+
+### 3D additions (spec 09)
+
+- **Depth**: `SceneBuilder::add_depth(target)` gives a target a `Depth32Float` buffer of its size (`DEPTH_FORMAT`), shared by every pass drawn into it during the frame and cleared to 1 by the first render pass of the frame on that target (whether or not the colour is cleared). `PassDesc::depth` (`DepthState { test, write }`) selects "less or equal" or "always" and the write; it is ignored for targets without depth, whose pipelines keep `depth_stencil: None`. Only scenes that call `add_depth` pay anything (2D scenes are unchanged). Bundles and render passes carry the attachment; depth buffers follow target resizes in `rebuild_bindings`. Passes into a depth target clip against the near/far planes (Wallpaper Engine's rasteriser default); the others keep `unclipped_depth` (spec 04 Q4).
+- **Static meshes**: `SceneBuilder::add_mesh(label, MeshLayout, bytes, u16 indices)` uploads an interleaved vertex buffer once (`MeshLayout { stride, attributes: [MeshAttribute { name, format, offset }] }`, the `.mdl` bytes as stored) and `Geometry::Mesh(MeshId)` draws it whole. Shader inputs are fed by name, others read (0, 0, 0, 1); pipelines are shared between meshes of the same layout; mesh passes are bundled.
+- **Clip convention**: `ShaderDesc { upstream_clip_space: false }` for 3D passes (Wallpaper Engine/D3D convention, y up, depth [0, 1]: what wgpu expects), with `PassDesc::front_face` = `Ccw` (and `Cw` for the mirrored reflection pass). `math::perspective_we` is the projection of spec 09 §3.2.2; `math::perspective_upstream` = `Sc(1, −1, 1)·P_GL` gives the same pixels and depths to passes that keep the clip fix (images, particles).
+- **Images of a perspective scene**: `add_image_with_options(…, ImageOptions { clip_space: true })` feeds every pass clip-space geometry (`[-1, 1]²`, `z = 0`) and compensates the matrices (`M_copie` → identity, `M_ecran · S(W/2, H/2, 1)`), so shaders that ignore the matrices (`cloudsbg.vert`) cover the image and the others draw the same pixels (spec 09 §3.9).
 
 ## Integration contract (render-ready input types)
 
@@ -178,4 +186,5 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 - Unit (46): matrices, camera, pointer, parallax laws, hierarchy, alignment, rect, rotation sense, uv padding, quad order/winding, scaling modes with the spec examples and truncation effects, span, blend table, culling/masks, chain plans (spec examples), RT sizes and scopes, uniform layouts and patches, sampler flags, upload validation, surface formats, adapter ranking, naga reflection (2D/3D slots) and clip fix, volume upload validation.
 - GPU (`tests/gpu.rs`, 15, headless): orientation end to end, padding window, culling with `FrontFace::Cw`, translucent blend + RGB mask, A/B ping-pong, read/write hazard copy, unfed attributes, animated variants, bloom chain, volume LUT slot (3D texture grading, volume in a 2D slot), composition modes, BC1 upload, visibility toggle, pipeline cache on disk, steady state (no new GPU objects, `needs_redraw`, `g_Time`, GPU timer). They pass on the RTX 4080, RADV and llvmpipe (`LUMENWALL_TEST_SOFTWARE=1`); without any adapter they print "skipped".
 - `tests/alloc.rs`: zero allocation in the per-frame update path.
+- `tests/gpu3d.rs`: F-3D-O of spec 09 (first row red ≈ 1 with a clip-space quad, top-left UV (0, 0) through the VP-1 camera), depth test across two meshes over two frames, back-face culling with `FrontFace::Ccw`. VP-1/VP-2 vectors in `math::tests`.
 - Examples: `headless` (writes a PNG), `chain_bench` (reference-shaped chain timing).

@@ -219,6 +219,15 @@ fn dump_scene(o: &mut Out<'_>, scene: &Scene) {
                     o.line(3, format_args!("Filename {f}"));
                 }
             }
+            ObjectKind::Model3d(m) => {
+                let f = o.str(m.file).to_owned();
+                o.line(2, format_args!("Model {f} (skin {})", m.skin));
+            }
+            ObjectKind::Sprite(sp) => {
+                let f = o.str(sp.file).to_owned();
+                o.line(2, format_args!("Sprite {f}"));
+            }
+            ObjectKind::Light(l) => o.line(2, format_args!("Light {:?}", l.kind)),
             ObjectKind::Particle(_) | ObjectKind::Text(_) | ObjectKind::Generic(_) => {}
         }
     }

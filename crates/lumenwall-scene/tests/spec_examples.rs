@@ -736,7 +736,10 @@ fn object_classification_7_1() {
                 ParticleSource::Inline(_) => "?",
             },
             ObjectKind::Text(_) => "text",
-            ObjectKind::Generic(GenericKind::Light) => "light",
+            ObjectKind::Model3d(_) => "model",
+            ObjectKind::Light(_) => "light",
+            ObjectKind::Sprite(_) => "sprite",
+            ObjectKind::Generic(GenericKind::Light) => "light-unknown",
             ObjectKind::Generic(GenericKind::Shape) => "shape",
             ObjectKind::Generic(GenericKind::Group) => "group",
             ObjectKind::Generic(GenericKind::Unknown) => "unknown",
@@ -753,24 +756,24 @@ fn object_classification_7_1() {
             "light",
             "shape",
             "group",
-            "unknown",
+            "model",
             "unknown"
         ]
     );
-    // Q20: unsupported types are warned about.
+    // Q20: unsupported types are warned about (lights and models are supported, spec 09).
     assert_eq!(
         p.warnings()
             .iter()
             .filter(|w| w.message.contains("not supported"))
             .count(),
-        2
+        1
     );
     assert_eq!(
         p.warnings()
             .iter()
             .filter(|w| w.message.contains("unknown object type"))
             .count(),
-        2
+        1
     );
 }
 
@@ -795,7 +798,8 @@ fn common_fields_and_degraded_mode_7_2() {
         .iter()
         .map(|o| (o.id, p.strings.resolve(o.name)))
         .collect();
-    assert_eq!(names, [(-1, "12"), (7, "unknown"), (-1, "only")]);
+    // Spec 09 §1.8: an object without any `id` gets a synthetic id `-1000 - rank`.
+    assert_eq!(names, [(-1, "12"), (7, "unknown"), (-1003, "only")]);
     assert!(obj(&p, 4).dependencies.is_empty());
     // Second failure in degraded mode is fatal.
     let (_, path, _) = data_err(&load_err(&base_files(&scene_with(
