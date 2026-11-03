@@ -11,6 +11,7 @@
 //! volume = 64                     # 0..=128 like --volume; 64 is the UI's 50 %
 //! scaling = "fill"
 //! fullscreen-pause-ignore-appids = ["mpv"]
+//! gpu-release-delay = 300         # seconds paused before the GPU is released; 0 = never
 //!
 //! [properties]
 //! bloom = true                    # booleans become "1"/"0"
@@ -40,7 +41,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::cli::ConfigChoice;
-use crate::settings::{Clamp, HwDecode, Layer, Scaling, validate_fps, validate_screenshot_delay};
+use crate::settings::{
+    Clamp, HwDecode, Layer, Scaling, validate_fps, validate_gpu_release_delay,
+    validate_screenshot_delay,
+};
 
 /// Configuration file contents. Every field is optional; unknown keys are errors.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -58,6 +62,9 @@ pub struct Config {
     pub fullscreen_pause: Option<bool>,
     pub fullscreen_pause_only_active: Option<bool>,
     pub fullscreen_pause_ignore_appids: Option<Vec<String>>,
+    /// Seconds every output stays paused before the GPU device and its memory are released
+    /// (0 = never; default 300).
+    pub gpu_release_delay: Option<i64>,
     /// Default scaling of the window and of the outputs without their own value.
     pub scaling: Option<Scaling>,
     pub clamp: Option<Clamp>,
@@ -202,6 +209,9 @@ impl Config {
         }
         if let Some(delay) = self.screenshot_delay {
             validate_screenshot_delay(delay).map_err(|e| format!("screenshot-delay: {e}"))?;
+        }
+        if let Some(delay) = self.gpu_release_delay {
+            validate_gpu_release_delay(delay).map_err(|e| format!("gpu-release-delay: {e}"))?;
         }
         if let Some(window) = &self.window {
             if !self.screens.is_empty() || !self.spans.is_empty() {
@@ -436,6 +446,8 @@ mod tests {
             ("fps = 0", "fps"),
             ("fps = \"x\"", "invalid type"),
             ("screenshot-delay = -1", "screenshot-delay"),
+            ("gpu-release-delay = -5", "gpu-release-delay"),
+            ("gpu-release-delay = 5000000000", "gpu-release-delay"),
             ("scaling = \"Fill\"", "unknown variant"),
             ("wallpaper = \"\"", "cannot be empty"),
             ("[window]\nwidth = 0\nheight = 10", "positive"),

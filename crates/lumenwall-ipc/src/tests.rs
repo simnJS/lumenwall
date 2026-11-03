@@ -270,6 +270,13 @@ fn newer_peers_are_tolerated() {
             ..Settings::default()
         }
     );
+    // No GPU release delay from an older daemon (or in a request: unchanged), and it is not
+    // written when unknown.
+    assert_eq!(settings.gpu_release_delay_s, None);
+    let text = serde_json::to_string(&Settings::default()).unwrap();
+    assert!(!text.contains("gpu_release_delay_s"), "{text}");
+    let settings: Settings = serde_json::from_str(r#"{"gpu_release_delay_s":0}"#).unwrap();
+    assert_eq!(settings.gpu_release_delay_s, Some(0));
 
     let err: RemoteError = serde_json::from_str(r#"{"code":"quota_exceeded"}"#).unwrap();
     assert_eq!(err.code, ErrorCode::Unknown);

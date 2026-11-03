@@ -318,6 +318,7 @@ impl Daemon {
             muted: plan.audio.silent,
             volume: volume_fraction(plan.audio.volume),
             autostart: autostart_enabled(),
+            gpu_release_delay_s: Some(plan.gpu_release_delay),
         }
     }
 
@@ -630,6 +631,11 @@ impl Daemon {
             if new.automute != current.automute {
                 t.insert("automute", value(new.automute));
                 d.cli.settings.no_automute = false;
+            }
+            if let Some(delay) = new.gpu_release_delay_s
+                && new.gpu_release_delay_s != current.gpu_release_delay_s
+            {
+                t.insert("gpu-release-delay", value(i64::from(delay)));
             }
             if new.muted != current.muted || (new.volume - current.volume).abs() > 1e-3 {
                 t.insert("silent", value(new.muted));

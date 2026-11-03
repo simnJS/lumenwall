@@ -112,6 +112,8 @@ audio-processing = true
 fullscreen-pause = true
 fullscreen-pause-only-active = false
 fullscreen-pause-ignore-appids = ["mpv"]
+gpu-release-delay = 300            # seconds every output stays paused before the GPU device,
+                                   # video memory and driver threads are released; 0 = never
 scaling = "default"                # global default
 clamp = "clamp"
 layer = "bottom"
@@ -210,9 +212,9 @@ log file settings apply at next start. The directory must exist at startup to be
 - `lumenwall` with no argument and no configured wallpaper starts idle (no surface, no GPU device)
   and waits for a client (deviation: the reference exits with "no wallpaper").
 - Client choices (wallpaper per output or for all, scaling, saved properties, fps, fullscreen
-  pause, automute, mute, volume, per-wallpaper sound) go into the configuration file
-  (`wallpaper`, `scaling`, `[[screen]]`, `[properties]`, `fps`, `silent`, `volume`,
-  `[wallpaper-audio]`…), written atomically, and replace the command-line values they concern
+  pause, automute, mute, volume, per-wallpaper sound, GPU release delay `gpu_release_delay_s`)
+  go into the configuration file (`wallpaper`, `scaling`, `[[screen]]`, `[properties]`, `fps`,
+  `silent`, `volume`, `[wallpaper-audio]`, `gpu-release-delay`…), written atomically, and replace the command-line values they concern
   for the rest of the session. Pause and property previews are
   not saved. Property overrides stay keyed by name (shared by wallpapers with the same name).
 - Reads never wake the engine; statistics (fps, CPU ms/frame, GPU busy %, process CPU, RSS,

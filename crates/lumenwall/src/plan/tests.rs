@@ -699,6 +699,19 @@ fn diff_of_identical_plans_is_empty() {
 }
 
 #[test]
+fn gpu_release_delay_comes_from_the_file() {
+    assert_eq!(plan(&["X"]).gpu_release_delay, 300);
+    assert_eq!(
+        plan_cfg(&["X"], "gpu-release-delay = 30").gpu_release_delay,
+        30
+    );
+    // 0 = never release.
+    let never = plan_cfg(&["X"], "gpu-release-delay = 0");
+    assert_eq!(never.gpu_release_delay, 0);
+    assert_eq!(diff(&plan(&["X"]), &never), [PlanChange::GpuRelease]);
+}
+
+#[test]
 fn diff_lists_global_changes() {
     let a = plan(&["X"]);
     let b = plan(&[

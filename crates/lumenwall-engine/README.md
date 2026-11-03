@@ -53,7 +53,7 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `script` | SceneScript (`lumenwall-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. `script/dynamic.rs`: layers scripts create, destroy and sort (scene-model side, pools). |
 | `scene/layers.rs` | GPU side of the layers scripts create after load: `RenderScene::extend`, parking and reuse, draw order (see "Layers created by scripts"). |
 | `audio` | Scene sounds (`lumenwall-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
-| `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device). |
+| `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device); `engine/release.rs`: GPU released after a long pause and restored on resume (Frame loop below). |
 | `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
 | `model3d` | Spec 09: `Builder3d` (before the creation loop: `.mdl` → static meshes, model materials through `Project::load_model_material`, 3D shaders, textures, `_rt_Reflection`, the scene depth buffer; draws in render order, reflection pass first) and `Scene3d` (per frame: camera pose from the paths, `V`, `P`, lights, visibility and the uniforms of every 3D pass, compare-on-write). |
@@ -70,6 +70,16 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   renders once and then sleeps; pointer events wake it only if it reads the pointer.
 - Paused outputs (fullscreen, covered, locked, display off) get no frame; when every output is
   paused the spectrum capture stops and the scene sounds are suspended (`Player::set_hidden`).
+- GPU release (`engine/release.rs`, `EnginePlan::gpu_release`, default 5 min, `None` = never):
+  once every output has been paused (or held by a user pause with nothing left to show) for
+  the delay, the renderers, swap chains, device and instance are dropped; the platform
+  surfaces, wallpapers (mapped `.pkg`, scene model, property values), audio player and clock
+  stay. The windows keep their last image. When an output resumes, the user unpauses, a
+  property preview needs a frame or a new plan arrives, the device is recreated and every
+  target rebuilt as at start-up (shader cache + on-disk pipeline cache). A rebuild restarts
+  particles (with their `starttime` warm-up), scripts (`init` again, in-memory `localStorage`
+  lost), videos (from the start, with a fresh sound track) and web pages (reloaded; the output
+  keeps its image until the page's first frame).
 - One scene per target, updated and encoded once per loop iteration even when several outputs
   show it; each output then composes it with its own scaling and clamp.
 - Scripts with per-frame work (`update`, timers, audio buffers, text layers, queued events) keep
@@ -237,7 +247,7 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | `localStorage` | In memory (not persisted between runs). |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
 | Playlists | Only the first item is shown (no `PlaylistRunner` timer). |
-| Plan reload | Wallpapers, layout, fps, audio, pause policy and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A video applied to a running scene-only device decodes through the copy path (the device is not recreated with video queues). |
+| Plan reload | Wallpapers, layout, fps, audio, pause policy, GPU release delay and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A video applied to a running scene-only device decodes through the copy path (the device is not recreated with video queues). A plan received while the GPU is released restores it first (≈ 0.2 s), even when nothing needs drawing. |
 | Screenshot formats | PNG data whatever the extension. |
 
 ## SceneScript
@@ -464,7 +474,9 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Load (scene, 13 textures, 23 WE passes from the shader cache, 4 particle systems) | 80–230 ms |
 | Window 1720×720, 30 fps cap | 30.0 fps, CPU 0.4–0.6 ms/frame, 1.8 % of one core, GPU 0.8–4.7 ms/frame (clock-dependent: the GPU stays at low clocks under this load; 0.5 ms headless at full clocks) |
 | Desktop on DP-4 + DP-5 (2560×1440 each, X11 via XWayland) | 30.0 fps, 1.6 % of one core, RSS 240 MiB (anonymous 49 MiB, the rest is file-backed driver libraries and the mapped `.pkg`), VRAM 268 MiB (nvidia-smi), 127 MiB tracked by lumenwall-render |
-| Fullscreen window on top / user pause | paused; scene sounds suspended, capture closed: 0 wake-ups/s on Lumenwall's threads, 0.00 % CPU (`--silent`, 3018340632 and 3372348904). Left: NVIDIA driver threads created by `vkCreateDevice`, ~115/s (an unnamed one at ~100/s, `[vkrt]` ~10/s, `[vkps]` ~4/s), alive as long as the wgpu device |
+| Fullscreen window on top / user pause | paused; scene sounds suspended, capture closed: 0 wake-ups/s on Lumenwall's threads, 0.00 % CPU (`--silent`, 3018340632 and 3372348904). Left: NVIDIA driver threads created by `vkCreateDevice`, ~115/s (an unnamed one at ~100/s, `[vkrt]` ~10/s, `[vkps]` ~4/s), alive as long as the wgpu device; gone after the GPU release below |
+| GPU release after the pause delay (window 480×270, user pause, `gpu-release-delay = 15`; before → after) | 3018340632: 115 → **0 wake-ups/s**, 13 → 6 threads, RSS 193 → 116 MiB (PSS 89 → 62), VRAM 170 → 0 MiB (nvidia-smi). 3463520581: RSS 209 → 131 MiB, VRAM 642 → 0 MiB. Video 3655057993: RSS 250 → 148 MiB, VRAM 222 → 0 MiB. Web 3044696375 (8 processes with the CEF host): 474 → 0 wake-ups/s, 0.5 → 0 % CPU, PSS 446 → 47 MiB. Release itself: 30–75 ms |
+| GPU restore, resume → first frame presented | 3018340632: 210–230 ms (instance 54–58 ms, adapter + device 84–93 ms, scene 64–74 ms); 3463520581 (67 images, 156 passes): 256–268 ms; video: 227–243 ms (zero copy kept); web: 367–372 ms (CEF start, the last image stays meanwhile). First restore of a process: up to 330 ms (instance 85 ms) |
 | Video wallpaper 3655057993 (4K60 H.264, 30 fps cap), zero copy | 30.0 fps, 2.3–2.6 % of one core, RSS 325 MiB, VRAM 318 MiB; paused: 0.00 % |
 | Web wallpapers in a visible 1920×1080 window (all processes of the instance, details in `crates/lumenwall-web/README.md`) | clock 3044696375: 11.7 % of one core (lumenwall 1.7 %), PSS 493 MiB, VRAM 145 MiB; CORSAIR collection 8.1 %; Corsair-O-Tron 15.9 %; paused 0.5 %. Frame copy 0.33 ms (DMA-BUF), 3.9 ms (shared-memory fallback, ≈ 2× the total CPU). Scene 3018340632 in the same window: 2.2 %, PSS 113 MiB, VRAM 302 MiB |
 | Hot switch over IPC (`apply`) | scene → web 2–3 ms (host started, page painted ≈ 0.4–1 s later), web → scene 96–122 ms (scene load) |
