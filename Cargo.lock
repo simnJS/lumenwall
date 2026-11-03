@@ -1473,6 +1473,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffmpeg-sys-next"
+version = "8.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
+dependencies = [
+ "bindgen",
+ "cc",
+ "libc",
+ "num_cpus",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2766,6 +2780,7 @@ dependencies = [
  "lumen-render",
  "lumen-scene",
  "lumen-shader",
+ "lumen-video",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
@@ -2835,6 +2850,7 @@ dependencies = [
 name = "lumen-render"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "glam 0.30.10",
  "naga 30.0.1",
@@ -2905,6 +2921,17 @@ dependencies = [
 [[package]]
 name = "lumen-video"
 version = "0.1.0"
+dependencies = [
+ "ash",
+ "ffmpeg-sys-next",
+ "libc",
+ "lumen-render",
+ "memmap2",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu 30.0.1",
+]
 
 [[package]]
 name = "lumen-web"
@@ -3261,6 +3288,16 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
 ]
 
 [[package]]
@@ -5839,6 +5876,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version-compare"

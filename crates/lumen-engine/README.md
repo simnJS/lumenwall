@@ -38,6 +38,7 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | `audio` | Scene sounds (`lumen-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
 | `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause, pointer, screenshots, statistics. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
+| `video` | Video wallpapers: one `lumen-video` player per target (zero-copy Vulkan Video on the render device when possible), its sound track through the `lumen-audio` player (mapped file, loop, cubic volume, automute), pause with its outputs, frame deadlines for the loop (`Wait::Until`, decoder wake-up through the engine waker). |
 
 ### Frame loop
 
@@ -72,6 +73,10 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 - Real Wallpaper Engine shaders for images, effects and particles (0 stand-in on the 7 installed
   scene wallpapers).
 - Puppet meshes in their rest pose (`.mdl` through `lumen-formats::mdl`, `add_image_with_puppet`).
+- Video wallpapers (`type: video`, `--hwdec`): decoding, cadence, loop, pause, sound and
+  measurements in `crates/lumen-video/README.md`. Engine side: the device gets video decode
+  queues when a video is loaded (`ContextOptions::video_decode`), a video target is rendered
+  by `render_video` (convert on a new frame, compose per output like a scene).
 - Particles (sprites, trails, ropes), sounds, audio spectrum, automute.
 - Window (`-w XxYxWxH`, or `LUMEN_WINDOWED=1` for the 640×480 window), desktop on every output
   (positional wallpaper only) or on `-r` outputs: Wayland layer-shell, and X11 desktop windows,
@@ -87,7 +92,7 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 |---|---|
 | Text objects | Skipped with a warning (glyph rasteriser not integrated; `lumen-render` has `text_matrix`). |
 | Puppet skeletons | Puppet meshes are drawn in their rest pose (spec 04 §20, like the reference); bones, animation layers and layers attached to bones are not applied, so a child layer that follows a bone in Wallpaper Engine stays at its rest position (e.g. part of the hair of 3463520581). |
-| Video wallpapers and video textures | Load error / texture skipped (`lumen-video` not integrated). |
+| Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumen-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
 | Web wallpapers | Load error (`lumen-web` not integrated). |
 | SceneScript | Scripts are ignored; values keep their initial setting (`lumen-script` not integrated). |
 | Bloom shaders | The five bloom passes use `lumen-render`'s WGSL stand-ins, not the translated WE materials. |
@@ -148,6 +153,7 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Window 1720×720, 30 fps cap | 30.0 fps, CPU 0.4–0.6 ms/frame, 1.8 % of one core, GPU 0.8–4.7 ms/frame (clock-dependent: the GPU stays at low clocks under this load; 0.5 ms headless at full clocks) |
 | Desktop on DP-4 + DP-5 (2560×1440 each, X11 via XWayland) | 30.0 fps, 1.6 % of one core, RSS 240 MiB (anonymous 49 MiB, the rest is file-backed driver libraries and the mapped `.pkg`), VRAM 268 MiB (nvidia-smi), 127 MiB tracked by lumen-render |
 | Fullscreen window on top | paused, 0.2 % of one core (sound thread) |
+| Video wallpaper 3655057993 (4K60 H.264, 30 fps cap), zero copy | 30.0 fps, 2.3–2.6 % of one core, RSS 325 MiB, VRAM 318 MiB; paused: 0.00 % |
 | Covered output | paused (`OCCLUDED`), no frame |
 
 ## Tests

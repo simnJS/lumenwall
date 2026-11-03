@@ -48,8 +48,9 @@ impl Wallpaper {
     pub fn check_supported(&self) -> Result<(), String> {
         match self.project.kind {
             ProjectKind::Scene => Ok(()),
+            ProjectKind::Video if lumen_video::is_supported() => self.video_path().map(|_| ()),
             ProjectKind::Video => Err(format!(
-                "'{}' is a video wallpaper: video wallpapers are not integrated yet (lumen-video)",
+                "'{}' is a video wallpaper: this build has no video support (lumen-video without FFmpeg)",
                 self.project.title
             )),
             ProjectKind::Web => Err(format!(
@@ -59,8 +60,22 @@ impl Wallpaper {
         }
     }
 
+    /// Video file of a `video` wallpaper on disk (spec 07 §14.1: `file` resolved through the
+    /// wallpaper's file space).
+    pub fn video_path(&self) -> Result<PathBuf, String> {
+        self.vfs.physical_path(&self.project.file).map_err(|e| {
+            format!(
+                "'{}': video file {}: {e}",
+                self.project.title, self.project.file
+            )
+        })
+    }
+
     /// The objects of `scene.json` as written (sound and particle objects read extra keys).
     pub fn raw_objects(&self) -> Vec<Json> {
+        if self.project.kind != ProjectKind::Scene {
+            return Vec::new();
+        }
         let Ok(bytes) = self.vfs.read(&self.project.file) else {
             return Vec::new();
         };

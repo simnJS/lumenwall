@@ -31,6 +31,8 @@ No upstream code, fork or snippet was consulted.
 | `bloom` | §17 as five generic passes; `BloomShaders` takes the translated WE asset shaders, `BloomShaders::internal()` provides WGSL stand-ins. |
 | `headless` | `HeadlessOutput`, `read_texture_rgba8`, `write_png`. |
 | `stats` | `GpuTimer` (timestamps, 3-slot async readback, never stalls), `FrameStats`, `allocator_bytes`. |
+| `yuv` | Video frames: `YuvConverter` (8-bit UNORM planes sampled, 9–16-bit `R16Uint`/`Rg16Uint` planes filtered in the shader), `YuvPlanes` (uploaded planes) or `source_from_views` (zero-copy planes), `conversion_matrix` (BT.601/709/2020/240M/FCC, limited/full range, bit depth, MSB/LSB alignment), chroma siting and decoder padding crop; one draw into an RGBA8 target. |
+| `video_device` | Optional device creation through wgpu-hal with Vulkan Video decode queues (`ContextOptions::video_decode`): decode/compute/transfer families other than wgpu's, `synchronization2`, decode extensions; `GpuContext::video_queues` for lumen-video's zero-copy decoder. |
 
 ## Integration contract (render-ready input types)
 
@@ -156,7 +158,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 
 ## Not done yet (wired later)
 
-- Text objects (R8 glyph texture, `text_matrix` is ready), video and web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks).
+- Text objects (R8 glyph texture, `text_matrix` is ready), web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks). Video wallpapers use `yuv` + `video_device` (lumen-video).
 - Added for the integration (`lumen-engine`): vertex streams for particles (`SceneBuilder::add_stream`, `Geometry::Stream`, `RenderScene::write_stream`, inputs matched by name through `ShaderInterface::vertex_input_names`, never bundled) and rest-pose puppet meshes (`add_image_with_puppet`, `PuppetGeometry`).
 - Real WE shaders: depends on `lumen-shader` emitting the binding contract above.
 - Lazy allocation of image B composites when the chain never writes B (memory).

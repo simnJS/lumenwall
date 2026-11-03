@@ -34,6 +34,8 @@ pub mod stats;
 pub mod surface;
 pub mod targets;
 pub mod texture;
+pub mod video_device;
+pub mod yuv;
 
 pub use blend::{BlendMode, CullMode, WriteMask};
 pub use compose::{ClampMode, ComposeSettings, Compositor, OutputComposer, ScalingMode};

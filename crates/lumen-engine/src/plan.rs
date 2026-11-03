@@ -89,6 +89,9 @@ pub struct DebugPlan {
 /// Wayland layer (ignored elsewhere).
 pub use lumen_platform::Layer;
 
+/// `--hwdec`: video decoder choice (spec 07 §14.1).
+pub use lumen_video::HwDecode;
+
 /// Everything the engine needs for a run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnginePlan {
@@ -98,6 +101,8 @@ pub struct EnginePlan {
     /// Frame-rate cap, at least 1.
     pub fps: u32,
     pub audio: AudioPlan,
+    /// Video decoding (`--hwdec`).
+    pub hwdec: HwDecode,
     pub pause: PausePlan,
     pub mouse: bool,
     pub parallax: bool,
@@ -121,6 +126,7 @@ impl Default for EnginePlan {
             layer: Layer::Bottom,
             fps: 30,
             audio: AudioPlan::default(),
+            hwdec: HwDecode::Auto,
             pause: PausePlan::default(),
             mouse: true,
             parallax: true,

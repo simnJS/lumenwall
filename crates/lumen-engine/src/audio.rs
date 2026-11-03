@@ -98,6 +98,43 @@ impl Audio {
         }
     }
 
+    /// Plays the sound track of a video wallpaper in a loop (spec 07 §14.1): `data` is the
+    /// whole file (memory-mapped), `name` gives the container hint. `None` with `--silent`.
+    pub fn add_video_sound(
+        &mut self,
+        name: &str,
+        data: lumen_audio::playback::SoundData,
+        volume: u8,
+    ) -> Option<lumen_audio::playback::ObjectId> {
+        if !self.player.is_enabled() {
+            return None;
+        }
+        // parity: the reference's player has a cubic volume curve, gain ≈ (v/128)³ (QO-15);
+        // the mixer applies v/128 once, the object carries the remaining (v/128)².
+        let v = f32::from(volume.min(128)) / 128.0;
+        let object = SoundObject {
+            files: vec![name.to_owned()],
+            mode: lumen_audio::sound::PlaybackMode::Loop,
+            volume: v * v,
+            min_time: 0.0,
+            max_time: 0.0,
+            start_silent: false,
+        };
+        self.sounds += 1;
+        self.player.add_object(
+            &object,
+            vec![SoundFile {
+                name: name.to_owned(),
+                data,
+            }],
+        )
+    }
+
+    /// Pauses or resumes one sound object (video wallpaper paused with its outputs).
+    pub fn set_object_playing(&self, id: lumen_audio::playback::ObjectId, playing: bool) {
+        self.player.set_object_playing(id, playing);
+    }
+
     /// Starts the capture (first frame, resume).
     pub fn resume(&mut self) {
         if let Some(c) = &mut self.capture {

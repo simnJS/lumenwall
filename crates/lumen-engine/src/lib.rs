@@ -17,6 +17,7 @@ pub mod plan;
 mod scene;
 pub mod shaders;
 mod texture;
+mod video;
 mod wallpaper;
 
 use std::path::PathBuf;

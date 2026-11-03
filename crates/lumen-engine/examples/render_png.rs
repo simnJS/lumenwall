@@ -10,6 +10,8 @@
 //!   --set name=value   property override (repeatable)
 //!   --assets DIR       Wallpaper Engine assets folder (default: Steam install)
 //!   --software         CPU adapter
+//!   --scaling MODE     stretch | fit | fill | default (default: default)
+//!   --hwdec MODE       video decoding: auto | nvdec-copy | no (default: auto)
 //! ```
 
 use std::collections::BTreeMap;
@@ -59,6 +61,21 @@ fn main() {
             "--assets" => assets = Some(PathBuf::from(val())),
             "--software" => opts.software = true,
             "--no-particles" => opts.particles = false,
+            "--scaling" => {
+                opts.scaling = match val().as_str() {
+                    "stretch" => lumen_engine::ScalingMode::Stretch,
+                    "fit" => lumen_engine::ScalingMode::Fit,
+                    "fill" => lumen_engine::ScalingMode::Fill,
+                    _ => lumen_engine::ScalingMode::Default,
+                }
+            }
+            "--hwdec" => {
+                opts.hwdec = match val().as_str() {
+                    "no" => lumen_engine::plan::HwDecode::No,
+                    "nvdec-copy" => lumen_engine::plan::HwDecode::NvdecCopy,
+                    _ => lumen_engine::plan::HwDecode::Auto,
+                }
+            }
             other => wallpapers.push(other.to_owned()),
         }
     }

@@ -19,6 +19,8 @@ thiserror.workspace = true
 tracing.workspace = true
 pollster = "0.4"
 png = "0.18"
+# Raw Vulkan for the optional video decode queues (`video_device`); same version as wgpu-hal.
+ash = "0.38.0"
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }

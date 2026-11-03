@@ -38,6 +38,9 @@ pub struct ContextOptions {
     pub pipeline_cache_dir: Option<PathBuf>,
     /// Enable timestamp queries for the debug GPU frame timer.
     pub profiling: bool,
+    /// Create the device with Vulkan Video decode queues when the adapter allows it
+    /// (zero-copy video wallpapers, see `video_device`). Only set when a video is loaded.
+    pub video_decode: bool,
 }
 
 impl Default for ContextOptions {
@@ -48,6 +51,7 @@ impl Default for ContextOptions {
             prefer_software: false,
             pipeline_cache_dir: None,
             profiling: false,
+            video_decode: false,
         }
     }
 }
@@ -215,6 +219,7 @@ pub struct GpuContext {
     memory: MemoryCounter,
     resources: AtomicU64,
     samplers: Mutex<HashMap<SamplerKey, wgpu::Sampler>>,
+    video: Option<crate::video_device::VideoQueues>,
 }
 
 impl GpuContext {
@@ -239,6 +244,10 @@ impl GpuContext {
             wanted |=
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         }
+        if options.video_decode {
+            // Plane views of decoded NV12 images (zero-copy video).
+            wanted |= wgpu::Features::TEXTURE_FORMAT_NV12;
+        }
         let features = available & wanted;
         let caps = GpuCaps {
             bc: features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
@@ -250,16 +259,30 @@ impl GpuContext {
             ),
         };
         let info = adapter.get_info();
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("lumen.device"),
-                required_features: features,
-                // Large spans (3 × 4K) need the adapter's real texture limits.
-                required_limits: adapter.limits(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Off,
-            }))?;
+        let desc = wgpu::DeviceDescriptor {
+            label: Some("lumen.device"),
+            required_features: features,
+            // Large spans (3 × 4K) need the adapter's real texture limits.
+            required_limits: adapter.limits(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+        };
+        let video_device = (options.video_decode
+            && info.backend == wgpu::Backend::Vulkan
+            && features.contains(wgpu::Features::TEXTURE_FORMAT_NV12))
+        .then(|| crate::video_device::open(&adapter, &desc))
+        .flatten();
+        let (device, queue, video) = match video_device {
+            Some((d, q, v)) => {
+                tracing::info!(target: "lumen_render", "video decode queues on the render device: {v:?}");
+                (d, q, Some(v))
+            }
+            None => {
+                let (d, q) = pollster::block_on(adapter.request_device(&desc))?;
+                (d, q, None)
+            }
+        };
         // Degrade gracefully (parity policy rule 2): log instead of aborting.
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
             tracing::error!(target: "lumen_render", "uncaptured GPU error: {e}");
@@ -284,6 +307,7 @@ impl GpuContext {
             memory: MemoryCounter::default(),
             resources: AtomicU64::new(0),
             samplers: Mutex::new(HashMap::new()),
+            video,
         };
         if caps.pipeline_cache
             && let Some(dir) = &options.pipeline_cache_dir
@@ -362,6 +386,13 @@ impl GpuContext {
     #[must_use]
     pub fn supports_bc(&self) -> bool {
         self.caps.bc
+    }
+
+    /// Vulkan Video queues of the device (zero-copy video decoding), when created with
+    /// [`ContextOptions::video_decode`] on a capable adapter.
+    #[must_use]
+    pub fn video_queues(&self) -> Option<&crate::video_device::VideoQueues> {
+        self.video.as_ref()
     }
 
     #[must_use]

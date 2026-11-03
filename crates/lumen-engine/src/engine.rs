@@ -25,6 +25,7 @@ use crate::audio::Audio;
 use crate::plan::{EngineControl, EnginePlan, OutputMode, Stopped};
 use crate::scene::{FrameState, SceneOptions, SceneRuntime, build_scene};
 use crate::shaders::{ShaderProvider, default_provider};
+use crate::video::{VideoSlot, notify_from};
 use crate::wallpaper::Wallpaper;
 use crate::{WallpaperResolver, cache_dir};
 
@@ -78,6 +79,9 @@ struct Output {
     /// The surface must be presented again (resize, first frame).
     dirty: bool,
     frame_requested: bool,
+    /// Video wallpapers: serial of the last presented frame, output image generation bound.
+    shown_serial: u64,
+    video_generation: u64,
 }
 
 struct SceneSlot {
@@ -108,6 +112,7 @@ struct Running {
     // Declaration order is drop order: GPU surfaces go before the native windows.
     outputs: Vec<Output>,
     scenes: Vec<Option<SceneSlot>>,
+    videos: Vec<Option<VideoSlot>>,
     compositor: Compositor,
     timer: Option<GpuTimer>,
     ctx: GpuContext,
@@ -288,6 +293,12 @@ impl Engine {
                 &ContextOptions {
                     pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
                     profiling: stats_enabled,
+                    // Video wallpapers: decode queues on the render device (zero copy).
+                    video_decode: self.plan.hwdec == crate::plan::HwDecode::Auto
+                        && self
+                            .wallpapers
+                            .iter()
+                            .any(|w| w.kind() == lumen_scene::ProjectKind::Video),
                     ..ContextOptions::default()
                 },
                 &[&first_surface],
@@ -311,6 +322,7 @@ impl Engine {
         let mut running = Running {
             outputs: Vec::new(),
             scenes: (0..self.wallpapers.len()).map(|_| None).collect(),
+            videos: (0..self.wallpapers.len()).map(|_| None).collect(),
             compositor: Compositor::new(&ctx),
             timer,
             ctx,
@@ -349,7 +361,8 @@ impl Engine {
             if let Some(stop) = self.drain_control(&mut running, control) {
                 break Ok(stop);
             }
-            if let Err(e) = running.surfaces.wait(Wait::Block) {
+            let wait = video_deadline(&running).map_or(Wait::Block, Wait::Until);
+            if let Err(e) = running.surfaces.wait(wait) {
                 break Err(e.to_string());
             }
             running.iteration += 1;
@@ -367,8 +380,12 @@ impl Engine {
             if let Some(s) = stop {
                 break Ok(s);
             }
+            request_due_videos(&mut running);
         };
         log_summary(&running.stats);
+        for v in running.videos.iter().flatten() {
+            v.log_stats();
+        }
         running.ctx.wait_idle();
         drop(running);
         result
@@ -386,6 +403,9 @@ impl Engine {
                 EngineControl::SetFps(fps) => {
                     self.plan.fps = fps.max(1);
                     running.surfaces.set_max_fps(self.plan.fps);
+                    for v in running.videos.iter().flatten() {
+                        v.player.set_max_fps(self.plan.fps);
+                    }
                 }
                 EngineControl::SetProperties(props) => {
                     for (i, wp) in self.wallpapers.iter_mut().enumerate() {
@@ -459,6 +479,7 @@ impl Engine {
                     r.audio.pause();
                     r.audio.update(0.0, true);
                 }
+                sync_video_pause(r);
             }
             Event::Resumed(output) => {
                 let all_paused = r.outputs.iter().all(|o| o.paused);
@@ -471,6 +492,7 @@ impl Engine {
                 if all_paused {
                     r.audio.resume();
                 }
+                sync_video_pause(r);
             }
             Event::Frame(id) => self.render(r, id),
             Event::Pointer(p) => {
@@ -523,7 +545,27 @@ impl Engine {
         };
         let size = info.physical_size;
         let surface = OutputSurface::new(&r.ctx, surface, size).map_err(|e| e.to_string())?;
-        if r.scenes[target].is_none() {
+        let video = self.wallpapers[target].kind() == lumen_scene::ProjectKind::Video;
+        if video && r.videos[target].is_none() {
+            let t0 = Instant::now();
+            let slot = VideoSlot::open(
+                &r.ctx,
+                &self.wallpapers[target],
+                &self.plan,
+                &mut r.audio,
+                Some(notify_from(self.waker.clone())),
+            )?;
+            tracing::info!(
+                "video wallpaper '{}' {}x{} loaded in {:.0} ms; GPU memory tracked {:.1} MiB",
+                self.wallpapers[target].project.title,
+                slot.player.size().0,
+                slot.player.size().1,
+                t0.elapsed().as_secs_f64() * 1000.0,
+                r.ctx.memory().bytes() as f64 / 1048576.0,
+            );
+            r.videos[target] = Some(slot);
+        }
+        if !video && r.scenes[target].is_none() {
             let t0 = Instant::now();
             let tplan = &self.plan.targets[target];
             let wp = &mut self.wallpapers[target];
@@ -562,14 +604,19 @@ impl Engine {
                 last_time: 0.0,
             });
         }
-        let Some(slot) = r.scenes[target].as_ref() else {
-            return Ok(());
+        let source = match (&r.videos[target], &r.scenes[target]) {
+            (Some(v), _) => v.player.output(),
+            (None, Some(slot)) => slot.runtime.scene.targets().get(slot.runtime.full),
+            (None, None) => return Ok(()),
         };
+        let video_generation = r.videos[target]
+            .as_ref()
+            .map_or(0, |v| v.player.generation());
         let tplan = &self.plan.targets[target];
         let composer = r.compositor.create_output(
             &r.ctx,
             surface.format(),
-            slot.runtime.scene.targets().get(slot.runtime.full),
+            source,
             ComposeSettings {
                 scaling: tplan.scaling,
                 clamp: tplan.clamp,
@@ -598,9 +645,12 @@ impl Engine {
             paused: !reasons.is_empty(),
             dirty: true,
             frame_requested: false,
+            shown_serial: u64::MAX,
+            video_generation,
         };
         request(r.surfaces.as_mut(), &mut out);
         r.outputs.push(out);
+        sync_video_pause(r);
         Ok(())
     }
 
@@ -614,6 +664,10 @@ impl Engine {
         }
         let start = Instant::now();
         let target = r.outputs[oi].target;
+        if r.videos[target].is_some() {
+            render_video(r, oi, start);
+            return;
+        }
         let Some(slot) = r.scenes[target].as_mut() else {
             return;
         };
@@ -733,6 +787,150 @@ impl Engine {
         let animated = slot.runtime.animated || r.audio.spectrum_enabled();
         if animated || slot.runtime.scene.needs_redraw() {
             request(r.surfaces.as_mut(), o);
+        }
+    }
+}
+
+/// One frame of a video wallpaper on one output: the newest due frame is uploaded (or
+/// bound, zero copy) and converted once per loop iteration, then composed like a scene.
+fn render_video(r: &mut Running, oi: usize, start: Instant) {
+    let id = r.outputs[oi].id;
+    let target = r.outputs[oi].target;
+    let Some(v) = r.videos[target].as_mut() else {
+        return;
+    };
+    if v.updated_at != r.iteration {
+        v.updated_at = r.iteration;
+        v.player.update(&r.ctx, Instant::now());
+    }
+    let o = &mut r.outputs[oi];
+    let convert = v.player.needs_redraw();
+    if !convert && !o.dirty && o.shown_serial == v.serial {
+        return;
+    }
+    match o.surface.acquire(&r.ctx) {
+        Ok(Some(frame)) => {
+            let mut enc = r
+                .ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("lumen.frame.video"),
+                });
+            if let Some(t) = &mut r.timer {
+                t.begin(&mut enc);
+            }
+            // Zero copy: `pre` makes the decoded image readable; same submission, first.
+            let pre = if convert {
+                v.serial += 1;
+                v.player.encode(&r.ctx, &mut enc)
+            } else {
+                None
+            };
+            if o.video_generation != v.player.generation() {
+                o.video_generation = v.player.generation();
+                let settings = o.composer.settings();
+                r.compositor
+                    .rebind(&r.ctx, &mut o.composer, v.player.output(), settings);
+            }
+            let size = frame.size();
+            o.uv = o.composer.update(&r.ctx, size, v.player.size());
+            r.compositor.encode(
+                &mut enc,
+                &o.composer,
+                frame.view(),
+                [0.0, 0.0, size.0 as f32, size.1 as f32],
+                Some(wgpu::Color::BLACK),
+            );
+            if let Some(t) = &mut r.timer {
+                t.end(&mut enc);
+            }
+            r.ctx
+                .queue()
+                .submit(pre.into_iter().chain(std::iter::once(enc.finish())));
+            if let Some(t) = &mut r.timer {
+                t.after_submit();
+            }
+            r.surfaces.pre_present(id);
+            frame.present(&r.ctx);
+            o.dirty = false;
+            o.shown_serial = v.serial;
+            r.rendered += 1;
+            let gpu = r.timer.as_mut().and_then(|t| t.poll(&r.ctx));
+            record_stats(&mut r.stats, start.elapsed(), gpu, &r.ctx, 0);
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("output {id}: {e}"),
+    }
+    if r.screenshot
+        .as_ref()
+        .is_some_and(|(_, delay)| r.rendered > u64::from(*delay))
+        && let Some((path, _)) = r.screenshot.take()
+    {
+        let rt = v.player.output();
+        match lumen_render::headless::read_texture_rgba8(&r.ctx, rt.texture()) {
+            Ok(px) => {
+                let (w, h) = rt.size();
+                match lumen_render::headless::write_png(&path, w, h, &px) {
+                    Ok(()) => tracing::info!("screenshot written to {}", path.display()),
+                    Err(e) => tracing::error!("screenshot: {e}"),
+                }
+            }
+            Err(e) => tracing::error!("screenshot: {e}"),
+        }
+    }
+}
+
+/// A video is paused while every output showing it is paused (spec 07 §9.4).
+fn sync_video_pause(r: &mut Running) {
+    for (target, slot) in r.videos.iter_mut().enumerate() {
+        let Some(v) = slot else {
+            continue;
+        };
+        let mut outputs = r.outputs.iter().filter(|o| o.target == target).peekable();
+        let paused = outputs.peek().is_none() || outputs.all(|o| o.paused);
+        if paused != v.is_paused() {
+            tracing::info!("video {}", if paused { "paused" } else { "resumed" });
+            v.set_paused(paused, &r.audio);
+        }
+    }
+}
+
+/// Earliest instant a playing video needs a frame, for videos whose outputs have no frame
+/// request pending (a pending request is served by the platform's own pacing).
+fn video_deadline(r: &Running) -> Option<Instant> {
+    r.videos
+        .iter()
+        .enumerate()
+        .filter_map(|(target, v)| {
+            let v = v.as_ref()?;
+            let waiting = r
+                .outputs
+                .iter()
+                .any(|o| o.target == target && !o.paused && !o.frame_requested);
+            if waiting {
+                v.player.next_deadline()
+            } else {
+                None
+            }
+        })
+        .min()
+}
+
+/// Requests a frame for the outputs of every video whose next frame is due.
+fn request_due_videos(r: &mut Running) {
+    let now = Instant::now();
+    for (target, v) in r.videos.iter().enumerate() {
+        let Some(v) = v else {
+            continue;
+        };
+        if v.player.next_deadline().is_some_and(|d| d <= now) {
+            for o in r
+                .outputs
+                .iter_mut()
+                .filter(|o| o.target == target && !o.paused)
+            {
+                request(r.surfaces.as_mut(), o);
+            }
         }
     }
 }

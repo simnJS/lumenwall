@@ -12,6 +12,9 @@ default = ["we-shaders"]
 # Real Wallpaper Engine shaders through lumen-shader. Without it every WE shader is replaced by a
 # WGSL passthrough that follows the lumen-render binding contract (logged once per shader).
 we-shaders = ["dep:lumen-shader"]
+# FFmpeg video decoding on platforms where it is not enabled automatically (Windows: needs
+# an FFmpeg 8 shared build and its headers, see lumen-video's README). Always on for Linux.
+video-ffmpeg = ["lumen-video/ffmpeg"]
 
 [dependencies]
 lumen-formats.workspace = true
@@ -21,6 +24,7 @@ lumen-render.workspace = true
 lumen-particles.workspace = true
 lumen-platform.workspace = true
 lumen-audio.workspace = true
+lumen-video.workspace = true
 lumen-shader = { workspace = true, optional = true }
 # Same versions as lumen-render: only used for command encoders and surfaces it hands out.
 wgpu = { version = "30.0.1", default-features = false, features = ["std"] }
@@ -33,6 +37,8 @@ tracing.workspace = true
 # PulseAudio-protocol capture and automute (also served by pipewire-pulse). libpulse is loaded
 # at run time; without a sound server the spectrum stays at zero.
 lumen-audio = { workspace = true, features = ["pulse"] }
+# Video wallpapers: FFmpeg shared libraries (libavcodec/libavformat/libavutil/libswscale).
+lumen-video = { workspace = true, features = ["ffmpeg"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
