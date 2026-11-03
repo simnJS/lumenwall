@@ -88,7 +88,7 @@ Disposition d'une entrée de table :
 2. Lire N puis les N entrées. Aucune autre validation n'est faite par l'amont.
 3. Calculer `base`.
 
-Recommandations pour Lumen (robustesse, sans changer le résultat sur une archive valide) : refuser une longueur de `sstr` supérieure à la taille restante du fichier (`FinDeFluxInattendue`), et refuser une entrée dont `base + offset + taille` dépasse la taille du fichier (`E_PKG_ENTREE_HORS_LIMITES`). Ces deux contrôles sont des divergences volontaires (QO-02).
+Recommandations pour Lumen (robustesse, sans changer le résultat sur une archive valide) : refuser une longueur de `sstr` supérieure à la taille restante du fichier (`FinDeFluxInattendue`, **à l'ouverture**), et refuser une entrée dont `base + offset + taille` dépasse la taille du fichier (`E_PKG_ENTREE_HORS_LIMITES`). Ce second contrôle a lieu **à la lecture de l'entrée** (`ouvrir`), jamais à l'ouverture de l'archive : il ne touche que l'entrée fautive (amendement A.4). Ces deux contrôles sont des divergences volontaires (QO-02).
 
 ### 1.5 Recherche d'une entrée
 
@@ -136,11 +136,13 @@ Toute donnée qui suit le dernier bloc attendu est ignorée.
 | 0x1E | 4 | hauteur de texture `HT` | `u32` | Hauteur de la surface allouée. |
 | 0x22 | 4 | largeur d'image `LI` | `u32` | Largeur utile du contenu (≤ `LT` en pratique). |
 | 0x26 | 4 | hauteur d'image `HI` | `u32` | Hauteur utile du contenu. |
-| 0x2A | 4 | réservé | `u32` | Lu et ignoré. |
+| 0x2A | 4 | réservé | `u32` | Lu et ignoré. Dans le corpus, il contient une couleur RGBA (dernier octet `FF`). |
 | 0x2E | 9 | magic du conteneur | `magic9` | `TEXB0001\0` … `TEXB0004\0`. Voir §2.5. |
 | 0x37 | 4 | nombre d'images `NI` | `u32` | Lu **avant** la validation du magic du conteneur. |
 
 Les deux magics sont validés dans l'ordre (TEXV puis TEXI), puis le format, puis les drapeaux. La première erreur rencontrée interrompt la lecture.
+
+**Exception :** si le drapeau `VOLUME` (0x40) est levé, un `u32` de profondeur s'insère à 0x2A. Le champ réservé passe à 0x2E et tous les offsets suivants sont décalés de +4 (amendement A.1).
 
 ### 2.3 Énumération des formats de pixels
 
@@ -179,9 +181,10 @@ Les formats marqués « non » passent l'analyse sans erreur. L'erreur `E_TEX_FO
 | 0x4 (4) | `ANIME` | La texture est animée : un bloc TEXS suit les images (§2.8). |
 | 0x8 (8) | `UV_BORNES_BORDURE` | **Ignoré** pour les textures `.tex` (QO-05). |
 | 0x20 (32) | `VIDEO` | La texture est une vidéo (§2.10.2). |
+| 0x40 (64) | `VOLUME` | Texture 3D : profondeur dans l'en-tête TEXI et dans chaque en-tête de mip. Inconnu de l'amont, mais Lumen DOIT le prendre en charge (amendement A.1). |
 | 0x80000 (524288) | `PRIORITE_ALPHA` | Lu, jamais exploité. Indique que l'alpha est porté par le canal G (RG88) ou R (R8). |
 
-**Règle de validation exacte :** la valeur est acceptée si et seulement si elle est **strictement inférieure à 524335** (`0x8002F`, la somme de tous les bits ci-dessus). C'est une comparaison numérique, pas un masque. Conséquences à reproduire telles quelles (QO-04) :
+**Règle de validation exacte :** la valeur est acceptée si et seulement si elle est **strictement inférieure à 524335** (`0x8002F`, la somme des bits ci-dessus **hors `VOLUME`**). C'est une comparaison numérique, pas un masque. L'ajout de `VOLUME` ne change pas ce seuil. Conséquences à reproduire telles quelles (QO-04) :
 
 - les bits non documentés (16, 64, 128…) sont acceptés tant que la valeur reste < 524335 ;
 - la combinaison de **tous** les bits connus (524335) est refusée ;
@@ -211,7 +214,7 @@ Conséquence : un `TEXB0004` avec `TIE = 35` (WEBP selon l'énumération) reste 
 
 Valeurs par défaut quand le champ est absent : `TIE` = inconnu pour v1 et v2 ; `est_mp4` = faux hors v4.
 
-Position du premier octet des images : 0x3B en v1 et v2, 0x3F en v3, 0x43 en v4 (que la version effective soit 3 ou 4).
+Position du premier octet des images : 0x3B en v1 et v2, 0x3F en v3, 0x43 en v4 (que la version effective soit 3 ou 4). Avec `VOLUME`, ces positions sont décalées de +4 : 0x3F, 0x43 et 0x47 (A.1).
 
 ### 2.6 Type d'image embarquée (`TIE`)
 
@@ -242,7 +245,7 @@ Les valeurs reprennent la numérotation des formats de la bibliothèque FreeImag
 Interprétation :
 
 - **Seule la distinction « inconnu / connu » compte pour le décodage.** Dès que `TIE` ≠ inconnu, chaque mipmap est un fichier image complet (PNG, JPEG…). Le décodeur choisit le format **par reniflage du contenu** et ignore la valeur de `TIE`.
-- Le décodeur de l'amont reconnaît JPEG (baseline et progressif), PNG (y compris 16 bits, ramené à 8 bits), BMP, TGA, PSD (image composite), GIF (**première frame uniquement**), HDR (converti en 8 bits), PIC (Softimage) et PNM (PGM/PPM binaires). Il ne reconnaît **pas** WEBP, TIFF, DDS, EXR, ICO, JP2/J2K, JXR, etc. Pour être fidèle, Lumen DOIT reconnaître au moins cet ensemble. Il PEUT en reconnaître davantage (QO-07).
+- Le décodeur de l'amont est la bibliothèque tierce stb_image (domaine public), compilée dans sa configuration par défaut. Il reconnaît JPEG (baseline et progressif), PNG (y compris 16 bits, ramené à 8 bits), BMP, TGA, PSD (image composite), GIF (**première frame uniquement**), HDR (converti en 8 bits), PIC (Softimage) et PNM (PGM/PPM binaires). Il ne reconnaît **pas** WEBP, TIFF, DDS, EXR, ICO, JP2/J2K, JXR, etc. Le corpus ne contient que des PNG et des JPEG. Les exigences sont donc graduées : Lumen DOIT décoder PNG et JPEG, DEVRAIT décoder GIF, BMP et TGA, et PEUT décoder PSD, PIC, HDR, PNM ou d'autres formats. Le détail et le sous-ensemble PSD sont dans l'amendement A.2 (QO-07).
 - La sortie du décodage est toujours forcée en **RGBA 8 bits**. La largeur et la hauteur décodées remplacent celles de l'en-tête de mip pour l'envoi au GPU, mais **pas** pour les calculs de dimensions du §2.11.
 - Aucune correction d'orientation EXIF, aucun retournement vertical, aucune prémultiplication d'alpha.
 - Si le décodage échoue, la texture GPU est allouée aux dimensions de l'en-tête de mip avec un contenu indéterminé (en pratique noir transparent), et l'erreur passe inaperçue. Lumen DOIT remplir de zéros (RGBA = 0,0,0,0) et journaliser un avertissement (QO-07).
@@ -271,6 +274,8 @@ Le niveau 0 est le plus grand. Les niveaux sont stockés dans l'ordre croissant 
 | 4 | données | `TS` octets bruts |
 
 Il n'y a pas de champ de compression : la mipmap est réputée non compressée.
+
+Dans toutes les versions, si le drapeau `VOLUME` est levé, un `u32` de profondeur s'insère juste après la hauteur (A.1).
 
 **Versions 2 et 3 (y compris `TEXB0004` redescendu en 3) :**
 
@@ -414,7 +419,7 @@ Les surfaces de rendu intermédiaires créées pour un objet image héritent des
 
 #### 2.10.5 Interaction avec les shaders
 
-Quand la texture d'entrée principale d'une passe est au format RG88, le combo de shader `TEX0FORMAT` est forcé à 8. Pour R8, il est forcé à 9. Pour les autres formats, le combo n'est pas touché. Le détail est dans la spec shaders.
+Le combo de shader `TEX0FORMAT` dépend de la **texture principale de l'objet**, et non de la texture réellement liée à la passe. Cette règle s'applique à toutes les passes de l'objet, y compris ses passes d'effet. Si le format de pixels **déclaré** de cette texture (champ 0x12) vaut RG88 (8), le combo est forcé à 8. S'il vaut R8 (9), le combo est forcé à 9. Pour tout autre format, le combo n'est pas touché. La décision ne regarde ni `TIE` ni le format GPU réellement envoyé : une image embarquée envoyée en RGBA8 qui déclare RG88 force quand même 8 (amendement A.3). Le détail est dans la spec shaders.
 
 ### 2.11 Dimensions : texture et image
 
@@ -462,6 +467,7 @@ Définitions utilisées par le rendu :
 | `FinDeFluxInattendue` | troncature (spécifique à Lumen) | analyse |
 | `E_TEX_FORMAT_GPU` | format brut non pris en charge par le GPU | création GPU |
 | `E_TEX_VIDEO_VIDE` | vidéo sans mipmap | création GPU |
+| `E_TEX_VOLUME` | `VOLUME` combiné à `ANIME`, `VIDEO` ou MP4 (spécifique à Lumen, A.1) | création GPU |
 
 Toutes sont de catégorie `Invalide`. Dans l'amont, elles **ne sont pas** rattrapées par la boucle de repli multi-fonds (§4.11) : elles remontent comme erreurs fatales.
 
@@ -786,8 +792,8 @@ Les éléments de liste de lecture lus dans `config.json` sont des chemins Windo
 | Objet | Champs |
 |---|---|
 | Archive | chemin source ; liste ordonnée des entrées (nom en octets, offset `u32`, taille `u32`) ; `base` ; accès en lecture positionnelle |
-| Texture analysée | version effective du conteneur (1–4) ; version d'animation (0 = aucune, 1–3) ; format (`u32`) ; drapeaux (`u32`) ; `LT`, `HT`, `LI`, `HI` ; `LA`, `HA` ; `TIE` (`i32`) ; `est_mp4` ; `NI` ; images (liste de listes de mipmaps) ; frames ; `colonnes`, `lignes`, `frames_planche`, `durée_planche` |
-| Mipmap | largeur, hauteur (de l'en-tête) ; compression ; taille finale ; octets décompressés ; métadonnées texte (v4 effective) |
+| Texture analysée | version effective du conteneur (1–4) ; version d'animation (0 = aucune, 1–3) ; format (`u32`) ; drapeaux (`u32`) ; `LT`, `HT`, `LI`, `HI` ; `PT` (profondeur, 1 sans `VOLUME`) ; `LA`, `HA` ; `TIE` (`i32`) ; `est_mp4` ; `NI` ; images (liste de listes de mipmaps) ; frames ; `colonnes`, `lignes`, `frames_planche`, `durée_planche` |
+| Mipmap | largeur, hauteur, profondeur (de l'en-tête ; profondeur 1 sans `VOLUME`) ; compression ; taille finale ; octets décompressés ; métadonnées texte (v4 effective) |
 | Frame | F0 `u32` ; F1 à F7 `f32` |
 | Maillage de marionnette | positions brutes (x, y, z) ; UV ; indices `u16` |
 
@@ -1072,6 +1078,10 @@ Variantes :
 | tronquer le fichier à 100 octets | `FinDeFluxInattendue` |
 | `TS` (0x53) = `FF FF FF FF` (−1) | `E_TEX_TAILLE` |
 
+### F11 — texture `VOLUME`
+
+La fixture F11 figure dans l'amendement A.5.
+
 ---
 
 ## 8. Questions ouvertes
@@ -1079,18 +1089,18 @@ Variantes :
 Chaque entrée décrit le comportement amont observé puis une recommandation pour Lumen, à confirmer.
 
 - **QO-01 — Lectures au-delà de la fin.** L'amont ne contrôle jamais l'état du flux. Une archive ou une texture tronquée produit des valeurs indéterminées, avec un risque de blocage sur une `cstr` sans terminateur. *Reco :* erreur `FinDeFluxInattendue` (§0.3).
-- **QO-02 — Bornes du `.pkg`.** Aucune vérification des longueurs de `sstr`, des offsets ni des tailles. Les offsets et `base` sont sur 32 bits, ce qui limite les archives à 4 Gio. *Reco :* contrôles du §1.4 ; ils ne changent rien pour les archives valides.
-- **QO-03 — Version du `.pkg`.** Seul le préfixe `PKGV` est vérifié et aucune différence de disposition entre versions n'est connue. *À confirmer* sur un corpus réel que toutes les versions partagent la disposition du §1.2.
+- **QO-02 — Bornes du `.pkg`.** Aucune vérification des longueurs de `sstr`, des offsets ni des tailles. Les offsets et `base` sont sur 32 bits, ce qui limite les archives à 4 Gio. *Reco :* contrôles du §1.4 ; ils ne changent rien pour les archives valides. *Tranché le 2026-11-03 :* le contrôle des bornes d'une entrée se fait à la lecture de cette entrée seulement (A.4).
+- **QO-03 — Version du `.pkg`.** Seul le préfixe `PKGV` est vérifié et aucune différence de disposition entre versions n'est connue. *Corpus local (2026-11-03) :* `PKGV0009`, `PKGV0018`, `PKGV0019`, `PKGV0021` et `PKGV0023` se lisent tous avec la disposition du §1.2, sans entrée hors limites.
 - **QO-04 — Validation des drapeaux.** Le test « < 524335 » refuse la combinaison de tous les bits connus et accepte des bits inconnus. Cela ressemble à une erreur de borne (≤ visé ?). *Reco :* reproduire tel quel par fidélité, et journaliser les bits inconnus.
 - **QO-05 — `UV_BORNES_BORDURE` ignoré** pour les textures `.tex`, mais honoré pour les surfaces de rendu dérivées. Probable oubli. *Reco :* reproduire, puis réévaluer d'après des captures du logiciel original.
 - **QO-06 — Ambiguïté 35 = WEBP = MP4.** Dans un `TEXB0004`, `TIE = 35` sans indicateur MP4 garde le format de mip v4 et tente un décodage d'image qui échoue, faute de décodeur WEBP dans l'amont. *Reco :* reproduire la disposition. Si Lumen sait décoder WEBP, il peut l'afficher (divergence visible à arbitrer).
-- **QO-07 — Ensemble de décodeurs d'images.** L'amont décode par reniflage un ensemble limité de formats (§2.6), sans WEBP ni TIFF. En cas d'échec, le contenu est indéterminé. *Reco :* même ensemble au minimum, zéros en cas d'échec. Décider si les formats supplémentaires sont activés.
+- **QO-07 — Ensemble de décodeurs d'images.** L'amont décode par reniflage un ensemble limité de formats (§2.6), sans WEBP ni TIFF. En cas d'échec, le contenu est indéterminé. *Tranché le 2026-11-03 (A.2) :* exigences graduées. PNG et JPEG sont obligatoires, GIF, BMP et TGA recommandés, PSD, PIC, HDR et PNM facultatifs. En cas d'échec ou de format non pris en charge, la texture est remplie de zéros. Les formats supplémentaires restent à arbitrer.
 - **QO-08 — Compression inconnue et taille LZ4.** Avec `C` ≥ 2, on lit `TD` octets bruts au lieu de `TS`. Le nombre d'octets décompressés n'est pas comparé à `TD`. *Reco :* reproduire la lecture `C ≥ 2` et le remplissage par zéros ; ajouter un avertissement.
 - **QO-09 — Image sans mipmap (`NM = 0`).** Plage de niveaux de mip négative (débordement) et accès hors bornes si la taille de texture de cette image est demandée. *Reco :* traiter comme une image 1×1 transparente et journaliser.
 - **QO-10 — Alignement des lignes.** L'amont fixe l'alignement de dépaquetage à 1 octet uniquement lors de l'envoi d'une texture R8, **et ne le restaure jamais**. Une texture RG88 de largeur impaire est donc lue différemment selon qu'une R8 a été chargée avant ou non. *Reco :* toujours considérer les données comme strictement contiguës (alignement 1).
 - **QO-11 — TEXS sans frame.** Avec `NF = 0` en TEXS0001/0002, l'amont lit une frame inexistante. *Reco :* `LA = HA = 0`, pas de planche ; l'animation affiche l'image 0.
 - **QO-12 — Format GPU validé avant le test vidéo.** Une texture qui porte le drapeau `VIDEO`, sans image embarquée et avec un format de pixels non pris en charge, est refusée. *Reco :* reproduire, cas rare.
-- **QO-13 — Champ réservé à 0x2A et champs réservés de la mip v4.** Leur sens est inconnu. Les métadonnées JSON de la mip v4 sont ignorées. *À documenter* si un corpus révèle un usage.
+- **QO-13 — Champ réservé à 0x2A et champs réservés de la mip v4.** Leur sens est inconnu. Les métadonnées JSON de la mip v4 sont ignorées. *Corpus :* le champ réservé contient toujours une couleur RGBA à alpha `FF` (par exemple `7E 7E FE FF` pour les cartes de normales, `00 00 00 FF` pour des halos). Il reste ignoré. Avec `VOLUME`, il se trouve à 0x2E (A.1).
 - **QO-14 — Valeurs de frame TEXS0001.** F5 et F6 sont ignorés (valent 0), alors qu'ils contiennent probablement `wy` et `hx` en entiers. Les entiers sont convertis en flottant tels quels (non signés). *Reco :* reproduire.
 - **QO-15 — Analyse heuristique MDLV.** L'amont cherche un motif (pas de 80 octets par sommet, indices multiples de 6) au lieu de suivre la structure. Il ignore squelette et animations. La documentation amont décrit un sommet de 52 octets alors que le code en utilise 80. La recherche de `MDLS` ne teste pas la toute dernière position possible (`p + 4 = |D|`). *Reco :* reproduire l'heuristique à l'identique. Une analyse structurée viendra dans une spec dédiée si besoin.
 - **QO-16 — Versions MDLV.** Seules `MDLV0021` et `MDLV0023` sont acceptées. *À confirmer :* existe-t-il d'autres versions dans le corpus ?
@@ -1112,3 +1122,195 @@ Chaque entrée décrit le comportement amont observé puis une recommandation po
 - **QO-32 — `.pkg` présent mais invalide.** Il est ignoré silencieusement, avec seulement une ligne de journal. Le fond d'écran peut alors se charger partiellement depuis les assets globaux. *Reco :* reproduire.
 - **QO-33 — Documentation amont divergente.** Le document de format `.tex` publié avec l'amont présente le `u32` qui suit le magic TEXB comme « inconnu », alors que le code l'utilise comme nombre d'images, et il omet la boucle par image. Cette spec suit le comportement effectif.
 - **QO-34 — Hôtes gros-boutistes.** L'amont lirait les `u32` dans l'ordre de l'hôte sur une machine gros-boutiste. Cette situation est hors cible, et Lumen lit toujours en little-endian.
+- **QO-35 — Textures `VOLUME` hors cas observé.** Seule la combinaison « TEXI0001 + `TEXB0004` redescendu en v3 + PNG embarquée + 1 image + 1 mip » existe dans le corpus (les 28 LUT). La position du champ de profondeur dans les mips v1, v2 et v4 effective, ainsi que les volumes en pixels bruts, sont extrapolés (A.1). Les 28 en-têtes étant identiques, l'attribution de 1024 à `LI` et de la profondeur à 0x2A ne peut pas être prouvée par les données. Elle n'influe que sur le vecteur de résolution. *À confirmer* si d'autres textures 3D apparaissent.
+- **QO-36 — `TEX0FORMAT` et images embarquées.** L'amont force 8 ou 9 d'après le format déclaré, même quand l'image embarquée est envoyée en RGBA8 (A.3). Les shaders liraient alors les canaux d'une texture RGBA comme ceux d'une RG88 ou d'une R8. Le comportement du logiciel original est inconnu, et le cas est absent du corpus : toutes les images embarquées déclarent le format 0. *Reco :* reproduire l'amont.
+- **QO-37 — Entrée `.pkg` hors limites et empoisonnement du flux.** Dans l'amont, une lecture courte laisse le flux partagé de l'archive en échec. Toutes les lectures suivantes dans la même archive renvoient alors des zéros, sans erreur (A.4). *Reco :* ne pas reproduire. Seule l'entrée fautive est en erreur.
+
+---
+
+## Amendements 2026-11-03
+
+Cette section répond à quatre questions bloquantes de l'implémenteur. Pour chacune, elle donne le comportement amont observé, ce que montre le corpus local, puis la règle normative pour Lumen. Les corrections correspondantes ont aussi été faites en place : §1.4, §2.2, §2.4, §2.5, §2.6, §2.7.1, §2.10.5, §2.13, §6, §7 et QO-02, QO-03, QO-07, QO-13, QO-35 à QO-37.
+
+Corpus examiné en lecture seule : les 311 `.tex` du dossier `assets` de l'installation et 13 fonds workshop installés, soit 7 `scene.pkg` et 128 `.tex` en clair ou dans les archives.
+
+### A.1 Drapeau 0x40 `VOLUME` (textures 3D, LUT de couleur)
+
+**Amont.** L'amont ne connaît pas ce bit. La valeur 0x42 (66) passe la validation des drapeaux, puisqu'elle est inférieure à 524335. L'amont lit ensuite la disposition ordinaire : il prend la profondeur (32, à 0x2A) pour le champ réservé, puis lit le magic du conteneur à 0x2E. Il y trouve les 4 octets de couleur suivis de `TEXB0`, ce qui donne **`E_TEX_TEXB`**. Cette erreur de catégorie `Invalide` n'est pas rattrapée (§4.11). Un fond qui demanderait une de ces textures échouerait donc entièrement. En pratique, l'amont ne les charge jamais :
+
+- il ne prend en charge ni les textures 3D ni la correction de couleur par LUT ;
+- aucun fond du corpus local ne référence `materials/lut/…` ;
+- dans les assets, le seul consommateur connu est le shader `ccsimple` (`sampler3D g_Texture1` sous le combo `LUT`), qui ne fait l'objet d'aucun traitement particulier dans l'amont.
+
+**Corpus.** Le bit 0x40 n'apparaît que dans les 28 fichiers `assets/materials/lut/*.tex`, tous avec la valeur 0x42 (`VOLUME` + `UV_BORNES`). Ces 28 fichiers ont un en-tête identique, à la couleur réservée près :
+
+- TEXI0001, format 0, `TEXB0004`, `NI` = 1, `TIE` = 13 (PNG) et indicateur MP4 = 0, donc version effective 3 ;
+- `NM` = 1, mip 0 de 32 × 32 × 32, `C` = 0, `TD` = 0 (écrasé par `TS` selon le §2.7.2), `TS` = taille de la PNG ;
+- PNG RGB 8 bits non entrelacée de 32 × 1024.
+
+Avec la disposition ci-dessous, chaque fichier est lu exactement jusqu'à son dernier octet.
+
+**Disposition normative de l'en-tête quand `VOLUME` est levé** (TEXI0001, seule version de TEXI connue). La règle dépend du drapeau seul, quelle que soit la version de TEXB :
+
+| Offset | Champ | Type | Valeur dans les LUT |
+|---|---|---|---|
+| 0x12 | format | `u32` | 0 |
+| 0x16 | drapeaux | `u32` | 0x42 |
+| 0x1A | `LT` | `u32` | 32 |
+| 0x1E | `HT` | `u32` | 32 |
+| 0x22 | `LI` | `u32` | 1024 |
+| 0x26 | `HI` | `u32` | 32 |
+| 0x2A | **profondeur de texture `PT`** (champ ajouté) | `u32` | 32 |
+| 0x2E | réservé : couleur RGBA, ignorée | `u32` | par exemple `4A CC 3C FF` |
+| 0x32 | magic du conteneur | `magic9` | `TEXB0004\0` |
+| 0x3B | `NI` | `u32` | 1 |
+| 0x3F | `TIE` (v3 et v4) | `u32` | 13 |
+| 0x43 | indicateur MP4 (v4) | `u32` | 0 |
+| 0x47 | début des images (v4) | — | — |
+
+Le premier octet des images se trouve donc à 0x3F en v1 et v2, à 0x43 en v3 et à 0x47 en v4.
+
+**Disposition normative d'une mip quand `VOLUME` est levé.** Un `u32` de profondeur `PM` suit immédiatement la hauteur :
+
+| Version effective | Champs, dans l'ordre |
+|---|---|
+| 1 | largeur, hauteur, **profondeur**, `TS`, données |
+| 2 et 3 | largeur, hauteur, **profondeur**, `C`, `TD`, `TS`, données |
+| 4 | réservé A, réservé B, métadonnées, réservé C, largeur, hauteur, **profondeur**, `C`, `TD`, `TS`, données |
+
+Seule la ligne « 2 et 3 » est observée, par le biais de `TEXB0004` redescendu en 3. Les autres lignes sont extrapolées (QO-35).
+
+**Sens des champs.** `LT` × `HT` donne la taille d'une tranche, et `PT` = `PM` le nombre de tranches. `LI` × `HI` (1024 × 32) correspond à l'image source sous forme de « bande » : 32 tranches de 32 × 32 placées côte à côte. Lumen ne vérifie pas que `PT` est égal à `PM`, de même que `LT`/`HT` ne sont pas comparés à la mip 0 en 2D. La création GPU n'utilise que les en-têtes de mip.
+
+**Organisation des texels.** Une mip embarquée est **une** image 2D de largeur `L` et de hauteur `H × PM`. La tranche `z` occupe les lignes `[z·H, (z+1)·H)`. Le fichier `neutral.tex` (LUT identité) le confirme : le texel (x, y, z) vaut R ≈ x·255/31, G ≈ y·255/31 et B ≈ z·255/31. Un échantillonnage 3D aux coordonnées (s, t, r) = (R, G, B) de la couleur d'entrée renvoie donc la couleur corrigée. En pixels bruts (`TIE` inconnu, cas non observé), les données sont `L × H × PM` texels contigus dans le même ordre : x varie le plus vite, puis y, puis z, sans remplissage.
+
+**Création GPU (Lumen).**
+
+1. `VOLUME` combiné à `ANIME`, à `VIDEO` ou à `est_mp4` n'est pas observé. Lumen lève alors `E_TEX_VOLUME` (catégorie `Invalide`) avant l'étape 3 du §2.10.1.
+2. Le format GPU suit le §2.10.1 : RGBA8 UNORM pour une image embarquée, sinon la table du §2.3 (extrapolation). Les PNG RGB reçoivent un alpha de 255.
+3. On crée **une** texture 3D par image. La mip `k` est envoyée au niveau `k` avec les dimensions (largeur, hauteur, profondeur) de son en-tête.
+4. Une image embarquée décodée doit mesurer exactement largeur × (hauteur × profondeur). Sinon, on applique la règle d'échec de décodage du §2.6 : texels à zéro et avertissement.
+5. L'échantillonnage suit le §2.10.4, et l'adressage s'applique aux trois axes U, V et W. Pour les LUT : clamp to edge et filtrage linéaire. L'anisotropie est sans objet, et Lumen PEUT la fixer à 1.
+6. Le vecteur de résolution suit le §2.11 sans changement. Pour une LUT, il vaut (32, 32, 1024, 32).
+7. Le combo `TEX0FORMAT` n'est pas touché, car le format déclaré vaut 0.
+
+La liaison d'une texture 3D à un `sampler3D` et la façon dont une scène désigne sa LUT relèvent des specs shaders et rendu.
+
+**Statut.** C'est une divergence volontaire, puisque l'amont échoue avec `E_TEX_TEXB`. Elle relève des points 2 et 4 de `docs/PARITY-POLICY.md` et doit figurer dans les « Deviations » du README de la crate.
+
+### A.2 Images embarquées : décodeur, PSD et PIC
+
+**Amont.** Les mips embarquées sont décodées par stb_image (bibliothèque tierce du domaine public), compilée sans restriction de formats. L'amont lui demande toujours 4 canaux, à partir de la mémoire. PSD et PIC sont donc réellement tentés, dans les limites de cette bibliothèque. Un format non reconnu ou un échec de décodage donne une texture au contenu indéterminé, sans erreur (§2.6).
+
+**Corpus.** Le corpus compte 54 images embarquées, toutes non compressées (`C` = 0) et déclarant toutes le format 0 :
+
+- 51 PNG en 8 bits, RGB ou RGBA, non entrelacées. 28 d'entre elles sont les LUT de A.1 ;
+- 3 JPEG baseline.
+
+`TIE` vaut toujours 13 ou 2 et correspond toujours au contenu reniflé. On ne trouve **aucun** PSD, PIC, GIF, BMP, TGA, HDR ni PNM.
+
+**Exigences pour Lumen** (elles remplacent l'ancienne obligation « au moins cet ensemble » du §2.6) :
+
+| Niveau | Formats et variantes |
+|---|---|
+| DOIT | **PNG** : profondeurs 1, 2, 4, 8 et 16 bits ; types gris, gris + alpha, RGB, RGBA et palette ; `tRNS` ; entrelacement Adam7. Le 16 bits est ramené à 8 bits en gardant l'**octet de poids fort**. Aucune correction gamma, ICC ou sRGB. **JPEG** : baseline et progressif, Huffman 8 bits, 1 ou 3 composantes. |
+| DEVRAIT | GIF (première frame), BMP, TGA. |
+| PEUT | PSD (sous-ensemble ci-dessous), PIC, HDR, PNM, et tout format que l'amont ne reconnaît pas (QO-07). |
+
+Tout format non pris en charge suit le chemin d'échec du §2.6 : zéros et avertissement.
+
+Tolérance recommandée pour les tests de parité sur JPEG : ±2 par canal. Les décodeurs diffèrent légèrement sur l'IDCT, le suréchantillonnage de la chrominance et la conversion YCbCr.
+
+**Sous-ensemble PSD**, s'il est implémenté. C'est celui que décode l'amont :
+
+- signature `8BPS`, version 1, en-tête big-endian ;
+- mode colorimétrique RGB (valeur 3) seulement. Les modes gris, indexé, CMJN, Lab et multicanal donnent un échec de décodage ;
+- 8 ou 16 bits par canal. Le 16 bits est ramené à 8 en gardant l'octet de poids fort, et n'est garanti que sans compression ;
+- compression 0 (brute) ou 1 (RLE PackBits). Les compressions 2 et 3 (ZIP) donnent un échec ;
+- seule l'**image composite** finale est lue. Calques, masques et ressources sont ignorés ;
+- le fichier peut avoir de 1 à 16 canaux, mais seuls les 4 premiers servent (R, G, B, A). Un alpha absent vaut 255, et une composante de couleur absente vaut 0 ;
+- avec au moins 4 canaux, on retire le « fond blanc » des pixels semi-transparents. Pour 0 < a < 255, avec α = a / 255, chaque composante c devient (c − 255 × (1 − α)) / α. Le résultat est tronqué vers zéro, et Lumen le borne à [0, 255].
+
+**PIC (Softimage)**, s'il est implémenté : magic `53 80 F6 34` à l'offset 0, puis `PICT` à l'offset 88, avec 8 bits par canal. Aucun exemple n'existe dans le corpus.
+
+### A.3 Combo `TEX0FORMAT` et format réellement envoyé
+
+**Amont.** La décision repose uniquement sur le format de pixels **déclaré** (offset 0x12) de la texture principale de l'objet, c'est-à-dire la première texture de la première passe de son matériau. Elle ne dépend ni de `TIE` ni du format GPU réel. Le forçage écrase la valeur éventuellement fournie par les combos du matériau. Il s'applique à toutes les passes de l'objet, effets compris (spec 03 §5.4, spec 04 Q17).
+
+| Texture principale de l'objet | Format GPU réellement envoyé | `TEX0FORMAT` |
+|---|---|---|
+| `.tex` déclarant 8 (RG88), pixels bruts | RG8 | **8** (forcé) |
+| `.tex` déclarant 8, image embarquée | RGBA8 | **8** (forcé quand même) |
+| `.tex` déclarant 9 (R8), pixels bruts | R8 | **9** (forcé) |
+| `.tex` déclarant 9, image embarquée | RGBA8 | **9** (forcé quand même) |
+| `.tex` déclarant 0, 4, 6 ou 7, embarquée ou non, vidéo comprise | RGBA8, BC3, BC2 ou BC1 | non touché |
+| `.tex` `VOLUME` (format 0) | RGBA8 3D | non touché |
+| surface de rendu `_rt_…` ou `_alias_…`, pochette média, objet sans texture | RGBA8 | non touché |
+
+« Non touché » signifie : la valeur des combos de la passe du matériau si elle existe, sinon la valeur par défaut déclarée par le shader (spec 03). Le combo n'est jamais forcé à une autre valeur que 8 ou 9.
+
+**Corpus.** Les images embarquées déclarent toujours le format 0, donc les deuxième et quatrième lignes du tableau ne se présentent jamais. **Lumen DOIT reproduire la règle sur le format déclaré** (QO-36).
+
+### A.4 `.pkg` : entrée hors limites
+
+**Amont.** L'amont ne refuse ni l'archive ni l'entrée :
+
+- **À l'ouverture**, seuls le préfixe `PKGV` et la table sont lus. Aucune borne n'est vérifiée, et l'archive se monte normalement.
+- **À la lecture d'une entrée qui déborde**, l'amont se positionne à `base + offset` (même au-delà de la fin) et demande `taille` octets. La lecture est courte. Le tampon de `taille` octets, initialisé à zéro, renvoie les octets réellement présents suivis de zéros, sans erreur. `existe` reste vrai pour cette entrée.
+- **Effet de bord** : le flux de lecture, unique et partagé par toute l'archive, reste en état d'échec après cette lecture courte. Toutes les lectures suivantes dans la **même archive** renvoient alors `taille` octets nuls, sans erreur, même pour des entrées valides, et ce jusqu'au déchargement du fond (QO-37).
+
+**Corpus.** Les 7 archives (`PKGV0009` à `PKGV0023`) ne contiennent aucune entrée hors limites.
+
+**Règle normative pour Lumen.**
+
+1. **Ouverture de l'archive** : on valide l'en-tête (§1.4) et la lecture complète de la table. Une table tronquée ou une longueur de `sstr` qui dépasse la taille restante donne `FinDeFluxInattendue`, et le montage échoue (§4.8). Les bornes des entrées ne sont **pas** contrôlées à ce stade : une archive qui contient une entrée hors limites se monte, et ses autres entrées restent lisibles.
+2. **`existe(r)`** est inchangé : il renvoie vrai si le nom est présent, même hors limites. La résolution s'arrête donc sur ce point de montage, sans repli vers le suivant, comme dans l'amont.
+3. **`ouvrir(r)`** : si `base + offset + taille` dépasse la taille du fichier, Lumen lève `E_PKG_ENTREE_HORS_LIMITES` (catégorie `Invalide`). Le calcul se fait sur 64 bits, sans débordement possible. Le message contient le nom de l'entrée, l'offset, la taille et la taille du fichier. Cette erreur ne concerne **que** cette entrée : il n'y a pas d'empoisonnement, et les autres entrées restent lisibles.
+4. **Conséquences** : l'erreur se propage comme toute erreur `Invalide`. Pour une texture, elle est fatale comme une texture corrompue (§4.11). Pour `project.json`, le fond ne se charge pas, ce qui est aussi le résultat de l'amont, puisque les zéros donnent un JSON invalide.
+
+### A.5 Fixture F11 — texture `VOLUME` 2 × 1 × 2 avec PNG embarquée (174 octets)
+
+Cette fixture a été produite par un générateur écrit d'après A.1. La PNG a été validée par un décodeur tiers, et l'analyse se termine exactement à la fin du fichier.
+
+```
+0000: 54 45 58 56 30 30 30 35 00 54 45 58 49 30 30 30
+0010: 31 00 00 00 00 00 42 00 00 00 02 00 00 00 01 00
+0020: 00 00 04 00 00 00 01 00 00 00 02 00 00 00 80 80
+0030: 80 FF 54 45 58 42 30 30 30 34 00 01 00 00 00 0D
+0040: 00 00 00 00 00 00 00 01 00 00 00 02 00 00 00 01
+0050: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 4B
+0060: 00 00 00 89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49
+0070: 48 44 52 00 00 00 02 00 00 00 02 08 02 00 00 00
+0080: FD D4 9A 73 00 00 00 12 49 44 41 54 78 DA 63 F8
+0090: CF C0 C0 00 C2 0C FF 81 00 00 1F EE 05 FB F1 AB
+00A0: BA 77 00 00 00 00 49 45 4E 44 AE 42 60 82
+```
+
+| Offset | Champ | Valeur |
+|---|---|---|
+| 0x12 / 0x16 | format / drapeaux | 0 / 0x42 (`VOLUME` + `UV_BORNES`) |
+| 0x1A / 0x1E | `LT` / `HT` | 2 / 1 |
+| 0x22 / 0x26 | `LI` / `HI` | 4 / 1 |
+| 0x2A | `PT` | 2 |
+| 0x2E | réservé (couleur) | `80 80 80 FF` |
+| 0x32 | magic | `TEXB0004\0` |
+| 0x3B / 0x3F / 0x43 | `NI` / `TIE` / indicateur MP4 | 1 / 13 / 0, donc version effective 3 |
+| 0x47 | `NM` | 1 |
+| 0x4B / 0x4F / 0x53 | largeur / hauteur / profondeur | 2 / 1 / 2 |
+| 0x57 / 0x5B / 0x5F | `C` / `TD` / `TS` | 0 / 0 / 75 |
+| 0x63 | PNG 2 × 2 RGB 8 bits (75 octets) | ligne 0 : rouge, vert ; ligne 1 : bleu, blanc |
+
+Résultat attendu :
+
+- l'analyse s'arrête à l'octet 174, qui est la taille du fichier ;
+- texture 3D RGBA8 de 2 × 1 × 2 ;
+- texels (0,0,0) = (255,0,0,255), (1,0,0) = (0,255,0,255), (0,0,1) = (0,0,255,255) et (1,0,1) = (255,255,255,255) ;
+- adressage clamp to edge sur U, V et W, filtrage linéaire ;
+- vecteur de résolution (2, 1, 4, 1).
+
+Variantes :
+
+- drapeaux = `02` (bit `VOLUME` retiré) : le magic lu à 0x2E vaut `80 80 80 FF 54 45 58 42 30`, ce qui donne `E_TEX_TEXB`. C'est le comportement de l'amont sur les vraies LUT ;
+- drapeaux = `62` (`VOLUME` + `VIDEO` + `UV_BORNES`) : l'analyse réussit, puis `E_TEX_VOLUME` est levée à la création GPU ;
+- profondeur de mip (0x53) = 3 : l'analyse réussit, mais l'image décodée (2 × 2) ne mesure pas 2 × 3. On obtient une texture 2 × 1 × 3 à zéro et un avertissement ;
+- tronquer à 173 octets donne `FinDeFluxInattendue`.
