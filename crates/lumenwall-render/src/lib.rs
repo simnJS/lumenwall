@@ -43,8 +43,8 @@ pub use context::{ContextOptions, GpuCaps, GpuContext, GpuInstance};
 pub use dynbuf::{FrameInputs, UniformSlot};
 pub use error::{RenderError, Result};
 pub use graph::{
-    Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding,
-    StreamAttribute, StreamId, StreamLayout, TextureId, TextureRef,
+    Extension, Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SkinRange,
+    SlotBinding, StreamAttribute, StreamId, StreamLayout, TextureId, TextureRef,
 };
 pub use headless::HeadlessOutput;
 pub use image::{

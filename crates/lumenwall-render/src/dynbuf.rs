@@ -428,9 +428,9 @@ impl DynamicBufferBuilder {
 
     /// Create the GPU buffer and upload the initial content.
     pub fn build(mut self, ctx: &crate::context::GpuContext) -> DynamicBuffer {
+        let blocks_end = self.shadow.bytes.len() as u32;
         // Any block offset + binding size must stay inside the buffer.
-        let uniform_end =
-            (self.shadow.bytes.len() as u32 + self.max_block).next_multiple_of(VERTEX_SIZE * 4);
+        let uniform_end = (blocks_end + self.max_block).next_multiple_of(VERTEX_SIZE * 4);
         self.shadow.bytes.resize(uniform_end as usize, 0);
         let vertex_offset = uniform_end;
         self.shadow
@@ -455,6 +455,11 @@ impl DynamicBufferBuilder {
             shadow: self.shadow,
             binding_size: self.max_block,
             vertex_offset,
+            uniform_end: blocks_end,
+            vertex_count: self.vertices.len() as u32,
+            align: self.align,
+            grown: false,
+            rebind: false,
         }
     }
 }
@@ -466,11 +471,113 @@ pub struct DynamicBuffer {
     shadow: Shadow,
     binding_size: u32,
     vertex_offset: u32,
+    /// End of the last uniform block (blocks added after load start here).
+    uniform_end: u32,
+    /// Vertices in use from `vertex_offset`.
+    vertex_count: u32,
+    align: u32,
+    /// The shadow outgrew the GPU buffer: [`Self::sync`] reallocates it.
+    grown: bool,
+    /// The uniform binding size changed: the uniform bind group must be recreated.
+    rebind: bool,
     #[allow(dead_code)]
     memory: crate::context::MemoryToken,
 }
 
+/// Smallest growth of a region of the dynamic buffer after load, in bytes (amortises the
+/// reallocations when layers are created one by one).
+const MIN_GROWTH: u32 = 64 * 1024;
+
 impl DynamicBuffer {
+    /// Reserves a pass uniform block after load (layers created at run time). The block is
+    /// zeroed. Grows the uniform region (moving the vertices, whose ranges are relative) with
+    /// headroom when needed; the GPU buffer follows at the next [`Self::sync`].
+    pub fn alloc_uniform(&mut self, size: u32) -> UniformBlock {
+        let size = size.max(16).next_multiple_of(16);
+        let offset = self.uniform_end.next_multiple_of(self.align);
+        let end = offset + size;
+        if size > self.binding_size {
+            self.binding_size = size;
+            self.rebind = true;
+        }
+        if end + self.binding_size > self.vertex_offset {
+            let headroom = (end / 2).max(MIN_GROWTH);
+            let vertex_offset =
+                (end + self.binding_size + headroom).next_multiple_of(VERTEX_SIZE * 4);
+            self.move_vertices(vertex_offset);
+        }
+        let bytes = &mut self.shadow.bytes[offset as usize..end as usize];
+        if bytes.iter().any(|b| *b != 0) {
+            bytes.fill(0);
+            self.shadow.mark(offset, end);
+        }
+        self.uniform_end = end;
+        UniformBlock { offset, size }
+    }
+
+    /// Appends vertices after load (layers created at run time), growing the vertex region
+    /// geometrically; the GPU buffer follows at the next [`Self::sync`].
+    pub fn alloc_vertices(&mut self, v: &[Vertex]) -> VertexRange {
+        let first = self.vertex_count;
+        let n = v.len() as u32;
+        let vo = self.vertex_offset as usize;
+        let needed = vo + ((first + n) * VERTEX_SIZE) as usize;
+        if needed > self.shadow.bytes.len() {
+            let capacity = (self.shadow.bytes.len() - vo) as u32 / VERTEX_SIZE;
+            let capacity = (capacity * 2).max(first + n).max(MIN_GROWTH / VERTEX_SIZE);
+            let len = (vo as u64 + u64::from(capacity * VERTEX_SIZE))
+                .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+            self.shadow.bytes.resize(len as usize, 0);
+            self.grown = true;
+        }
+        self.vertex_count += n;
+        let range = VertexRange { first, count: n };
+        self.set_vertices(range, v);
+        range
+    }
+
+    /// Moves the vertex region to `offset` (in the shadow; the GPU copy is rewritten whole
+    /// by the reallocation).
+    fn move_vertices(&mut self, offset: u32) {
+        let old = self.vertex_offset as usize;
+        let len = self.shadow.bytes.len() - old;
+        let new = offset as usize;
+        let total = ((new + len) as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) as usize;
+        self.shadow.bytes.resize(total, 0);
+        self.shadow.bytes.copy_within(old..old + len, new);
+        self.shadow.bytes[old..new].fill(0);
+        self.vertex_offset = offset;
+        self.grown = true;
+    }
+
+    /// Applies the growth of [`Self::alloc_uniform`] / [`Self::alloc_vertices`] to the GPU:
+    /// a new buffer holding the whole shadow when it outgrew the old one. Returns `true` when
+    /// the buffer or the uniform binding size changed (bind groups and bundles referencing
+    /// the buffer must then be recreated).
+    pub fn sync(&mut self, ctx: &crate::context::GpuContext) -> bool {
+        let reallocated = self.grown;
+        if self.grown {
+            let total = self.shadow.bytes.len() as u64;
+            let buffer = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("lumenwall.dynamic"),
+                size: total,
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            ctx.queue().write_buffer(&buffer, 0, &self.shadow.bytes);
+            ctx.note_resources(1);
+            self.shadow.dirty = None;
+            self.buffer = buffer;
+            self.memory = ctx.memory().track(total);
+            self.grown = false;
+        }
+        let changed = reallocated || self.rebind;
+        self.rebind = false;
+        changed
+    }
+
     #[must_use]
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buffer

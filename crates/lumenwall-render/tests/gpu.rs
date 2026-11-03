@@ -839,6 +839,104 @@ fn visibility_toggle() {
     assert_eq!(px(&read(ctx, &scene, &s.st), 16, 8, 8), [255, 0, 0, 255]);
 }
 
+/// Layers added after `build` (`RenderScene::extend`): same shaders and pipelines, the
+/// dynamic buffer grows, `set_ops` places and reorders them, and a reorder re-records only
+/// the bundles of the runs it changes.
+#[test]
+fn layers_added_after_build() {
+    gpu!();
+    // Own device: the resource counter must not see the other tests.
+    let Some(own) = new_ctx() else {
+        return;
+    };
+    let ctx = &own;
+    let mut s = setup(ctx, 32, 32, [0.0, 0.0, 0.0, 1.0]);
+    let red = texture(&mut s.b, 4, 4, None, |_, _| [255, 0, 0, 255]);
+    let blue = texture(&mut s.b, 4, 4, None, |_, _| [0, 0, 255, 255]);
+    let sh = shader(&mut s.b, "fs_copy");
+    let spec = image_spec(&mut s, ctx, 1, Vec2::new(32.0, 32.0), red);
+    let base = add_image(&mut s.b, &spec, &[ImagePass::new("base", sh)]).unwrap();
+    let base_ops = s.b.ops().to_vec();
+    let mut scene = s.b.build().unwrap();
+    let f = frame(s.size, Vec3::new(16.0, 16.0, 0.0), Vec3::ONE);
+    base.update(&mut scene, &f);
+    scene.render(ctx);
+    assert_eq!(px(&read(ctx, &scene, &s.st), 32, 16, 16), [255, 0, 0, 255]);
+
+    // A blue 16×16 layer in the centre, compiled against the built scene: the pipeline of
+    // the shared shader is reused.
+    let full = s.st.full;
+    let mut layers = Vec::new();
+    for id in 2..6 {
+        let (img, ext) = scene.extend(ctx, |b| {
+            let t = b.texture(blue).unwrap();
+            let sizes = (t.storage_size(), t.content_size());
+            let composites =
+                b.targets
+                    .create_composites(ctx, id, (16, 16), SamplerKey::CLAMP_LINEAR);
+            let spec = ImageSpec {
+                label: format!("image {id}"),
+                size: Vec2::new(16.0, 16.0),
+                alignment: Alignment::default(),
+                main: TextureRef::Texture(blue),
+                main_sizes: sizes,
+                animated: false,
+                passthrough: false,
+                fullscreen: false,
+                composites,
+                scene_target: full,
+                final_to_scene: true,
+            };
+            add_image(b, &spec, &[ImagePass::new("layer", sh)]).unwrap()
+        });
+        let ext = ext.unwrap();
+        assert_eq!(ext.passes, img.passes);
+        layers.push((img, ext.ops));
+    }
+    for (img, _) in &layers {
+        img.update(&mut scene, &f);
+    }
+    // Not placed yet: unchanged.
+    scene.render(ctx);
+    assert_eq!(px(&read(ctx, &scene, &s.st), 32, 16, 16), [255, 0, 0, 255]);
+
+    let place = |under: bool| {
+        let mut ops = vec![base_ops[0]];
+        let layer = layers[0].1.clone();
+        if under {
+            ops.extend(layer);
+            ops.extend_from_slice(&base_ops[1..]);
+        } else {
+            ops.extend_from_slice(&base_ops[1..]);
+            ops.extend(layer);
+        }
+        ops
+    };
+    scene.set_ops(place(false));
+    assert!(scene.needs_redraw());
+    scene.render(ctx);
+    let d = read(ctx, &scene, &s.st);
+    assert_eq!(px(&d, 32, 16, 16), [0, 0, 255, 255], "layer on top");
+    assert_eq!(px(&d, 32, 2, 2), [255, 0, 0, 255], "base around it");
+
+    // Reordering re-records bundles but creates no other GPU object.
+    let before = ctx.resources_created();
+    scene.set_ops(place(true));
+    scene.render(ctx);
+    let created = ctx.resources_created() - before;
+    assert_eq!(
+        px(&read(ctx, &scene, &s.st), 32, 16, 16),
+        [255, 0, 0, 255],
+        "layer under"
+    );
+    assert_eq!(created, 1, "one bundle re-recorded");
+    // The same order again reuses every bundle.
+    let before = ctx.resources_created();
+    scene.set_ops(place(true));
+    scene.render(ctx);
+    assert_eq!(ctx.resources_created(), before);
+}
+
 /// The wgpu pipeline cache is written to disk (Vulkan only).
 #[test]
 fn pipeline_cache_is_saved() {

@@ -334,6 +334,12 @@ pub fn add_image_with_puppet(
 }
 
 impl ImageHandle {
+    /// Changes the anchor of the image rectangle (SceneScript `ILayer.alignment`); applied by
+    /// the next [`Self::update`].
+    pub fn set_alignment(&mut self, alignment: Alignment) {
+        self.alignment = alignment;
+    }
+
     /// Vertices of the puppet mesh in the dynamic region, for CPU skinning through
     /// [`RenderScene::set_vertices`]. `None` when the image draws no mesh.
     #[must_use]
