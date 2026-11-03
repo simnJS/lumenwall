@@ -1,3 +1,6 @@
 /target
 *.swp
 .DS_Store
+
+# Wallpaper Engine content: copyrighted, local testing only, never commit
+/testdata/we/
