@@ -5,6 +5,10 @@ Statut : rédigée en clean-room à partir de l'observation du comportement de l
 d'autre source que les specs voisines (scène/caméra, matériaux/shaders, textures, temps global) et les fichiers
 d'assets Wallpaper Engine (WE) eux-mêmes.
 
+> **Amendements 2026-11-03** (fin de fichier) : ils **priment** sur le corps du texte en cas de conflit
+> (pré-simulation `starttime`, `instanceoverride.brightness`, calcul du pool, oscillateurs,
+> `mapsequencearoundcontrolpoint`, types et clés WE absents de la première rédaction).
+
 Conventions de notation :
 
 - `U(a, b)` : tirage flottant uniforme dans `[a, b)` (voir §9.1 pour les détails : échange automatique si `b < a`).
@@ -106,7 +110,7 @@ Noter que les tableaux sont au **singulier** dans le format WE.
 | `animationmode` | chaîne [B] | `"sequence"` | §10 |
 | `sequencemultiplier` | nombre [B] | `1.0` | §10 |
 | `maxcount` | entier ≥ 0 [B] | `100` | taille du pool (§4.1) |
-| `starttime` | entier [B] | `0` | **ignoré** |
+| `starttime` | nombre [B] (s) | `0` | pré-simulation : voir **A1** (l'amont le lit en entier et l'ignore) |
 | `flags` | entier [B] | `0` | bit `4` = particules en perspective (§2.3) ; autres bits ignorés |
 
 Un fichier introuvable/illisible produit un système **vide** (aucun émetteur…) dont la création échouera faute de
@@ -1134,3 +1138,571 @@ fichiers réels). Comportement amont : entrée ignorée.
   transmission de control points à partir de `controlpointstartindex`, filtré par `probability`, borné par
   `maxcount`) — non spécifiable sans observation de WE.
 - **Pré-simulation** (`starttime`) et **audio-réactivité** (spectre audio sur émetteurs/opérateurs).
+
+---
+
+## Amendements 2026-11-03
+
+Réponses aux questions de l'implémenteur. Application de `docs/PARITY-POLICY.md` : règle 3 (parité visible
+avec l'amont) par défaut ; règle 4 (combler les manques par rapport au contrat **publiquement documenté** par WE)
+pour tout ce que l'amont ignore. Chaque point donne (a) le comportement amont, (b) la documentation publique WE,
+(c) la règle à implémenter.
+
+Marquage des règles :
+- **[Doc WE]** : sémantique tirée de la documentation publique (URL citée), formulée ici avec nos mots ;
+- **[Inféré des données]** : déduit des fichiers d'assets WE (presets, scènes d'aperçu) ; constantes et formules
+  exactes inconnues, choisies pour être raisonnables — **à calibrer sur WE réel** ;
+- **[Amont]** : comportement observé de l'implémentation de référence.
+
+Sources documentaires (consultées le 2026-11-03) :
+- Général : <https://docs.wallpaperengine.io/en/scene/particles/component/general.html>
+- Émetteurs : <https://docs.wallpaperengine.io/en/scene/particles/component/emitter.html>
+- Initialiseurs : <https://docs.wallpaperengine.io/en/scene/particles/component/initializer.html>
+- Opérateurs : <https://docs.wallpaperengine.io/en/scene/particles/component/operator.html>
+- Renderers : <https://docs.wallpaperengine.io/en/scene/particles/component/renderer.html>
+- Enfants : <https://docs.wallpaperengine.io/en/scene/particles/component/children.html>
+- Points de contrôle : <https://docs.wallpaperengine.io/en/scene/particles/component/control_point.html>
+- SceneScript : <https://docs.wallpaperengine.io/en/scene/scenescript/reference/class/IParticleSystem.html> et
+  <https://docs.wallpaperengine.io/en/scene/scenescript/reference/class/IParticleSystemInstance.html>
+
+Corpus de données : tous les fichiers de définition de particules du dossier `assets` d'une installation WE
+(`assets/particles/`, `assets/presets/*/particles/`, `assets/scenes/particleelementpreviews/*/particles/`),
+**dédupliqués par contenu : 209 définitions uniques**. Le dossier `assets/particles/` seul ne contient que 6
+exemples ; l'essentiel est dans `presets/` et dans les 50 scènes d'aperçu « un type d'élément par scène »
+(`particleelementpreviews/`). Rien n'a été copié dans le dépôt. **Rappel important** : l'éditeur WE n'écrit en
+général que les valeurs différentes du défaut ; les défauts des types non implémentés par l'amont ne sont donc
+**pas observables** et ceux donnés ci-dessous sont provisoires.
+
+### A1. `starttime` — pré-simulation
+
+**(a) Amont.** Lu comme entier non signé (un flottant est tronqué : `0.80000001` → 0) puis **jamais utilisé** :
+aucune pré-simulation ; la première frame ne dessine rien (§5, étape 2).
+
+**(b) WE public [Doc WE].** Page « General », réglage *Start time* : le système est pré-simulé pendant la durée
+indiquée, en secondes, au moment de sa création, pour éviter un écran vide ; il démarre comme s'il tournait déjà
+depuis cette durée. Le pas de simulation n'est pas documenté.
+Données : valeurs observées sur 209 définitions — `0` ×144, `3` ×17, `1` ×13, `15` ×13, `2` ×11, `10` ×5, `5` ×4
+(dont `ash`), `9` ×1, `0.80000001` ×1 → la valeur est un **flottant**.
+
+**(c) Règle.**
+1. Lecture : `starttime` nombre [B], en `f32`, secondes. Non-nombre, négatif, NaN → 0. Borne haute **60 s**
+   (garde-fou anti-blocage, règle 2 de la politique de parité) [Inféré des données : maximum observé 15].
+2. Moment : pendant la **première frame traitée** du système (§5 étape 2, donc première frame où il est
+   initialisé **et** visible). Après `t_ref = t_g`, si `T0 = starttime > 0`, exécuter `N` pas de simulation
+   (ci-dessous), **puis dessiner dans la même frame**. Si `T0 = 0`, comportement inchangé.
+3. Pas : `h = 1 / fps_max` (plafond d'images par seconde de l'application, spec 04/07, défaut 30 → `h = 1/30 s`),
+   borné à `[1/240, 0.1]`. `N = max(1, arrondi(T0 / h))`. Exemple `ash` à 30 FPS : `N = 150` pas de 1/30 s.
+   Justification : c'est le pas qu'aurait eu le système s'il avait réellement tourné ; il garde cohérents les
+   comportements dépendants de la cadence (bit 2 « ≤ 1 particule par frame », intégration d'Euler).
+4. Pas `k = 1 … N` : exécuter les étapes 4 à 10 du §5 avec `dt = h` et, à la place de `t_g`, le temps virtuel
+   `t_k = t_g − (N − k) × h` (vu par `turbulence`, `turbulentvelocityrandom`, `remapvalue`…). Le dernier pas voit
+   `t_g` ; la frame réelle suivante enchaîne normalement avec `dt = t_g' − t_ref`. Les control points liés à la
+   souris prennent la position courante de la souris à chaque pas.
+5. Tout l'état évolue exactement comme en fonctionnement normal : minuteries d'émetteurs (`delay`, `duration`,
+   périodicité), rafale `instantaneous` (émise au pas 1), compteurs de séquence, oscillateurs, morts et compaction,
+   systèmes enfants (A6.5 : créés pendant la pré-simulation et simulés dans les pas restants), temps système
+   (`particlesystemtime`, A6.3.1).
+6. Pas de pré-simulation : aux frames suivantes, lors d'un changement de résolution, ni lors d'un `play()`
+   SceneScript qui relance un système terminé [Inféré des données ; la doc ne parle que de la création].
+7. Purement CPU : aucun uniforme (`g_Time`…) n'est modifié ; aucun dessin entre les pas.
+8. Performance : la pré-simulation peut être faite au chargement de la scène plutôt que dans la première frame, à
+   condition que l'état obtenu soit identique ; elle ne doit **pas** être étalée sur plusieurs images affichées.
+
+### A2. `instanceoverride.brightness`
+
+**(a) Amont.** Clé non lue : aucun effet. Seule la constante de matériau `ui_editor_properties_overbright` de la
+première passe (défaut 1) est utilisée (§12.1, uniforme `g_Brightness`).
+
+**(b) WE public.** `instanceoverride.brightness` **n'est pas documenté publiquement** : la page SceneScript
+`IParticleSystemInstance` liste `alpha`, `size`, `count`, `speed`, `lifetime`, `rate`, `colorn`,
+`controlpoint0…7`, pas `brightness`. La page « General » documente seulement *Overbright* (réglage de matériau qui
+ajuste la luminosité du système). [Doc WE]
+Données : 5 occurrences dans des scènes — `1.64` (×2, scène de test 3018340632, objets `ash`), `5.0` (×3,
+preset `lightning`). Les shaders de particules livrés avec WE (`genericparticle`, `genericropeparticle`)
+déclarent un uniforme `g_Overbright` lié à la constante de matériau `ui_editor_properties_overbright` (défaut 1,
+plage 0–5) et multiplient par lui la couleur **RGB** finale du fragment (après éclairage/réfraction, avant cutout
+et brouillard) ; l'alpha n'est pas touché.
+
+**(c) Règle [Inféré des données].**
+- `brightness` : scalaire [U], défaut `1` (bloc ou clé absents), relu à chaque frame dessinée.
+- Valeur fournie au shader pour `g_Overbright` **et** pour `g_Brightness` : `overbright_matériau × brightness`.
+- Effet : multiplication du RGB final uniquement ; ni l'alpha, ni la couleur des sommets (`colorn`, pas de
+  saturation 0–1 côté sommets), ni la simulation ne sont affectés. Pas de borne (0 → noir).
+- Si Lumen remplace les shaders WE par des shaders natifs, reproduire la même place de multiplication
+  (après éclairage/réfraction, avant cutout et brouillard).
+
+### A3. Taille du pool : `f32` ou `f64` ?
+
+**(a) Amont.** `maxcount` lu comme entier non signé (flottant JSON tronqué). Le multiplicateur `count` est stocké
+en `f32` (valeur JSON arrondie au `f32` le plus proche). Le produit est calculé **en `f32`** : `maxcount` converti
+en `f32`, multiplication `f32` arrondie au plus proche, puis troncature vers zéro ; 0 → 1000.
+Exemple de la scène de test : `count = 0.63999999` → `f32` = 0,63999998569… ; 150 × cette valeur = 95,99999785
+en exact, arrondi `f32` → **96,0** → **96**. Un calcul en `f64` (ou en `f32` élargi en `f64`) donnerait **95**.
+Autre cas discriminant : `300 × 0.57` → 171 (`f32`) contre 170 (`f64`).
+
+**(b) WE public.** *Max count* : nombre maximal de particules, détermine la mémoire allouée (page « General »).
+La page SceneScript `IParticleSystemInstance` décrit `count` comme un facteur sur le **débit d'émission** et `rate`
+comme un facteur sur la **cadence de simulation**, ce qui ne correspond pas à l'usage amont (`count` → pool,
+`rate` → débit des émetteurs) ; aucune formule publiée → question ouverte A7.2. [Doc WE]
+
+**(c) Règle [Amont, parité].**
+```
+N_pool = tronc( f32(maxcount) ×_f32 count_f32 )      // multiplication IEEE f32, arrondi au plus proche,
+si N_pool ≤ 0 ou NaN : N_pool = 1000                 // sans FMA ni élargissement en f64
+```
+Vecteurs de test : (150, 0.63999999) → 96 ; (300, 0.57) → 171 ; (200, 0.7) → 140 ; (1000, 0.29) → 290 ;
+(100, 0.3) → 30. Marquer `// parity:`.
+
+### A4. Oscillateurs : application dès la frame d'initialisation
+
+**(a) Amont.** Pour chaque particule, lors de la **première** exécution de l'opérateur qui la voit : tirage des
+paramètres, capture de la base, **puis, dans la même passe**, calcul et écriture de la valeur modulée
+(`oscillatealpha`, `oscillatesize`) ou du déplacement (`oscillateposition`). Les opérateurs tournant dans la
+frame de naissance (§5, étapes 6 → 8), la **première image dessinée est déjà modulée**, avec `âge = dt`.
+
+**(b) WE public.** La page « Operators » décrit des fréquence/échelle/phase tirées par particule ; rien sur
+l'instant de première application. [Doc WE]
+
+**(c) Règle.** Initialisation et première application **dans la même frame** (la frame de naissance) ; aucune
+image non modulée. Précisions :
+- l'état d'oscillateur est **un par type et par particule** (alpha, taille, position) : deux opérateurs du même
+  type dans une liste partagent les mêmes tirages (le second ne retire pas) — cas absent des données ;
+- les tirages d'initialisation ont lieu même si le facteur de blending d'opérateur (A6.1-a) vaut 0 ;
+- `oscillateposition` : utiliser directement `f_a` comme pulsation (l'amont fait un aller-retour `×2π / 2π` en
+  `f32`, écart ≤ 1 ulp, invisible).
+
+### A5. `mapsequencearoundcontrolpoint` : calcul de θ
+
+**(a) Amont.** `count` lu comme nombre [U] puis **tronqué vers zéro en entier** (`3.02` → 3, `2.2` → 2) ; compteur
+entier `k`. `θ = (f32(k) / f32(count)) × 2π` : **division flottante `f32`**, puis multiplication par la constante
+2π en `f32` (6,2831855), dans cet ordre ; puis `k = (k + 1) mod count` en entier. `count ≤ 0` : division par zéro.
+Les clés `bounds`, `limitbehavior`, `axis` sont ignorées.
+
+**(b) WE public [Doc WE]** (« Position around control point ») : *Count* = nombre de points de départ sur le cercle ;
+*Bounds* = début/fin de l'arc dans [0, 1] (cercle complet = 0–1) ; *Orientation* repeat (boucle) / mirror
+(aller-retour) ; *Axis* (surtout en 3D) ; *Speed min/max* ; *Control point* ; options *Restart with periodic
+emission* et *Modify count with layer settings*.
+Données (5 occurrences) : `count` 128, `3.02` (preset « trinity »), `2.2` (preset « dna », double hélice) — valeurs
+de curseur dont la partie entière donne exactement le motif attendu, ce qui confirme un nombre **entier** de
+points ; `bounds` `"0 1"`, `limitbehavior` `"repeat"`, `axis` `"0 1 0"`.
+
+**(c) Règle.**
+1. `n = tronc(count)` ; si `n ≤ 0` → `n = 1`.
+2. Index `i` à partir du compteur persistant `k` :
+   - `limitbehavior = "repeat"` (défaut) : `i = k mod n` ;
+   - `"mirror"` : si `n ≥ 2`, `P = 2(n − 1)`, `m = k mod P`, `i = m` si `m < n`, sinon `P − m` ; si `n = 1`, `i = 0`.
+   Puis `k = k + 1` (le stocker modulo `n` ou `P`).
+3. `f = f32(i) / f32(n)` (**division `f32`**) ; `bounds = (b0, b1)` (vec2 [U], défaut `(0, 1)`) :
+   `f' = b0 + f × (b1 − b0)` ; `θ = f' × 2π_f32`. Avec les défauts, résultat identique bit à bit à l'amont.
+4. `axis` (vec3 [U], défaut `(0, 0, 1)` ; nul → `(0, 0, 1)`) : la rotation de l'étape 5 du §7.9 devient la rotation
+   de `s` d'un angle **−θ** autour de `normalize(axis)` (formule de Rodrigues). Pour l'axe par défaut, c'est
+   exactement la formule du §7.9.
+5. *Restart with periodic emission* / *Modify count with layer settings* : bits de `flags` non identifiés dans les
+   données → ignorés (A7.4).
+
+### A6. Types et clés présents dans les données WE mais absents de la spec
+
+#### A6.0 Inventaire (209 définitions uniques)
+
+Déjà spécifiés, pour mémoire (occurrences) : émetteurs `sphererandom` 192, `boxrandom` 19 ; initialiseurs
+`lifetimerandom` 209, `sizerandom` 208, `colorrandom` 187, `velocityrandom` 85, `rotationrandom` 58,
+`alpharandom` 35, `turbulentvelocityrandom` 31, `angularvelocityrandom` 26, `mapsequencearoundcontrolpoint` 5 ;
+opérateurs `movement` 196, `alphafade` 178, `sizechange` 68, `controlpointattract` 29, `angularmovement` 27,
+`colorchange` 24, `oscillatealpha` 24, `turbulence` 18, `oscillateposition` 15, `alphachange` 8, `vortex` 7,
+`oscillatesize` 5, `vortex_v2` 5 ; renderers `sprite` 135, `spritetrail` 33, `rope` 20, `ropetrail` 12.
+
+Absents de la spec (par fréquence décroissante) :
+
+| Nom JSON | Catégorie | Occurrences | Définitions | Section |
+|---|---|---|---|---|
+| `mapsequencebetweencontrolpoints` | initialiseur | 11 | 11 | A6.2.1 |
+| `remapvalue` | opérateur | 10 | 8 | A6.3.1 |
+| `reducemovementnearcontrolpoint` | opérateur | 9 | 5 | A6.3.2 |
+| `positionoffsetrandom` | initialiseur | 5 | 5 | A6.2.2 |
+| `maintaindistancebetweencontrolpoints` | opérateur | 5 | 5 | A6.3.3 |
+| `hsvcolorrandom` | initialiseur | 4 | 4 | A6.2.3 |
+| `remapinitialvalue` | initialiseur | 3 | 3 | A6.3.1 |
+| `capvelocity` | opérateur | 3 | 3 | A6.3.4 |
+| `boids` | opérateur | 3 | 3 | A6.3.5 |
+| `maintaindistancetocontrolpoint` | opérateur | 3 | 3 | A6.3.6 |
+| `inheritcontrolpointvelocity` | initialiseur | 1 | 1 | A6.2.4 |
+| `colorlist` | initialiseur | 1 | 1 | A6.2.5 |
+| `inheritinitialvaluefromevent` | initialiseur | 1 | 1 | A6.5 |
+| `inheritvaluefromevent` | opérateur | 1 | 1 | A6.5 |
+| `collisionplane`, `collisionsphere`, `collisionquad`, `collisionbounds`, `collisionmodel` | opérateurs | 1 chacun (aperçus seulement) | 1 | A6.3.7 |
+| `layerimage` | émetteur | 1 | 1 | A6.4 |
+| enfants `type` : absent (→ `static`) 31, `eventdeath` 17, `eventfollow` 12, `static` 5, `eventspawn` 4 | enfants | 69 | 50 | A6.5 |
+
+Clés transverses absentes ou ignorées (A6.1) : blending d'opérateur `blendinstart`/`blendinend`/`blendoutstart`/
+`blendoutend` (turbulence 4, oscillateurs 4, `capvelocity` 3, `remapvalue` 2, `controlpointattract` 1) ;
+`exponent` sur `lifetimerandom` 10, `colorrandom` 7, `alpharandom` 6 ; `sphererandom` : `delay` 4, `duration` 32,
+bit 4 de `flags` 5, bornes périodiques 5, `maxtoemitperperiod` 4 ; dans les scènes et presets (copies
+comprises, non dédupliqués) : `instanceoverride.controlpoint1` 34, `controlpoint2` 22, `controlpointangle1` 9,
+`controlpointangle2` 1, `brightness` 5 ; `dependencies` de l'objet de scène
+(`emitterimage` 1, `collisionmodel` 1) ; `movement.flags` 3 ; renderer `sprite` `orientation`/`axis` 5.
+
+#### A6.1 Mécanismes transverses
+
+**a) Blending d'opérateur [Doc WE]** (page « Operators », section *Operator blending*) : tout opérateur peut
+porter `blendinstart`, `blendinend`, `blendoutstart`, `blendoutend` (fractions de vie 0–1, [U] relus à chaque
+frame) ; l'effet monte entre *blend-in start* et *blend-in end*, est plein ensuite, se défait entre *blend-out
+start* et *blend-out end*. Amont : clés ignorées. Règle [Doc WE + Inféré pour la forme exacte] :
+- `b_in = 1` si aucune clé `blendin*` n'est présente, sinon `rampe(life, blendinstart, blendinend, 0, 1)` (§8.1 ;
+  clé manquante → 0) ;
+- `b_out = 1` si aucune clé `blendout*` n'est présente, sinon `1 − rampe(life, blendoutstart, blendoutend, 0, 1)`
+  (clé manquante → 1) ;
+- `b = b_in × b_out`, par particule. L'opérateur calcule son nouvel état `X'` à partir de `X` (position, vitesse,
+  rotation, vitesse angulaire, couleur, alpha, taille) puis on applique `X ← X + b × (X' − X)` à chaque champ
+  qu'il modifie. Pour un opérateur incrémental (forces), cela revient à multiplier l'incrément par `b` ; pour un
+  opérateur qui fixe une valeur, à interpoler. Les mises à jour de base d'oscillateur (§8.4–8.5) utilisent la
+  valeur mélangée. Une suppression de particule (collision `delete`) n'a lieu que si `b > 0`.
+- Sans clé de blending, `b = 1` : comportement strictement inchangé.
+
+**b) `exponent` des initialiseurs aléatoires [Doc WE]** (page « Initializers » : biais du tirage, 1 = équilibré,
+< 1 vers *max*, > 1 vers *min*). Amont : seuls `sizerandom` et `angularvelocityrandom` l'utilisent. Règle : pour
+`lifetimerandom`, `alpharandom`, `colorrandom` (par canal, tirages indépendants), `velocityrandom` et
+`rotationrandom` (par composante), clé `exponent` [U] défaut 1 : si `exponent = 1`, tirage `U(min, max)` inchangé ;
+sinon `min + U(0,1)^exponent × (max − min)` avec `min`/`max` tels que lus (sans échange).
+
+**c) `sphererandom` : délai, durée, périodicité, plafond par période [Doc WE]** (page « Emitters » : *Duration*,
+*Delay*, *Random periodic emission* sont des paramètres communs sphère/boîte). Amont : ignorés pour la sphère.
+Règle : appliquer à `sphererandom` les étapes 1 à 3 du §6.2 (délai, durée, périodicité, mêmes clés et défauts)
+**avant** son étape 1 (§6.3) ; les frames où la boîte n'émettrait pas, la sphère n'accumule pas son taux. La
+sémantique propre à la sphère pour `instantaneous` (remplacement) est conservée.
+`maxtoemitperperiod` [Inféré des données] (entier ≥ 0, défaut 0 = illimité ; observé 8 et 32 sur des émetteurs
+périodiques du preset `lightning`) : si le bit 4 est actif, un compteur est remis à 0 à chaque entrée en émission
+et le nombre de particules émises pendant la fenêtre est plafonné à cette valeur (excédent jeté). S'applique aussi
+à `boxrandom`. Exemple : `rate` 100, fenêtres de 1 s, plafond 32 → un éclair de 32 particules par seconde.
+
+**d) `instanceoverride.controlpoint0…7` et `controlpointangle0…7` [Doc WE]** (SceneScript
+`IParticleSystemInstance.controlpoint0…7` : position de chaque control point). Amont : ignorées. Données :
+`controlpoint1` ×34, `controlpoint2` ×22 (chaînes `"x y z"` ou objets `{value, animation}`), `controlpointangle*`
+×10. Règle : `controlpointN` (vec3 [U], relu à chaque frame simulée), s'il est présent, **remplace l'`offset`** du
+control point N (§4.4) avec la même convention (pas d'inversion Y, bit world space respecté) ; un control point
+non déclaré dans le fichier est alors traité comme déclaré avec `flags = 0` ; un point lié à la souris garde la
+souris. Il est exposé en lecture/écriture aux scripts (`instance.controlpointN`). Les animations de timeline
+(clé `animation`) sont hors périmètre : utiliser `value`. `controlpointangleN` : lu, sans effet (aucun type
+spécifié n'utilise l'orientation d'un control point).
+
+**e) Vitesse des control points** (nécessaire à A6.2.4) : pour chaque point, à chaque frame simulée après
+l'étape 5 du §5, `v_cp = (position − position_précédente) / dt` ; 0 à la première frame et à la frame d'un
+changement de résolution.
+
+**f) `flags` du système (racine)** [Doc WE pour l'existence des options, Inféré pour les bits] : la page
+« General » liste *Worldspace*, *Perspective rendering* et cinq bascules *Disable color / count / lifetime / size /
+speed overrides*. Valeurs observées : 0, 1, 2, 3, 4, 6, 8, 9, 248. Bit 4 = perspective (§2.3, inchangé). Bits 8, 16,
+32, 64, 128 = les cinq « disable overrides » (248 = les cinq, observé sur des systèmes enfants), ordre exact
+inconnu. Règle provisoire : si `(flags & 248) == 248`, les multiplicateurs `colorn`, `count`, `lifetime`, `size`
+et `speed` de l'instance valent 1 pour ce système ; combinaisons partielles ignorées. Bit 1 (probablement
+*Worldspace* : les particules ne suivent plus la position/rotation du système après leur naissance) et bit 2 :
+non spécifiés (A7.6).
+
+**g) `dependencies` de l'objet de scène** [Inféré des données] : dans les scènes WE, un objet particules peut
+porter `dependencies: [{ "id": <id d'objet>, "index": <entier>, "type": "emitterimage" | "collisionmodel" }]`,
+qui relie un émetteur `layerimage` (A6.4) ou un opérateur `collisionmodel` à un autre objet. Voir A7.8 (la spec 02
+attend des entiers).
+
+#### A6.2 Initialiseurs
+
+##### A6.2.1 `mapsequencebetweencontrolpoints` (11 occurrences)
+
+[Doc WE] « Position between control points » : *Count* (nombre de points sur le segment), *Bounds* (début/fin
+sur le segment, 0–1), *Orientation* repeat/mirror, *Control point start/end*, *Reduce outer positions /
+velocities / sizes*, *Enable arc* (+ *Arc amount*, *Arc direction*), *Restart with periodic emission*.
+Clés observées : `controlpointstart`, `controlpointend`, `count` (8, 10, 64), `limitbehavior` (`"mirror"`), `flags`
+(3, 4, 7, 15, 19, 23), `arcamount` (0.1, 0.44).
+
+| Clé | Type | Défaut | Origine du défaut |
+|---|---|---|---|
+| `controlpointstart` | entier [B] | `0` | presets sans la clé tracés depuis l'origine du système |
+| `controlpointend` | entier [B] | `1` | idem, jusqu'au CP 1 déclaré |
+| `count` | nombre [U], tronqué | `32` | [Inféré des données] l'éclair principal, sans `count`, émet 32 particules par période (`maxtoemitperperiod` 32) et son enfant `count` 8 pour 8 particules : un éclair = un parcours complet |
+| `bounds` | vec2 [U] | `(0, 1)` | doc |
+| `limitbehavior` | chaîne | `"repeat"` | doc |
+| `arcamount` | [U] | `0.5` | provisoire (le preset `dischargearc` active l'arc sans `arcamount`) |
+| `flags` | entier [B] | `0` | voir ci-dessous |
+
+Bits de `flags` [Inféré des données, à valider] : **8 = arc activé** (forte présomption : seule différence entre
+les presets `discharge` (7) et `dischargearc` (15)) ; **16 = redémarrage à chaque période d'émission** (présent
+uniquement avec des émetteurs périodiques) ; **1, 2, 4 = les trois « reduce outer »**, affectation proposée :
+1 = vitesses, 2 = tailles, 4 = positions (l'aperçu de `positionoffsetrandom` n'active que le bit 4).
+
+Algorithme (état : compteur `k` persistant ; chaque particule mémorise son point d'apparition `E` du §6.1 et un
+poids `w_seq`, défaut 1) :
+1. `n = max(1, tronc(count))` ; index `i` comme A5 étape 2 (repeat/mirror) ; `k += 1`. Si le bit 16 est actif, `k`
+   est remis à 0 à chaque entrée en émission de la fenêtre périodique de l'émetteur.
+2. `u = i / (n − 1)` si `n ≥ 2`, sinon `0` (les deux extrémités sont atteintes) ; `s = b0 + u × (b1 − b0)`.
+3. `A = CP[start].position`, `B = CP[end].position` (indice hors `[0, 8)` → `(0,0,0)`) ; `p = lerp(A, B, s)`.
+4. Arc (bit 8) : `d = B − A` ; si `|d.xy| > 1e−4`, `⊥ = normalize((−d.y, d.x, 0))` ;
+   `p += ⊥ × 2 × arcamount × |d| × s × (1 − s)` (flèche au milieu = `arcamount × |d| / 2`).
+5. `w = sin(π × s)` (0 aux extrémités, 1 au milieu).
+6. `position = p + (position − E) × (bit 4 ? w : 1)` (le décalage déjà donné par l'émetteur et les initialiseurs
+   précédents, p. ex. `positionoffsetrandom`, est conservé, réduit près des extrémités si bit 4) ;
+   `w_seq = bit 4 ? w : 1`.
+7. Bit 1 : `vitesse *= w`. Bit 2 : `taille *= w` et taille initiale idem.
+
+##### A6.2.2 `positionoffsetrandom` (5 occurrences)
+
+[Doc WE] décale la position avec un bruit fractal ; paramètres *Directions*, *Sign* (0 = deux signes, 1 = positif,
+−1 = négatif), *Distance* (décalage maximal), *Octaves*, *Noise scale*, *Noise speed*. Clés observées :
+`distance` (100, 150, 200), `scale` (0 ×4), `timescale` (5, 10).
+
+| Clé | Défaut (provisoire) |
+|---|---|
+| `distance` [U] | `50` |
+| `scale` [U] (échelle spatiale du bruit, par pixel) | `0.01` |
+| `timescale` [U] (vitesse du bruit) | `1` |
+| `octaves` [U], tronqué, ≥ 1 | `3` |
+| `directions` vec3 [B] | `(1, 1, 1)` |
+| `sign` ivec3 [B] | `(0, 0, 0)` |
+
+Algorithme : `q = position × scale + (t_g × timescale) × (1,1,1)` ;
+`fbm(q) = Σ_{o=0}^{O−1} 0.5^o × N(2^o × q) / Σ_{o=0}^{O−1} 0.5^o` avec `N` le bruit vectoriel du §9.3 ;
+`δ = fbm(q) × distance × directions` (composante par composante), signe appliqué comme pour la sphère (§6.3) ;
+`position += δ × w_seq`. Avec `scale = 0` (cas des éclairs), le décalage ne dépend que de l'instant d'apparition :
+des particules nées successivement forment une ligne brisée continue.
+
+##### A6.2.3 `hsvcolorrandom` (4 occurrences)
+
+[Doc WE] *Hue min/max*, *Hue steps* (nombre de teintes distinctes), *Saturation min/max* (0–1), *Value min/max*
+(0–1). Clés : `huemin`, `huemax`, `huesteps`, `saturationmin`, `saturationmax`, `valuemin`, `valuemax`.
+Défauts [Inféré] : `huemin` 0, `huemax` 1, `huesteps` 0 (continu), `saturationmax` 1, `valuemax` 1,
+`saturationmin` 0, `valuemin` 0 (les données écrivent explicitement `saturationmin`/`valuemin` = 1, donc ce n'est
+pas leur défaut).
+Algorithme (tirages dans l'ordre h, s, v) :
+- `huesteps ≥ 1` : `j = min(tronc(U(0,1) × huesteps), huesteps − 1)`,
+  `h = huemin + (j / huesteps) × (huemax − huemin)` (6 pas sur 0–1 → rouge, jaune, vert, cyan, bleu, magenta) ;
+  sinon `h = U(huemin, huemax)` ;
+- `s = U(saturationmin, saturationmax)`, `v = U(valuemin, valuemax)` ;
+- conversion HSV → RGB standard avec `h' = fract(h) × 6`, secteur `⌊h'⌋`, `f = h' − ⌊h'⌋`, `p = v(1 − s)`,
+  `q = v(1 − s f)`, `t = v(1 − s(1 − f))` → secteurs 0…5 : `(v,t,p)`, `(q,v,p)`, `(p,v,t)`, `(p,q,v)`, `(t,p,v)`,
+  `(v,p,q)` ;
+- `couleur = rgb × colorn` ; met à jour la couleur initiale (comme §7.1).
+
+##### A6.2.4 `inheritcontrolpointvelocity` (1 occurrence)
+
+[Doc WE] ajoute à la particule la vitesse courante d'un control point, dans une plage de vitesse.
+Clés : `controlpoint` (entier, défaut 0), `min` (défaut 1), `max` (défaut 1) — observé `controlpoint` 1, `min` 0.3,
+`max` 1. Règle : `vitesse += v_cp(controlpoint) × U(min, max) × S` (`v_cp` : A6.1-e ; `S` = `override.speed`).
+
+##### A6.2.5 `colorlist` (1 occurrence)
+
+[Doc WE] choisit pour chaque particule une couleur dans une liste (≤ 10) ; bruits de teinte/saturation/valeur
+optionnels. Clé `colors` : tableau de couleurs [C] (observé : chaînes flottantes `"r g b"`). Règle :
+`m = len(colors)` ; si `m = 0`, sans effet ; sinon `j = min(tronc(U(0,1) × m), m − 1)`,
+`couleur = colors[j] × colorn`, couleur initiale idem. Bruits HSV : noms de clés non observés → ignorés.
+
+#### A6.3 Opérateurs
+
+##### A6.3.1 `remapvalue` (10 occurrences / 8 définitions) et initialiseur `remapinitialvalue` (3)
+
+[Doc WE] lit une entrée (attribut de particule, control point ou valeur globale : durée d'exécution, heure du
+jour…), la normalise sur une plage d'entrée, la transforme (fonction d'onde ou bruit), la projette sur une plage de
+sortie et l'applique à une propriété par *Assign*, *Multiply*, *Add* ou *Subtract* ; *Clamp input* / *Clamp output*
+optionnels. L'initialiseur agit une fois à la naissance, l'opérateur à chaque frame.
+
+| Clé | Type | Défaut |
+|---|---|---|
+| `input` | chaîne | `"lifetimefraction"` [Inféré : les remaps de pluie sans `input` modulent au fil de la vie] |
+| `inputcontrolpoint0`, `inputcontrolpoint1` | entier [B] | `0`, `1` |
+| `inputrangemin`, `inputrangemax` | [U] | `0`, `1` |
+| `output` | chaîne | `"size"` [Inféré : remap de distance sans `output` sur un éclair = effilement ; exemple de la doc] |
+| `outputrangemin`, `outputrangemax` | [U] scalaire ou vec3 (diffusé) | `0`, `1` |
+| `operation` | chaîne | `"remap"` (= Assign) ; `"multiply"`, `"add"`, `"subtract"` |
+| `transformfunction` | chaîne | `"none"` ; `"sine"`, `"square"`, `"saw"`, `"triangle"`, `"simplexnoise"`, `"fbmnoise"` |
+| `transforminputscale` | [U] | `1` |
+| `flags` | entier [B] | **`1`** : bit 1 = borner l'entrée, bit 2 = borner la sortie [Inféré : un preset écrit explicitement `0` pour une entrée temporelle non bornée, un autre `3`] |
+
+Entrées scalaires supportées : `lifetimefraction` (`life`), `maxlifetime` (durée de vie, s), `size`, `opacity`,
+`speed` (`|vitesse|`), `rotation` (`rotation.z`), `angularspeed` (`|vitesseAngulaire|`), `distancetocontrolpoint`
+(`|position − CP[c0]|`), `positionbetweentwocontrolpoints` (`dot(p − A, B − A) / |B − A|²` avec `A = CP[c0]`,
+`B = CP[c1]`, 0 si `A = B`), `runtime` (`t_g`), `particlesystemtime` et `layertime` (Σ des `dt` simulés depuis la
+création du système, pré-simulation comprise), `timeofday` (secondes locales depuis minuit / 86400). Entrées
+vectorielles ou inconnues (`position`, `velocity`, `color`, `controlpoint`, `deltatocontrolpoint`,
+`directiontocontrolpoint`, `layerorigin`) : entrée inactive (ignorée) en attendant des données.
+
+Calcul, par particule :
+1. `x` = entrée ; `n = (x − inmin) / (inmax − inmin)` (si `inmax = inmin` : `n = x ≥ inmax ? 1 : 0`) ; bit 1 →
+   `n = clamp(n, 0, 1)`.
+2. Transformation (σ = `transforminputscale`) : `none` → `T = n` ; `sine` → `0.5 + 0.5 sin(2π σ n)` ; `square` →
+   `fract(σ n) < 0.5 ? 1 : 0` ; `saw` → `fract(σ n)` ; `triangle` → `1 − |2 fract(σ n) − 1|` ; `simplexnoise` →
+   `T = 0.5 + 0.5 × N((σ n, φ_p, 0))` (bruit vectoriel du §9.3, une composante par composante de sortie ;
+   `φ_p = U(0, 256)` tiré une fois par particule à la première évaluation) ; `fbmnoise` → idem avec la somme
+   fractale de A6.2.2 sur 4 octaves.
+3. `y = outmin + T × (outmax − outmin)` (par composante) ; bit 2 → borner `y` à `[min(outmin,outmax),
+   max(outmin,outmax)]`.
+4. Application à la sortie `X` : `remap` → `X = y` ; `multiply` → `X × y` ; `add` → `X + y` ; `subtract` → `X − y`.
+   Sorties : `size`, `opacity` (alpha), `color` (vec3), `velocity` (vec3, **même convention Y que
+   `velocityrandom`**, §2.2), `speed` (norme de la vitesse, direction conservée ; sans effet si `|v| < 1e−6`),
+   `rotation` (vec3), `angularspeed` (vitesse angulaire vec3), `position` (vec3, convention Y de l'origine
+   d'émetteur). Sortie inconnue → entrée inactive.
+5. Initialiseur : `X` = valeur courante dans la chaîne d'initialiseurs ; met aussi à jour les valeurs initiales
+   (taille, alpha, couleur). Opérateur : pour `size`, `opacity`, `color` avec `multiply`/`add`/`subtract`, partir
+   de la **valeur initiale** (pas de composition exponentielle d'une frame à l'autre) ; pour les autres sorties,
+   de la valeur courante ; après écriture de l'alpha ou de la taille, mettre à jour la base de l'oscillateur
+   correspondant (comme §8.4–8.5). Le blending (A6.1-a) s'applique à l'opérateur.
+
+##### A6.3.2 `reducemovementnearcontrolpoint` (9 / 5)
+
+[Doc WE] réduit la vitesse près d'un control point ; *Distance inner/outer*, *Reduction inner/outer* (négatif =
+accélère). Clés : `controlpoint` (défaut 0), `distanceinner` (100), `distanceouter` (200), `reductioninner` (1),
+`reductionouter` (0) — défauts provisoires ; observé 20/50/1000 (éclairs, une instance sur CP0 et une sur CP1)
+et 50/150/10/0 (aperçu). Pour chaque particule : `d = |position − CP.position|` ;
+`r = d ≤ din ? rin : (d ≥ dout ? rout : lerp(rin, rout, (d − din)/(dout − din)))` ;
+`vitesse *= max(0, 1 − r × dt)` (même forme que la traînée de `movement` ; `r < 0` accélère). Indice hors
+`[0, 8)` → inactif.
+
+##### A6.3.3 `maintaindistancebetweencontrolpoints` (5)
+
+[Doc WE] maintient la particule entre deux control points (la suit quand ils bougent). Aucune clé autre que `name`
+observée ; clés supposées `controlpointstart` (0) et `controlpointend` (1). Règle : à la première application à
+une particule, mémoriser `u_p` = paramètre `s` posé par `mapsequencebetweencontrolpoints` s'il existe, sinon
+`clamp(dot(p − A, B − A)/|B − A|², 0, 1)` ; ensuite, à chaque frame,
+`position += lerp(A_t, B_t, u_p) − lerp(A_{t−1}, B_{t−1}, u_p)` (positions des control points à cette frame et à
+la précédente). Points immobiles → aucun effet visible.
+
+##### A6.3.4 `capvelocity` (3)
+
+[Doc WE] vitesse maximale par particule, combinable avec le blending. Clé `maxspeed` [U] (défaut provisoire 100 ;
+observé 50 et 100). Si `|v| > maxspeed` : `v = v / |v| × maxspeed` ; puis blending (A6.1-a).
+
+##### A6.3.5 `boids` (3)
+
+[Doc WE] *Neighbor threshold* (rayon de voisinage pour alignement et cohésion), *Separation threshold* (distance
+d'évitement), *Separation / Cohesion / Alignment factor*, *Clamp speed* + *Max speed*. Clés observées :
+`neighborthreshold` (50, 150), `separationfactor` (0, 25), `cohesionfactor` (4, 5), `alignmentfactor` (5),
+`flags` (0). Défauts provisoires : `neighborthreshold` 100, `separationthreshold` 25, facteurs 1, `maxspeed` 1000,
+`flags` bit 1 = borner la vitesse.
+Règle (deux passes : toutes les variations sont calculées sur l'état en début d'opérateur, puis appliquées) :
+pour la particule i, voisins `V = { j ≠ i : |p_j − p_i| < neighborthreshold }` ; si `V` vide, rien ;
+`c = moyenne(p_j) − p_i` ; `a = moyenne(v_j) − v_i` ;
+`s = Σ_{j : |p_i − p_j| < separationthreshold, > 1e−4} (p_i − p_j)/|p_i − p_j| × (separationthreshold − |p_i − p_j|)` ;
+`v_i += (cohesionfactor × c + alignmentfactor × a + separationfactor × s) × dt` ; si bit 1, borner `|v_i|` à
+`maxspeed`. Performance (règle 1) : grille spatiale de pas `neighborthreshold`, pas de boucle O(n²).
+
+##### A6.3.6 `maintaindistancetocontrolpoint` (3)
+
+[Doc WE] place les particules à une distance donnée d'un control point, avec une force variable (0–1).
+Clés : `controlpoint` (0), `distance` (provisoire 100), `variablestrength` (observé 5, hors de la plage documentée).
+Règle : `δ = p − CP.position`, `d = |δ|` ; si `d > 1e−4` : `cible = CP.position + δ/d × distance`,
+`α = clamp(variablestrength, 0, 1)`, `p = lerp(p, cible, α)`.
+
+##### A6.3.7 Collisions (1 occurrence chacune, scènes d'aperçu uniquement — priorité basse)
+
+[Doc WE] comportements *Bounce* (avec *Bounce factor*), *Slide*, *Stop*, *Delete* (supprime la particule et déclenche
+l'évènement de mort) ; variantes plan, sphère, limites de la scène, rectangle (un seul côté), modèle.
+Clés communes : `collisionbehavior` (`"bounce"` défaut, `"slide"`, `"stop"`, `"delete"`), `bouncefactor`
+(défaut provisoire 0.5 ; observé 0.7). Toutes les grandeurs vectorielles (`plane`, `origin`, `forward`) suivent la
+**même convention d'axe Y que `gravity`** (§2.2), de sorte qu'un sol placé sous l'émetteur arrête des particules
+tombant par gravité.
+Réponse à une pénétration (distance signée `σ < 0`, normale sortante `n`) : `position −= σ × n` ;
+`vn = dot(v, n)` ; si `vn < 0` : bounce → `v −= (1 + bouncefactor) × vn × n` ; slide → `v −= vn × n` ;
+stop → `v = 0` ; delete → la particule meurt à cette frame (âge = durée de vie).
+- `collisionplane` : `plane` (normale, défaut `(0,1,0)`), `distance` (défaut 0) ; `σ = dot(p, n̂) − distance`.
+- `collisionsphere` : `origin` (défaut 0), `radius` (provisoire 100) ; la particule reste **à l'extérieur** :
+  `σ = |p − c| − radius`, `n = (p − c)/|p − c|`.
+- `collisionbounds` : les quatre bords du rectangle de scène `[−W/2, W/2] × [−H/2, H/2]` exprimés en espace local
+  par soustraction de `O` ; normales vers l'intérieur.
+- `collisionquad` : `origin`, `size` (vec2, défaut `(100, 100)`), `plane` (normale, défaut `(0,1,0)`), `forward`
+  (défaut `(0,0,1)`) ; collision seulement si la particule passe du côté positif au côté négatif pendant la frame
+  (position précédente estimée `p − v dt`) et si sa projection tombe dans le rectangle (axes `normalize(cross(
+  forward, n̂))` de demi-largeur `size.x/2` et `forward` de demi-largeur `size.y/2`, ce second test omis en 2D).
+- `collisionmodel` : nécessite un modèle 3D / puppet warp relié par `dependencies` → **non supporté**, ignoré
+  (journalisé).
+
+##### A6.3.8 `inheritvaluefromevent` (1) : voir A6.5.
+
+#### A6.4 Émetteur `layerimage` (1 occurrence)
+
+[Doc WE] émet depuis un calque image, texte ou puppet warp ; options *Copy layer color*, *Update emission bitmap
+periodically*, *Inherit layer motion*, *Random offset* ; un masque optionnel limite la zone ; les autres réglages
+sont ceux de la sphère et de la boîte. Données : émetteur `{name: "layerimage", rate: 5000}` (aucune autre clé),
+`maxcount` 10000, lien par `dependencies: [{id, index: 0, type: "emitterimage"}]` sur l'objet particules ; le calque
+source est **invisible** (`visible: false`) et sert quand même de source.
+Règle [Inféré des données] :
+- Source : l'objet de scène dont l'`id` est celui de la dépendance `emitterimage` dont `index` = indice de
+  l'émetteur dans `emitter` ; absent → l'émetteur n'émet rien (journalisé).
+- Bitmap d'émission : canal alpha de la texture de base du calque, calculé **une fois** au chargement
+  (réduction autorisée à ≤ 256×256 texels) ; texels retenus : alpha ≥ 0,5. Aucun texel → rien.
+- Taux, `instantaneous`, `delay`, `duration`, périodicité, `flags` bit 2 : comme `boxrandom` (§6.2).
+- Position : texel tiré uniformément parmi les texels retenus, point uniforme dans le texel, `(u, v)` projeté sur
+  le quad du calque avec la même transformation que son rendu (origine, taille, échelle, angles ; spec 04), puis
+  ramené en espace local du système par soustraction de `O` (échelle/rotation du système non compensées, comme les
+  control points world space). Vitesse nulle, `z = 0` ; puis valeurs de base (§3) et initialiseurs.
+- Options *copy layer color*, *inherit layer motion*, *random offset*, masque, mise à jour périodique : clés non
+  observées → ignorées. Animation de puppet warp : non prise en compte (texture statique).
+
+#### A6.5 Systèmes enfants (`children`) et héritage de valeurs d'évènement
+
+[Doc WE] (page « Children ») : *Static* = un enfant créé une fois à l'origine du système ; *Event follow* = un
+enfant par particule, qui la suit ; *Event spawn* = enfant créé à la naissance d'une particule ; *Event death* =
+enfant créé à la mort d'une particule, à sa position. *Offset*, *Angles*, *Scale* ; *Max count* (nombre maximal
+d'enfants, utile pour les évènements) ; *Probability* (0–1) ; *Set control points* : les control points de l'enfant
+reçoivent à chaque frame des positions de particules du parent à partir de *Control point start index*.
+Données : clés `type` (absent → `static`), **`name` = chemin du fichier de définition de l'enfant** (la clé
+`particle` du §14 n'apparaît jamais), `maxcount`, `probability`, `origin`, `angles`, `scale`, `flags` (0, 1, 2),
+`controlpointstartindex` (null ou 1). Les control points d'un enfant peuvent porter `parentcontrolpoint`
+(*Copy from parent*).
+Règle [Doc WE + Inféré des données] — remplace « ignorer » du §14 :
+1. Instance enfant = système complet (§0–§13) chargé depuis `name`, avec son pool, son générateur aléatoire et ses
+   control points ; il reçoit l'`instanceoverride` et la visibilité du parent (sauf bits A6.1-f de ses propres
+   `flags`) ; il est dessiné juste après son parent, dans le même emplacement de l'ordre de rendu.
+2. Repère : matrice modèle de l'enfant = `M_parent · T(ancre + origin) · Rz(−angles.z) · Ry(angles.y) ·
+   Rx(−angles.x) · S(scale)` (même convention qu'au §2.3) ; `ancre = (0,0,0)` pour `static`, position (espace
+   local du parent) de la particule déclencheuse pour les évènements.
+3. `static` : une instance créée avec le parent, vivant aussi longtemps que lui (`maxcount` sans objet).
+4. `eventspawn` : après les initialiseurs de chaque nouvelle particule parente, si `U(0,1) < probability`
+   (générateur du parent) et si le nombre d'instances vivantes de cette entrée est `< maxcount`, créer une instance
+   ancrée à la position de naissance (fixe). Sinon l'évènement est perdu.
+5. `eventdeath` : idem au moment de la mort (§5 étape 10, avant compaction ; morts par collision `delete`
+   comprises), ancre = dernière position.
+6. `eventfollow` : idem à la naissance ; l'ancre suit ensuite la position courante de la particule ; à la mort de
+   celle-ci, l'instance cesse d'émettre.
+7. Fin d'une instance d'évènement : détruite dès qu'elle n'a plus de particule vivante **et** qu'aucun de ses
+   émetteurs ne peut plus émettre (rafale faite et `rate = 0`, `duration` écoulée, ou parent suivi mort).
+8. *Set control points* (supposé `flags & 1`) : à chaque frame, `CP_enfant[controlpointstartindex]` (null → 0) ←
+   position de la particule déclencheuse/suivie, exprimée dans le repère de l'enfant ; pour `static`,
+   `CP_enfant[k + i]` ← particule parente `i` pour `i < 8 − k`. `parentcontrolpoint` et les autres bits : A7.7.
+9. Ordre : le parent est simulé (évènements compris), puis ses enfants dans l'ordre de création, avec le même
+   `dt` (et les mêmes pas pendant la pré-simulation, A1).
+10. Héritage d'évènement : `inheritinitialvaluefromevent` (initialiseur, à la naissance d'une particule de
+    l'enfant) et `inheritvaluefromevent` (opérateur, chaque frame tant que la particule parente vit) copient une
+    valeur de la particule parente associée à l'instance. Options (noms d'énumération de l'interface WE) :
+    `setcolor`, `multiplycolor`, `setopacity`, `multiplyopacity`, `setcoloropacity`, `multiplycoloropacity`,
+    `setvelocity`, `addvelocity`, `setsize`, `multiplysize`, `setrotation`, `addrotation`, `setangularvelocity`,
+    `addangularvelocity`. Nom de clé non observé (les données n'ont que des défauts) : lire une chaîne dans `input`
+    si présente, défaut **`setcolor`** (exemple de la doc : l'explosion hérite de la couleur de la fusée). Sans
+    instance parente (système racine), sans effet.
+
+#### A6.6 Autres clés observées, lues sans effet pour l'instant
+
+- renderer `sprite` : `orientation` (`"screen"` ×5 = comportement actuel) et `axis` ; *upright* / *fixed* (doc
+  « Renderers ») non spécifiés.
+- `movement.flags` bit 1 (×3) : option *Worldspace* du mouvement (doc « Operators ») — non spécifiée.
+- `ropetrail` : `segments` (×2), `fadealpha` (×2) — inchangé (§4.2).
+- control points : `flags` 4 et 16 observés, `parentcontrolpoint` — sémantique non établie (A7.7).
+- clés d'audio-réactivité (`audioprocessing*`) — inchangé (audio hors périmètre de cette spec).
+
+### A7. Questions ouvertes ajoutées
+
+1. **`starttime` et visibilité** : WE pré-simule-t-il un système masqué au chargement (ex. `ash`, visible lié à une
+   propriété utilisateur fausse par défaut) ? Choix actuel : à la première frame visible.
+2. **`instance.count` / `instance.rate`** : la doc SceneScript les décrit comme facteurs du débit d'émission et de
+   la cadence de simulation, l'amont les applique au pool et au débit des émetteurs. À trancher sur WE réel (un
+   `rate` qui ralentirait le temps de simulation changerait fortement le rendu de la scène de test).
+3. **`brightness`** : confirmer qu'il multiplie l'overbright (et non la couleur des sommets).
+4. **Bits de `flags`** de `mapsequencebetweencontrolpoints` / `mapsequencearoundcontrolpoint` (reduce outer ×3,
+   restart périodique, modify count with layer settings) ; défaut de `count` (32) et d'`arcamount` ; clé d'*Arc
+   direction*.
+5. **Défauts non observables** de tous les types de A6 : à calibrer sur WE réel.
+6. **`flags` du système** : bit 1 (*Worldspace*), bit 2, et répartition des bits 8–128 entre les cinq « disable
+   overrides ».
+7. **Control points** : la doc indique que le control point 0 est toujours lié à l'origine du système, alors que
+   l'amont lui applique son `offset` (§4.4) ; sémantique des bits 4 et 16 et de `parentcontrolpoint`.
+8. **Spec 02, `dependencies`** : la spec 02 (§7.2) exige des entiers, or les scènes WE contiennent des objets
+   `{id, index, type}` (A6.1-g) ; avec la règle actuelle, ces scènes échoueraient (E1). À amender dans la spec 02
+   (hors du périmètre d'écriture de ce document).
+9. **Fréquence des oscillateurs** : la doc « Operators » exprime *Frequency min/max* en **nombre d'oscillations par
+   durée de vie** de la particule, alors que l'amont l'utilise comme pulsation en rad/s sur l'âge (§2.1, §8.10).
+   Si la règle 5 de la politique de parité est appliquée, la phase deviendrait `2π × f × life + φ` ; à confirmer
+   avant de changer.
