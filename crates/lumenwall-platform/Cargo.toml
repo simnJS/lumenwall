@@ -36,8 +36,9 @@ wayland-client = { version = "0.31.14", optional = true, features = ["system", "
 # `allow-unsafe-code` exposes the `xcb_connection_t*` that Vulkan/EGL need; `dl-libxcb` loads libxcb at runtime.
 # `present` (which needs `dri3` in x11rb 0.14) detects windows hidden by native Wayland windows on XWayland.
 x11rb = { version = "0.14.0", optional = true, features = ["allow-unsafe-code", "dl-libxcb", "randr", "dpms", "screensaver", "present", "dri3"] }
-# CLOCK_MONOTONIC in microseconds, to date Present completions by their UST (already in the tree via calloop).
-rustix = { version = "1.1.6", optional = true, default-features = false, features = ["std", "time"] }
+# CLOCK_MONOTONIC in microseconds, to date Present completions by their UST (already in the tree via calloop);
+# the uid for the session bus handshake of the optional GNOME Shell extension link.
+rustix = { version = "1.1.6", optional = true, default-features = false, features = ["std", "time", "process"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [

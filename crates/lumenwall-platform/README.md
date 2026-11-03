@@ -21,8 +21,9 @@ s.request_frame(id);  /* render */  s.pre_present(id);  /* present */
 - `docs/research/platform.md`, `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`.
 - Public documentation only: Wayland protocol XML (layer-shell, fractional-scale, viewporter,
   wlr-foreign-toplevel), EWMH/ICCCM, RandR/DPMS/MIT-SCREEN-SAVER, the Present extension protocol, MSDN,
-  docs.rs, and the public "Progman 0x052C / WorkerW" technique. GNOME/XWayland behaviour below was measured
-  on the dev machine, not read from Mutter or XWayland sources.
+  docs.rs, the public "Progman 0x052C / WorkerW" technique, the D-Bus specification (wire format, SASL) and
+  the GNOME Shell/Mutter GObject introspection data (for the optional extension). GNOME/XWayland behaviour
+  below was measured on the dev machine, not read from Mutter or XWayland sources.
 
 ## Coverage
 
@@ -32,22 +33,43 @@ s.request_frame(id);  /* render */  s.pre_present(id);  /* present */
 | Scale | fractional-scale + viewporter (integer fallback) | 1.0 | PerMonitorV2, DPI/96 | winit |
 | Hot-plug | yes | RandR notify | `WM_DISPLAYCHANGE`, Explorer restart (`TaskbarCreated`) | — |
 | Pacing | frame callbacks + fps cap | timer | high-resolution waitable timer | timer |
-| Fullscreen | wlr-foreign-toplevel (only-active, app-id filter) | root children cache + `_NET_ACTIVE_WINDOW`/`_NET_WM_STATE` | `SetWinEventHook` + `DWMWA_CLOAKED` + `SHQueryUserNotificationState` | none (debug) |
+| Fullscreen | wlr-foreign-toplevel (only-active, app-id filter) | root children cache + `_NET_ACTIVE_WINDOW`/`_NET_WM_STATE`; GNOME: Shell extension (optional) | `SetWinEventHook` + `DWMWA_CLOAKED` + `SHQueryUserNotificationState` | none (debug) |
+| Maximised (`MAXIMIZED`) | — (covered surfaces stop getting frame callbacks) | `_NET_WM_STATE_MAXIMIZED_*` of windows over ≥ ½ an output (client inside WM frames); GNOME: Shell extension for Wayland windows | counted as covering (`OCCLUDED`) | — |
 | Covered / hidden | no frame callback for 500 ms | `VisibilityNotify` (no compositor); XWayland: Present frame timing (any window, Wayland-native included) | maximised / work-area-covering window | occluded, minimised |
 | Locked / screen off | via missing frame callbacks | MIT-SCREEN-SAVER, DPMS 1.2; XWayland: Present frame timing | WTS lock, `GUID_CONSOLE_DISPLAY_STATE` | — |
 | Pointer | surface events | pipelined `QueryPointer` per frame; clicks on our window | `GetCursorPos` per frame; Raw Input `RIDEV_INPUTSINK` for clicks on the desktop | winit |
 
 Pure logic is OS-independent and unit-tested: UVs and span slices (`uv`), mouse projection and focus rules
-(`mouse`), frame pacing (`sched`), toplevel relevance and the X11 root-window cache (`fullscreen`), XWayland
-frame-callback starvation (`starvation`), Windows parent choice, child rectangles, click targets and pause
-decision (`win_logic`).
+(`mouse`), frame pacing (`sched`), toplevel relevance, the X11 root-window cache and the maximised rule
+(`fullscreen`), XWayland frame-callback starvation (`starvation`), the D-Bus wire format and extension
+protocol (`linux::gnome_shell`), Windows parent choice, child rectangles, click targets and pause decision
+(`win_logic`).
 
 ## GNOME (Wayland session, X11 windows through XWayland)
 
 Mutter has no layer-shell, so the binary falls back on the X11 backend, whose window tree only contains
-XWayland clients: a native Wayland window (Firefox, games, terminals, video players) is invisible to the
-root-children cache, `_NET_WM_STATE` and `VisibilityNotify`. Lumenwall instead watches whether the compositor
-still paints its windows:
+XWayland clients: a native Wayland window (Firefox, Chrome, games, terminals, video players) is invisible to
+the root-children cache, `_NET_WM_STATE` and `VisibilityNotify`. Three signals are combined (union of reasons):
+
+1. **X11 state** of XWayland windows (Proton/Wine games, Steam, Discord, `--ozone-platform=x11` browsers):
+   exact-geometry windows ⇒ `FULLSCREEN` (§9.2); `_NET_WM_STATE_MAXIMIZED_VERT`+`_HORZ` ⇒ `MAXIMIZED` on the
+   output the window overlaps most (`pause_when_maximized`). The state is read on the client window, not on
+   Mutter's `mutter-x11-frames` frame (which has none), only for windows covering at least half an output, and
+   only on map/unmap/configure/focus events.
+2. **Present frame timing** for whatever Mutter stops painting (native fullscreen windows, overview, lock
+   screen, powered-off monitor): `OCCLUDED`, below.
+3. **Optional GNOME Shell extension** (`packaging/gnome-extension/lumenwall@simnjs.github.io`): Mutter's own
+   per-monitor "in fullscreen" state and maximised normal windows of the active workspace, published on the
+   session bus (see `linux::gnome_shell` for the interface). Detected automatically (also when it is enabled
+   or re-enabled later, e.g. after each unlock); without it the binary logs once that maximised Wayland
+   windows cannot pause.
+
+A maximised **Wayland** window has no other reliable signal: Mutter keeps painting the strip of desktop under
+the top bar (transparent with Blur my Shell), so the frame timing never starves, and no public interface lists
+other applications' windows (table below). Install the extension for Wallpaper Engine's "pause when another
+application is maximised"; the strip under the panel then keeps the last frame.
+
+Present frame timing:
 
 - Each X11 window is a Wayland surface of XWayland, and Mutter sends no frame callback to a surface it does not
   paint. XWayland then completes `PresentPixmap` requests on a fallback timer (1 s) instead of at the next
@@ -56,18 +78,33 @@ still paints its windows:
 - Running: a present unanswered for 750 ms ⇒ `Paused { OCCLUDED }` for that output. Hidden: one probe per
   second (the window's own top-left pixel presented back in copy mode: no visible change); two answers in
   under 250 ms ⇒ `Resumed`. No probe while the output is paused for another reason.
-- Measured (GNOME 50.1, Ubuntu 26.04, NVIDIA): answers take 2–6 ms when visible and exactly 1000 ms when
-  hidden. A GTK4 or raw xdg-shell fullscreen window pauses the output it covers ≈1.3 s after it maps
-  (FIFO presents block for the first fallback period) and resumes it ≈30 ms after it closes; while hidden the
-  event thread wakes ≈2×/s, 0 frames are rendered, process CPU 0.2 % (was ≈1 frame/s with a blocked render
-  thread and no `Paused` event, so audio kept playing).
-- It follows what Mutter paints, not window states: a maximised Wayland window does **not** pause (measured:
-  Mutter keeps painting the desktop under it, presumably the strip behind the top bar), unlike the geometry
-  rule for maximised XWayland windows. The lock screen, powered-off monitors and the overview should pause
-  like a fullscreen window (not tested, so as not to lock the session).
 - Off with `pause_when_covered = false`, outside XWayland (`XWAYLAND` extension or `WAYLAND_DISPLAY`) and
   without Present (warning logged). If an output's probes are never answered (5 × 2 s) the detection gives
   up for it with a warning.
+
+Measured on DP-4 (GNOME 50.1, Ubuntu 26.04, RTX 4080 proprietary driver, 2 × 2560×1440 at 280/240 Hz,
+`fps = 144`, FIFO, Blur my Shell + Dash to Dock + DING enabled). Running: 6–8 % CPU, ≈10 % GPU. Paused: 0 frames,
+0–0.7 % CPU, 0 % GPU, event thread ≈3 wake-ups/s.
+
+| Case | Signal | Pause after map | Resume after close |
+|---|---|---|---|
+| GTK4 window fullscreen, native Wayland | frame timing | 1.2–1.25 s (FIFO blocks the renderer until the 1 s fallback) | 65–70 ms |
+| Chrome `--kiosk`, native Wayland, VP9 video playing | frame timing | 1.7–3.3 s after launch (start-up included) | 75–190 ms |
+| GTK4 window fullscreen, XWayland | X11 state | 30–250 ms (mapped windowed, then resized) | 35 ms |
+| Simulated Proton game: managed fullscreen / override-redirect, XWayland | X11 state | < 1 ms | < 1 ms |
+| Chrome `--ozone-platform=x11 --kiosk` | X11 state | ≈0.7 s after launch | 85 ms |
+| GTK3 window maximised, XWayland (2560×1400 under the 40 px top bar) | X11 state | < 1 ms (was: never) | 1 ms |
+| GTK4 window maximised, native Wayland | none without the extension | never | — |
+| Same, with the extension (nested headless GNOME 50.1 Shell) | extension | 17 ms after the window reaches its monitor; signal 1–2 ms after each state change | signal 2 ms after unmaximise / close |
+| Overview (nested Shell) | frame timing | ≈1 s | on close |
+
+With the extension a fullscreen Wayland window is announced 25–35 ms after it maps, often after Mutter already
+stopped painting the desktop: with FIFO the renderer may then still block for the 1 s fallback first.
+
+Present modes at 144 fps (test build of the renderer): the NVIDIA driver offers only FIFO and Immediate on
+XWayland (no Mailbox). The frame timing works with both: FIFO pauses 1.2 s after a native fullscreen window
+maps (the renderer blocks until the fallback answers), Immediate 0.95 s (750 ms threshold, nothing blocks);
+both resume in ≈70 ms, with the same running cost (≈8 % CPU) and 0 % GPU while paused.
 
 Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50.1):
 
@@ -75,13 +112,23 @@ Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50
 |---|---|
 | `org.gnome.Shell.Introspect.GetWindows` | `AccessDenied` outside unsafe mode / portal backends; no fullscreen field anyway |
 | `org.gnome.Mutter.DisplayConfig` | monitors and `PowerSaveMode` only |
-| `org.gnome.SessionManager` inhibitors | heuristic: video players inhibit idle, games and terminals usually do not |
+| `org.gnome.SessionManager` inhibitors | heuristic: video players inhibit idle, games and terminals usually do not; a small video window inhibits too |
 | `org.gnome.ScreenSaver.ActiveChanged` | lock only (covered by frame timing already) |
 | X11 `VisibilityNotify`, `_NET_WM_STATE`, `_NET_ACTIVE_WINDOW` | Wayland windows are not in the X11 tree; measured: no event |
+| `_GTK_WORKAREAS_D0` on the root | per-monitor work areas only, says nothing about windows |
 | xdg-desktop-portal | no portal exposes other applications' windows |
 | Wayland globals of Mutter | no layer-shell, no wlr/ext foreign-toplevel; `xdg_toplevel.suspended` only for own toplevels |
-| Present frame timing (chosen) | exact per-output visibility, no extension, 1 wake-up/s while hidden |
-| Own GNOME Shell extension (`global.display` `in-fullscreen-changed` over D-Bus) | exact fullscreen with 0 wake-ups, but needs install + re-login and per-release maintenance: not needed |
+| Present frame timing (kept) | exact per-output visibility, no extension, 1 wake-up/s while hidden; blind to maximised windows |
+| Own GNOME Shell extension (added, optional) | exact fullscreen and maximised state, 0 wake-ups; needs install + re-login and per-release care (feature-detected Mutter calls, tested on 50.1 only) |
+
+Install the extension (once per user; Wayland sessions only discover new extensions at login):
+
+```sh
+mkdir -p ~/.local/share/gnome-shell/extensions
+cp -r packaging/gnome-extension/lumenwall@simnjs.github.io ~/.local/share/gnome-shell/extensions/
+# log out and back in, then:
+gnome-extensions enable lumenwall@simnjs.github.io
+```
 
 ## Performance
 
@@ -89,7 +136,12 @@ Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50
   (XWayland) and in windowed mode: **0** wake-ups of
   the event thread over 3 s with no frame requested; the X11 backend renders at 30.2 frames/s with a cap of 30.
 - No foreign window ever gets a `PropertyChange` mask on X11 (applications rewrite their properties
-  constantly); EWMH states are read only when a focus or geometry event makes them relevant.
+  constantly); EWMH states are read only when a focus or geometry event makes them relevant (pipelined, one
+  round-trip per batch of events).
+- GNOME extension link: one Unix socket to the session bus in the event loop, no thread and no timer. The bus
+  only forwards `NameOwnerChanged` for the extension's name and its `MonitorsChanged` signal, which is sent
+  only when a monitor's state changes: 0 wake-ups otherwise, with or without the extension. The handshake
+  (≈1 ms) runs once at start-up.
 - No allocation per pointer event in this crate (events are `Copy`, queues reused). libxcb/libwayland
   allocate internally; Wayland's `wl_surface.frame` creates one protocol object per frame (inherent).
 - Windows Raw Input wakes the thread on every mouse report, so it is registered only in
@@ -106,6 +158,10 @@ Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50
 - Wayland: call `pre_present` before presenting (it attaches the frame callback and the viewport state to
   that commit) and prefer a non-blocking present mode (Mailbox/Immediate): pacing comes from our callbacks,
   and FIFO can block in the driver while the surface is hidden.
+- X11 on XWayland: with FIFO a hidden window blocks the render thread in `acquire` until XWayland's 1 s
+  fallback (and indefinitely on DRM-syncobj waits in a headless nested Mutter); no platform event, D-Bus
+  message included, is processed meanwhile. Immediate (the only other mode NVIDIA offers there) avoids it;
+  the frame cap already paces the frames.
 - Drop the GPU surface of an output when `OutputRemoved` arrives, before the next `wait`.
 - Features: `wayland`, `x11`, `windowed` (all default). `windowed` brings winit 0.30 and its own
   sctk 0.19 / x11rb 0.13 (duplicate crates, `cargo deny` warns only). winit must run on the main thread.
@@ -120,6 +176,10 @@ Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50
 - X11 ran on XWayland only (GNOME), not on a real Xorg with a reparenting WM or a compositor (picom).
 - XWayland frame timing: tested with Mutter 50 and the NVIDIA driver only; not with Mesa, KWin's or other
   compositors' XWayland, nor on lock / DPMS off.
+- GNOME extension: GNOME 50.1 only, in a nested headless Shell (the real session needs a re-login to load
+  it); GNOME 45–49 are declared and use feature-detected calls (connectors fall back on geometry). Not
+  tested: workspace switches with maximised XWayland windows on the other workspace, mirrored monitors,
+  fractional scaling (geometry fallback only).
 
 ### To check on Windows 11 24H2 / 25H2 (and once on Windows 10)
 
@@ -144,11 +204,16 @@ Options evaluated (public GNOME/freedesktop interfaces, checked live on GNOME 50
 - Event-driven pause (no 250 µs loop, no per-frame round-trip); outputs that are covered, hidden, locked or
   powered off also pause (`PauseReasons`). `PauseScope::AllOutputs` (default) keeps the reference rule that a
   fullscreen window pauses every output.
-- XWayland: native Wayland windows are seen as covering (`OCCLUDED`, per output), never as `FULLSCREEN`: on
-  two monitors a fullscreen Wayland window pauses only the output it hides, whatever `PauseScope`.
+- XWayland: without the GNOME extension, native Wayland windows are seen as covering (`OCCLUDED`, per
+  output), never as `FULLSCREEN`: on two monitors a fullscreen Wayland window pauses only the output it hides,
+  whatever `PauseScope`. With the extension they are `FULLSCREEN` and follow `PauseScope`.
 - X11: windows flagged `_NET_WM_STATE_HIDDEN` never count (Mutter keeps minimised XWayland windows mapped),
   and a maximised window matching an output only pauses that output (`OCCLUDED`), as Wallpaper Engine
   separates maximised from fullscreen. Exact-geometry windows still count as fullscreen (§9.2).
+- Maximised windows pause the output they are on (`MAXIMIZED`, `Config::pause_when_maximized`, on by default;
+  the binary ties it to the fullscreen-pause switch): Wallpaper Engine's "other application maximised" rule,
+  which the reference does not have. A strip of desktop left visible by a transparent panel keeps the last
+  frame.
 - Clicks are delivered on X11 and Windows too (on the visible desktop only); the reference never sees them
   on X11 (QO-8).
 - Missing `XDG_SESSION_TYPE` falls back on `WAYLAND_DISPLAY` / `DISPLAY` instead of aborting.

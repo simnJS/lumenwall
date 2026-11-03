@@ -10,6 +10,8 @@
 //! * hidden on XWayland (native Wayland window on top, lock screen, output powered off): the compositor stops
 //!   sending frame callbacks to our surfaces, which XWayland's Present completions reveal (see
 //!   [`crate::starvation`]); one probe per second while hidden, nothing while running;
+//! * maximised: `_NET_WM_STATE_MAXIMIZED_*` of X11 windows covering most of an output; on GNOME, fullscreen
+//!   and maximised native Wayland windows from the optional Shell extension (see [`super::gnome_shell`]);
 //! * locked / screen off: MIT-SCREEN-SAVER notify and DPMS 1.2 `InfoNotify`;
 //! * pointer: one `QueryPointer` per rendered frame, pipelined (the reply is read one frame later, by which
 //!   time it has long arrived), never while paused. Clicks come from `ButtonPress` on our windows, i.e. only
@@ -37,8 +39,9 @@ use x11rb::protocol::{Event as XEvent, dpms, randr, screensaver};
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
+use super::gnome_shell::{self, FLAG_FULLSCREEN, FLAG_MAXIMIZED, ShellLink};
 use super::loop_error;
-use crate::fullscreen::{RootChild, RootChildren, Verdict, apply_scope};
+use crate::fullscreen::{RootChild, RootChildren, Verdict, X11Rules, apply_scope};
 use crate::geometry::{Rect, best_overlap};
 use crate::sched::{FrameSlot, min_deadline, pause_transition, timeout_until};
 use crate::starvation::{self, Change, Starvation};
@@ -66,6 +69,7 @@ x11rb::atom_manager! {
         _NET_WM_NAME,
         UTF8_STRING,
         _MOTIF_WM_HINTS,
+        WM_STATE,
     }
 }
 
@@ -159,6 +163,10 @@ pub(crate) struct X11State {
     rects: Vec<Rect>,
     scratch: Vec<PauseReasons>,
     candidates: Vec<u32>,
+    /// Session-bus link with the GNOME Shell extension (XWayland only; `None` once the bus is gone).
+    shell: Option<ShellLink>,
+    /// The extension's arrival was logged once.
+    shell_announced: bool,
 }
 
 /// The X11 backend.
@@ -237,8 +245,24 @@ impl X11Backend {
 
         let mut children = RootChildren::default();
         children.reset(snapshot_root_children(&conn, root));
-        let probe_gc = if config.pause_when_covered {
+        let xwayland = is_xwayland(&conn);
+        let probe_gc = if config.pause_when_covered && xwayland {
             setup_xwayland_probe(&conn, root)
+        } else {
+            None
+        };
+        let shell = if xwayland
+            && (config.fullscreen.enabled
+                || config.pause_when_maximized
+                || config.pause_when_covered)
+        {
+            match ShellLink::connect() {
+                Ok(link) => Some(link),
+                Err(e) => {
+                    tracing::debug!("session bus unavailable, no GNOME Shell extension link: {e}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -276,6 +300,8 @@ impl X11Backend {
             rects: Vec::new(),
             scratch: Vec::new(),
             candidates: Vec::new(),
+            shell,
+            shell_announced: false,
         };
         state.refresh_outputs(true)?;
         state.process_dirty();
@@ -290,6 +316,21 @@ impl X11Backend {
                 |_, _, _| Ok(PostAction::Continue),
             )
             .map_err(|e| loop_error(e.error))?;
+        if let Some(fd) = state.shell.as_ref().and_then(|s| s.watch_handle().ok()) {
+            event_loop
+                .handle()
+                .insert_source(
+                    Generic::new(fd, Interest::READ, LoopMode::Level),
+                    |_, _, state: &mut X11State| {
+                        Ok(if state.shell_readable() {
+                            PostAction::Continue
+                        } else {
+                            PostAction::Remove
+                        })
+                    },
+                )
+                .map_err(|e| loop_error(e.error))?;
+        }
         let (ping, ping_source) = ping::make_ping().map_err(loop_error)?;
         event_loop
             .handle()
@@ -312,14 +353,15 @@ fn has_extension(conn: &XCBConnection, name: &'static str) -> bool {
 /// Probe serials live in the upper half of the range, far from the renderer's own Present serials.
 const PROBE_SERIAL_BASE: u32 = 0x8000_0000;
 
+/// True when the X server is XWayland (a Wayland session: native windows are invisible to X11).
+fn is_xwayland(conn: &XCBConnection) -> bool {
+    has_extension(conn, "XWAYLAND")
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+}
+
 /// On XWayland, prepares the detection of windows the compositor stopped painting (see
-/// [`crate::starvation`]): returns the GC used by the probes, or `None` elsewhere or without Present.
+/// [`crate::starvation`]): returns the GC used by the probes, or `None` without Present.
 fn setup_xwayland_probe(conn: &XCBConnection, root: Window) -> Option<u32> {
-    let xwayland = has_extension(conn, "XWAYLAND")
-        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-    if !xwayland {
-        return None;
-    }
     let present_ok = has_extension(conn, present::X11_EXTENSION_NAME)
         && present::query_version(conn, 1, 0)
             .ok()
@@ -387,6 +429,7 @@ fn snapshot_root_children(conn: &XCBConnection, root: Window) -> Vec<RootChild> 
                 hidden: false,
                 maximized: false,
                 verdict,
+                client: 0,
             })
         })
         .collect()
@@ -835,8 +878,40 @@ impl X11State {
         self.pause_dirty = true;
     }
 
-    /// Classifies a root child that could pause an output (a few requests, once per window).
-    fn classify(&self, id: Window) -> Verdict {
+    /// Classifies a root child that could pause an output (a few requests, once per window). Also returns the
+    /// window that carries its EWMH state (see [`Self::state_window`]).
+    fn classify(&self, id: Window) -> (Verdict, Window) {
+        let verdict = self.verdict(id);
+        let client = if verdict == Verdict::Counts {
+            self.state_window(id)
+        } else {
+            id
+        };
+        (verdict, client)
+    }
+
+    /// Window holding the `_NET_WM_STATE` of root child `id`: itself for an unframed client, else the client
+    /// a reparenting window manager put inside its frame (Mutter frames server-side decorated XWayland
+    /// windows with `mutter-x11-frames`; the frame has no EWMH state of its own).
+    fn state_window(&self, id: Window) -> Window {
+        let conn = &*self.conn;
+        let has_wm_state = |w: Window| {
+            conn.get_property(false, w, self.atoms.WM_STATE, AtomEnum::ANY, 0, 0)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|r| r.type_ != x11rb::NONE)
+        };
+        if has_wm_state(id) {
+            return id;
+        }
+        conn.query_tree(id)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|t| t.children.into_iter().rev().find(|&c| has_wm_state(c)))
+            .unwrap_or(id)
+    }
+
+    fn verdict(&self, id: Window) -> Verdict {
         let conn = &*self.conn;
         let Some(attrs) = conn
             .get_window_attributes(id)
@@ -882,13 +957,15 @@ impl X11State {
 
     /// Reads the EWMH state of a window (one round-trip, only on events).
     fn wm_state(&self, w: Window) -> WmState {
+        let cookie =
+            self.conn
+                .get_property(false, w, self.atoms._NET_WM_STATE, AtomEnum::ATOM, 0, 64);
+        self.wm_state_reply(cookie.ok().and_then(|c| c.reply().ok()))
+    }
+
+    fn wm_state_reply(&self, reply: Option<x11rb::protocol::xproto::GetPropertyReply>) -> WmState {
         let a = &self.atoms;
         let mut st = WmState::default();
-        let reply = self
-            .conn
-            .get_property(false, w, a._NET_WM_STATE, AtomEnum::ATOM, 0, 64)
-            .ok()
-            .and_then(|c| c.reply().ok());
         if let Some(values) = reply.as_ref().and_then(|r| r.value32()) {
             let (mut vert, mut horz) = (false, false);
             for s in values {
@@ -906,42 +983,74 @@ impl X11State {
         self.pause_dirty = false;
         let covered = self.config.pause_when_covered;
         let fullscreen = self.config.fullscreen.enabled;
+        let maximized = self.config.pause_when_maximized;
+        let rules = X11Rules {
+            covered,
+            fullscreen,
+            maximized,
+        };
         self.rects.clear();
         self.rects.extend(self.outputs.iter().map(|o| o.rect));
 
         let mut candidates = std::mem::take(&mut self.candidates);
         candidates.clear();
-        candidates.extend(self.children.unclassified_candidates(
-            &self.rects,
-            &self.exclude,
-            covered,
-        ));
+        candidates.extend(
+            self.children
+                .unclassified_candidates(&self.rects, &self.exclude, rules),
+        );
         for &id in &candidates {
-            let verdict = self.classify(id);
-            self.children.set_verdict(id, verdict);
+            let (verdict, client) = self.classify(id);
+            self.children.set_verdict(id, verdict, client);
         }
-        // Windows that would pause an output: refresh their EWMH state (minimised windows may stay mapped
-        // under Mutter/XWayland; maximised ones only hide their output). Usually zero to two windows.
+        // Windows that could pause an output: refresh their EWMH state (minimised windows may stay mapped
+        // under Mutter/XWayland; maximised ones pause their own output). Usually zero to three windows; the
+        // requests are pipelined.
         candidates.clear();
         candidates.extend(
             self.children
-                .counted_candidates(&self.rects, &self.exclude, covered),
+                .counted_candidates(&self.rects, &self.exclude, rules),
         );
-        for &id in &candidates {
-            let st = self.wm_state(id);
+        let cookies: Vec<_> = candidates
+            .iter()
+            .map(|&id| {
+                self.conn
+                    .get_property(
+                        false,
+                        self.children.client(id),
+                        self.atoms._NET_WM_STATE,
+                        AtomEnum::ATOM,
+                        0,
+                        64,
+                    )
+                    .ok()
+            })
+            .collect();
+        for (&id, cookie) in candidates.iter().zip(cookies) {
+            let st = self.wm_state_reply(cookie.and_then(|c| c.reply().ok()));
             self.children.set_wm_state(id, st.hidden, st.maximized);
         }
         self.candidates = candidates;
 
         self.scratch.clear();
         self.scratch.resize(self.outputs.len(), PauseReasons::NONE);
-        self.children.reasons(
-            &self.rects,
-            &self.exclude,
-            covered,
-            fullscreen,
-            &mut self.scratch,
-        );
+        self.children
+            .reasons(&self.rects, &self.exclude, rules, &mut self.scratch);
+        // GNOME Shell extension: native Wayland windows too.
+        if let Some(shell) = &self.shell {
+            for (o, r) in self.outputs.iter().zip(self.scratch.iter_mut()) {
+                let flags = gnome_shell::flags_for(shell.monitors(), &o.info.name, o.rect);
+                if flags & FLAG_FULLSCREEN != 0 {
+                    if fullscreen {
+                        *r |= PauseReasons::FULLSCREEN;
+                    } else if covered {
+                        *r |= PauseReasons::OCCLUDED;
+                    }
+                }
+                if maximized && flags & FLAG_MAXIMIZED != 0 {
+                    *r |= PauseReasons::MAXIMIZED;
+                }
+            }
+        }
         if fullscreen
             && let Some(r) = self.active_fullscreen
             && let Some(i) = best_overlap(&r, self.rects.iter().copied())
@@ -971,6 +1080,54 @@ impl X11State {
                 self.queue.push(ev);
             }
             o.paused = new;
+        }
+    }
+
+    /// The session bus has data. Returns `false` when the link is gone (the event source is then removed).
+    fn shell_readable(&mut self) -> bool {
+        let Some(shell) = self.shell.as_mut() else {
+            return false;
+        };
+        let before = shell.present();
+        match shell.read() {
+            Ok(changed) => {
+                let now = shell.present();
+                if now != before {
+                    match now {
+                        Some(true) if !self.shell_announced => {
+                            self.shell_announced = true;
+                            tracing::info!(
+                                "GNOME Shell extension found: fullscreen and maximised Wayland windows pause the \
+                                 outputs they are on"
+                            )
+                        }
+                        // The Shell disables extensions while locked: back after each unlock.
+                        Some(true) => tracing::debug!("GNOME Shell extension back"),
+                        Some(false) if before.is_none() => {
+                            if self.config.pause_when_maximized {
+                                tracing::info!(
+                                    "GNOME: maximised native Wayland windows cannot pause the wallpaper without the \
+                                     Lumenwall Shell extension (packaging/gnome-extension); fullscreen ones still do"
+                                )
+                            }
+                        }
+                        Some(false) => tracing::debug!("GNOME Shell extension gone"),
+                        None => {}
+                    }
+                }
+                if changed {
+                    tracing::debug!(monitors = ?shell.monitors(), "GNOME Shell extension state");
+                    self.pause_dirty = true;
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("session bus connection lost: {e}");
+                let had_state = !shell.monitors().is_empty();
+                self.shell = None;
+                self.pause_dirty |= had_state;
+                false
+            }
         }
     }
 

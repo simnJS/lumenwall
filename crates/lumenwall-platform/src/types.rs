@@ -67,6 +67,9 @@ impl PauseReasons {
     pub const LOCKED: Self = Self(1 << 2);
     /// The monitor is powered off.
     pub const DISPLAY_OFF: Self = Self(1 << 3);
+    /// A maximised window is shown on the output ([`Config::pause_when_maximized`]). Part of the desktop may
+    /// still show through a transparent panel or dock; that strip keeps the last frame.
+    pub const MAXIMIZED: Self = Self(1 << 4);
 
     /// True when no reason is set.
     pub const fn is_empty(self) -> bool {
@@ -126,6 +129,7 @@ impl fmt::Debug for PauseReasons {
             (Self::OCCLUDED, "OCCLUDED"),
             (Self::LOCKED, "LOCKED"),
             (Self::DISPLAY_OFF, "DISPLAY_OFF"),
+            (Self::MAXIMIZED, "MAXIMIZED"),
         ];
         let mut first = true;
         for (flag, name) in names {
@@ -421,6 +425,11 @@ pub struct Config {
     /// Pause outputs that are fully covered by another window (maximised window on Windows, fully obscured
     /// window on X11 without compositor). Rendering what nobody sees is wasted work (docs/PERFORMANCE.md).
     pub pause_when_covered: bool,
+    /// Pause an output while a maximised window is shown on it (Wallpaper Engine's "other application
+    /// maximised" rule), even when a transparent panel or dock lets a strip of the desktop show. X11 and
+    /// XWayland windows from their EWMH state; native Wayland windows on GNOME through the optional Shell
+    /// extension (`packaging/gnome-extension`). Windows pauses maximised windows as covering anyway.
+    pub pause_when_maximized: bool,
     /// Name used as layer-shell namespace, X11 `WM_CLASS`, window title and Windows class suffix (QO-4).
     pub identity: String,
 }
@@ -436,6 +445,7 @@ impl Default for Config {
             pointer: PointerMode::Motion,
             fullscreen: FullscreenPolicy::default(),
             pause_when_covered: true,
+            pause_when_maximized: true,
             identity: "lumenwall".to_owned(),
         }
     }
@@ -477,6 +487,10 @@ mod tests {
         assert_eq!(format!("{r:?}"), "FULLSCREEN | LOCKED");
         r.set(PauseReasons::FULLSCREEN, false);
         assert_eq!(r, PauseReasons::LOCKED);
+        assert_eq!(
+            format!("{:?}", PauseReasons::MAXIMIZED | PauseReasons::OCCLUDED),
+            "OCCLUDED | MAXIMIZED"
+        );
         assert!(r.difference(PauseReasons::LOCKED).is_empty());
     }
 

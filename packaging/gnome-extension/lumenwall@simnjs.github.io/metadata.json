@@ -1,0 +1,8 @@
+{
+  "uuid": "lumenwall@simnjs.github.io",
+  "name": "Lumenwall desktop state",
+  "description": "Tells the Lumenwall wallpaper engine which monitors show a fullscreen or maximised window, so the animated wallpaper pauses behind them. No interface, no settings, no network.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/simnJS/lumenwall",
+  "version-name": "1"
+}

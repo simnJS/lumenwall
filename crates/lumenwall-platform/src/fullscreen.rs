@@ -3,7 +3,7 @@
 //! Backends gather OS state from events and call these functions; nothing here talks to a display server,
 //! so the rules are unit-tested on any host.
 
-use crate::geometry::Rect;
+use crate::geometry::{Rect, best_overlap};
 use crate::types::{FullscreenPolicy, PauseReasons, PauseScope};
 
 /// ASCII case-insensitive substring test.
@@ -100,6 +100,25 @@ pub fn x11_window_reason(window: &Rect, output: &Rect, covered_pause: bool) -> P
     }
 }
 
+/// Which X11 pause rules apply (from [`crate::Config`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct X11Rules {
+    /// `pause_when_covered`: windows strictly larger than an output hide it.
+    pub covered: bool,
+    /// Fullscreen pause enabled: exact-geometry windows count as fullscreen applications.
+    pub fullscreen: bool,
+    /// `pause_when_maximized`: a maximised window pauses the output it is on.
+    pub maximized: bool,
+}
+
+/// True when `window` covers at least half of one of `outputs`: its `_NET_WM_STATE` may say "maximised".
+/// (A maximised window is smaller than its output by the panels and docks; the state decides.)
+pub fn maximize_candidate(window: &Rect, outputs: &[Rect]) -> bool {
+    outputs.iter().any(|o| {
+        !o.is_empty() && window.intersection_area(o) * 2 >= i64::from(o.width) * i64::from(o.height)
+    })
+}
+
 /// Whether a root child may count as covering an output, decided once per window with a few requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -127,6 +146,9 @@ pub struct RootChild {
     pub maximized: bool,
     /// Lazy classification.
     pub verdict: Verdict,
+    /// Window carrying the EWMH state: the child itself, or the client a reparenting window manager (Mutter's
+    /// `mutter-x11-frames`) put inside it. Set with the verdict; 0 before.
+    pub client: u32,
 }
 
 /// Cache of the root's children, maintained from `SubstructureNotify` events instead of the reference's
@@ -158,6 +180,7 @@ impl RootChildren {
                 hidden: false,
                 maximized: false,
                 verdict: Verdict::Unknown,
+                client: 0,
             }),
         }
         true
@@ -193,11 +216,20 @@ impl RootChildren {
         }
     }
 
-    /// Stores the classification of a window.
-    pub fn set_verdict(&mut self, id: u32, verdict: Verdict) {
+    /// Stores the classification of a window and the window holding its EWMH state.
+    pub fn set_verdict(&mut self, id: u32, verdict: Verdict, client: u32) {
         if let Some(c) = self.find(id) {
             c.verdict = verdict;
+            c.client = client;
         }
+    }
+
+    /// Window holding the EWMH state of a cached root child (itself until classified).
+    pub fn client(&self, id: u32) -> u32 {
+        self.children
+            .iter()
+            .find(|c| c.id == id)
+            .map_or(id, |c| if c.client == 0 { id } else { c.client })
     }
 
     /// Classification of a window, if it is a cached root child.
@@ -217,40 +249,44 @@ impl RootChildren {
         }
     }
 
-    /// Mapped, counted windows whose geometry would pause one of `outputs` (their `_NET_WM_STATE` matters).
-    pub fn counted_candidates<'a>(
+    /// Mapped windows with verdict `verdict` whose geometry could pause one of `outputs`.
+    fn candidates<'a>(
         &'a self,
         outputs: &'a [Rect],
         exclude: &'a [u32],
-        covered_pause: bool,
+        rules: X11Rules,
+        verdict: Verdict,
     ) -> impl Iterator<Item = u32> + 'a {
         self.children
             .iter()
-            .filter(move |c| c.mapped && c.verdict == Verdict::Counts && !exclude.contains(&c.id))
+            .filter(move |c| c.mapped && c.verdict == verdict && !exclude.contains(&c.id))
             .filter(move |c| {
                 outputs
                     .iter()
-                    .any(|o| !x11_window_reason(&c.rect, o, covered_pause).is_empty())
+                    .any(|o| !x11_window_reason(&c.rect, o, rules.covered).is_empty())
+                    || (rules.maximized && maximize_candidate(&c.rect, outputs))
             })
             .map(|c| c.id)
     }
 
-    /// Mapped, unclassified windows whose geometry would pause one of `outputs`: classify these first.
+    /// Mapped, counted windows whose geometry could pause one of `outputs` (their `_NET_WM_STATE` matters).
+    pub fn counted_candidates<'a>(
+        &'a self,
+        outputs: &'a [Rect],
+        exclude: &'a [u32],
+        rules: X11Rules,
+    ) -> impl Iterator<Item = u32> + 'a {
+        self.candidates(outputs, exclude, rules, Verdict::Counts)
+    }
+
+    /// Mapped, unclassified windows whose geometry could pause one of `outputs`: classify these first.
     pub fn unclassified_candidates<'a>(
         &'a self,
         outputs: &'a [Rect],
         exclude: &'a [u32],
-        covered_pause: bool,
+        rules: X11Rules,
     ) -> impl Iterator<Item = u32> + 'a {
-        self.children
-            .iter()
-            .filter(move |c| c.mapped && c.verdict == Verdict::Unknown && !exclude.contains(&c.id))
-            .filter(move |c| {
-                outputs
-                    .iter()
-                    .any(|o| !x11_window_reason(&c.rect, o, covered_pause).is_empty())
-            })
-            .map(|c| c.id)
+        self.candidates(outputs, exclude, rules, Verdict::Unknown)
     }
 
     /// Adds to `out[i]` the reason imposed on `outputs[i]` by classified, mapped windows not in `exclude`.
@@ -258,25 +294,33 @@ impl RootChildren {
         &self,
         outputs: &[Rect],
         exclude: &[u32],
-        covered_pause: bool,
-        fullscreen: bool,
+        rules: X11Rules,
         out: &mut [PauseReasons],
     ) {
         for c in self.children.iter().filter(|c| {
             c.mapped && !c.hidden && c.verdict == Verdict::Counts && !exclude.contains(&c.id)
         }) {
             for (o, r) in outputs.iter().zip(out.iter_mut()) {
-                let reason = x11_window_reason(&c.rect, o, covered_pause);
+                let reason = x11_window_reason(&c.rect, o, rules.covered);
                 // Deviation: a maximised window that happens to match the output exactly is not a fullscreen
                 // application (the reference pauses every output for it); it only hides its own output.
-                if reason.contains(PauseReasons::FULLSCREEN) && (!fullscreen || c.maximized) {
+                if reason.contains(PauseReasons::FULLSCREEN) && (!rules.fullscreen || c.maximized) {
                     // Detection disabled: a fullscreen window still hides the wallpaper.
-                    if covered_pause {
+                    if rules.covered {
                         *r |= PauseReasons::OCCLUDED;
                     }
                 } else {
                     *r |= reason;
                 }
+            }
+            // A maximised window leaves the panels' strips visible: it pauses its own output (the one it
+            // overlaps most, like the window manager's notion of the window's monitor) only by this rule.
+            if rules.maximized
+                && c.maximized
+                && let Some(i) = best_overlap(&c.rect, outputs.iter().copied())
+                && let Some(r) = out.get_mut(i)
+            {
+                *r |= PauseReasons::MAXIMIZED;
             }
         }
     }
@@ -306,6 +350,13 @@ pub fn apply_scope(reasons: &mut [PauseReasons], scope: PauseScope) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Covered + fullscreen rules (the defaults before `pause_when_maximized`).
+    const R: X11Rules = X11Rules {
+        covered: true,
+        fullscreen: true,
+        maximized: false,
+    };
 
     fn policy(only_active: bool, ignore: &[&str]) -> FullscreenPolicy {
         FullscreenPolicy {
@@ -405,6 +456,7 @@ mod tests {
                 hidden: false,
                 maximized: false,
                 verdict: Verdict::Unknown,
+                client: 0,
             },
             RootChild {
                 id: 1,
@@ -413,11 +465,12 @@ mod tests {
                 hidden: false,
                 maximized: false,
                 verdict: Verdict::Counts,
+                client: 0,
             },
         ]);
         let mut out = [PauseReasons::NONE; 2];
         assert_eq!(
-            rc.unclassified_candidates(&outputs, &[ours], true).count(),
+            rc.unclassified_candidates(&outputs, &[ours], R).count(),
             0,
             "our own window is excluded"
         );
@@ -425,36 +478,44 @@ mod tests {
         // A game maps a window exactly on the second output.
         assert!(rc.created(7, outputs[1]));
         assert_eq!(
-            rc.unclassified_candidates(&outputs, &[ours], true).count(),
+            rc.unclassified_candidates(&outputs, &[ours], R).count(),
             0,
             "not mapped yet"
         );
         assert!(rc.set_mapped(7, true));
         assert!(!rc.set_mapped(7, true));
         assert_eq!(
-            rc.unclassified_candidates(&outputs, &[ours], true)
+            rc.unclassified_candidates(&outputs, &[ours], R)
                 .collect::<Vec<_>>(),
             vec![7]
         );
-        rc.reasons(&outputs, &[ours], true, true, &mut out);
+        rc.reasons(&outputs, &[ours], R, &mut out);
         assert_eq!(
             out,
             [PauseReasons::NONE; 2],
             "unclassified windows do not count yet"
         );
-        rc.set_verdict(7, Verdict::Counts);
-        rc.reasons(&outputs, &[ours], true, true, &mut out);
+        rc.set_verdict(7, Verdict::Counts, 0);
+        rc.reasons(&outputs, &[ours], R, &mut out);
         assert_eq!(out, [PauseReasons::NONE, PauseReasons::FULLSCREEN]);
 
         // Fullscreen detection disabled: reported as covered instead.
         let mut out = [PauseReasons::NONE; 2];
-        rc.reasons(&outputs, &[ours], true, false, &mut out);
+        rc.reasons(
+            &outputs,
+            &[ours],
+            X11Rules {
+                fullscreen: false,
+                ..R
+            },
+            &mut out,
+        );
         assert_eq!(out, [PauseReasons::NONE, PauseReasons::OCCLUDED]);
 
         // Leaves fullscreen.
         assert!(rc.configured(7, Rect::new(2000, 50, 800, 600)));
         let mut out = [PauseReasons::NONE; 2];
-        rc.reasons(&outputs, &[ours], true, true, &mut out);
+        rc.reasons(&outputs, &[ours], R, &mut out);
         assert_eq!(out, [PauseReasons::NONE; 2]);
         assert!(rc.destroyed(7));
         assert!(!rc.destroyed(7));
@@ -468,30 +529,37 @@ mod tests {
         let mut rc = RootChildren::default();
         rc.created(9, outputs[0]);
         rc.set_mapped(9, true);
-        rc.set_verdict(9, Verdict::Counts);
+        rc.set_verdict(9, Verdict::Counts, 0);
         assert_eq!(rc.verdict(9), Some(Verdict::Counts));
         let mut out = [PauseReasons::NONE];
-        rc.reasons(&outputs, &[], true, true, &mut out);
+        rc.reasons(&outputs, &[], R, &mut out);
         assert_eq!(out, [PauseReasons::FULLSCREEN]);
         assert_eq!(
-            rc.counted_candidates(&outputs, &[], true)
-                .collect::<Vec<_>>(),
+            rc.counted_candidates(&outputs, &[], R).collect::<Vec<_>>(),
             vec![9]
         );
         assert!(rc.set_wm_state(9, true, false));
         assert!(!rc.set_wm_state(9, true, false));
         let mut out = [PauseReasons::NONE];
-        rc.reasons(&outputs, &[], true, true, &mut out);
+        rc.reasons(&outputs, &[], R, &mut out);
         assert_eq!(out, [PauseReasons::NONE]);
         assert_eq!(rc.verdict(1234), None);
 
         // Maximised to exactly the output: covered, not fullscreen.
         assert!(rc.set_wm_state(9, false, true));
         let mut out = [PauseReasons::NONE];
-        rc.reasons(&outputs, &[], true, true, &mut out);
+        rc.reasons(&outputs, &[], R, &mut out);
         assert_eq!(out, [PauseReasons::OCCLUDED]);
         let mut out = [PauseReasons::NONE];
-        rc.reasons(&outputs, &[], false, true, &mut out);
+        rc.reasons(
+            &outputs,
+            &[],
+            X11Rules {
+                covered: false,
+                ..R
+            },
+            &mut out,
+        );
         assert_eq!(out, [PauseReasons::NONE]);
     }
 
@@ -501,11 +569,81 @@ mod tests {
         let mut rc = RootChildren::default();
         rc.created(5, outputs[0]);
         rc.set_mapped(5, true);
-        rc.set_verdict(5, Verdict::Ignored);
+        rc.set_verdict(5, Verdict::Ignored, 0);
         let mut out = [PauseReasons::NONE];
-        rc.reasons(&outputs, &[], true, true, &mut out);
+        rc.reasons(&outputs, &[], R, &mut out);
         assert_eq!(out, [PauseReasons::NONE]);
-        assert_eq!(rc.unclassified_candidates(&outputs, &[], true).count(), 0);
+        assert_eq!(rc.unclassified_candidates(&outputs, &[], R).count(), 0);
+    }
+
+    #[test]
+    fn maximised_windows_pause_their_output() {
+        // GNOME: top bar only on the primary output (right), so a maximised window is 40 px short there.
+        let outputs = [Rect::new(0, 0, 2560, 1440), Rect::new(2560, 0, 2560, 1440)];
+        let max = X11Rules {
+            maximized: true,
+            ..R
+        };
+        let frame = 21;
+        let mut rc = RootChildren::default();
+        rc.created(frame, Rect::new(2560, 40, 2560, 1400));
+        rc.set_mapped(frame, true);
+        assert_eq!(
+            rc.unclassified_candidates(&outputs, &[], R).count(),
+            0,
+            "geometry alone never pauses"
+        );
+        assert_eq!(
+            rc.unclassified_candidates(&outputs, &[], max)
+                .collect::<Vec<_>>(),
+            vec![frame]
+        );
+        rc.set_verdict(frame, Verdict::Counts, 22);
+        assert_eq!(rc.client(frame), 22, "state is read on the framed client");
+        assert_eq!(rc.client(1234), 1234);
+        assert!(rc.set_wm_state(frame, false, true));
+        let mut out = [PauseReasons::NONE; 2];
+        rc.reasons(&outputs, &[], max, &mut out);
+        assert_eq!(out, [PauseReasons::NONE, PauseReasons::MAXIMIZED]);
+        let mut out = [PauseReasons::NONE; 2];
+        rc.reasons(&outputs, &[], R, &mut out);
+        assert_eq!(out, [PauseReasons::NONE; 2], "option off");
+
+        // Minimised (Mutter keeps it mapped, flagged hidden): nothing.
+        assert!(rc.set_wm_state(frame, true, true));
+        let mut out = [PauseReasons::NONE; 2];
+        rc.reasons(&outputs, &[], max, &mut out);
+        assert_eq!(out, [PauseReasons::NONE; 2]);
+
+        // Maximised on the secondary output, which has no panel: exact geometry, covered and maximised.
+        rc.created(30, outputs[0]);
+        rc.set_mapped(30, true);
+        rc.set_verdict(30, Verdict::Counts, 30);
+        rc.set_wm_state(30, false, true);
+        let mut out = [PauseReasons::NONE; 2];
+        rc.reasons(&outputs, &[], max, &mut out);
+        assert_eq!(
+            out,
+            [
+                PauseReasons::OCCLUDED | PauseReasons::MAXIMIZED,
+                PauseReasons::NONE
+            ]
+        );
+    }
+
+    #[test]
+    fn maximize_candidates_cover_half_an_output() {
+        let outputs = [Rect::new(0, 0, 2560, 1440)];
+        assert!(maximize_candidate(&Rect::new(80, 40, 2480, 1400), &outputs));
+        assert!(!maximize_candidate(
+            &Rect::new(100, 100, 1200, 800),
+            &outputs
+        ));
+        assert!(!maximize_candidate(
+            &Rect::new(5000, 0, 2560, 1440),
+            &outputs
+        ));
+        assert!(!maximize_candidate(&outputs[0], &[Rect::default()]));
     }
 
     #[test]

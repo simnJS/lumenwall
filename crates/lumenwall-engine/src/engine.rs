@@ -315,6 +315,8 @@ impl Engine {
                 scope: PauseScope::AllOutputs,
             },
             pause_when_covered: true,
+            // "Other application maximised" follows the fullscreen pause switch.
+            pause_when_maximized: plan.pause.enabled,
             identity: "lumenwall".into(),
         }
     }
