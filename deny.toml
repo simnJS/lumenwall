@@ -1,0 +1,120 @@
+# cargo-deny policy for Lumen (proprietary, closed-source, sold).
+# Run: `cargo deny check` (CI runs the same, see docs/CI.md).
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Only the platforms we ship. Dependencies that exist only for macOS, Android, wasm...
+# are not part of the product and are not checked.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Check every optional backend (pipewire, pulse, video, web...): any feature can end
+# up in a shipped build.
+all-features = true
+
+[output]
+feature-depth = 1
+
+# --- Security advisories (RustSec) ----------------------------------------------------
+# Every advisory kind is an error. A justified exception goes in `ignore` with its
+# RUSTSEC id and a reason, and is reviewed whenever the dependency is updated.
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    # { id = "RUSTSEC-0000-0000", reason = "why it does not affect Lumen, and until when" },
+]
+
+# --- Licences --------------------------------------------------------------------------
+# Lumen is distributed as a closed binary: only permissive licences, plus MPL-2.0
+# (file-level copyleft, fine as long as the MPL files are not modified).
+# No GPL-*, no AGPL-*. LGPL-* only through an exception below, never globally.
+#
+# Obligations that remain even for permissive licences (not checked by cargo-deny):
+# ship third-party notices (MIT/BSD/Apache/ISC/Zlib... attributions, Apache NOTICE
+# files), and for MPL-2.0 tell users where the MPL source can be obtained.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+# dev-dependencies (criterion, proptest, tempfile...) never ship.
+include-dev = false
+# build-dependencies (cc, bindgen...) are checked anyway: they can embed generated code.
+include-build = true
+
+# Per-crate exceptions. Each one names the crate, the licence, and why it is acceptable.
+#
+# LGPL rule: an LGPL-* binding may be listed here only if ALL of the following hold,
+# and the reasoning is written next to the entry:
+#   1. the LGPL code is a separate shared library (.so / .dll) loaded at runtime,
+#      never linked statically into the Lumen binary;
+#   2. that library is an LGPL build (FFmpeg: built without --enable-gpl and
+#      --enable-nonfree), so the user can replace it with their own build;
+#   3. the installer ships the LGPL text, the library's copyright notice and a written
+#      offer / link to the exact source of the shipped library;
+#   4. the Rust binding itself is not modified (or its modifications are published).
+# Example, if mpv is ever used as the video parity fallback (docs/research/platform.md):
+#   { crate = "libmpv2", allow = ["LGPL-2.1"] },
+#   { crate = "libmpv2-sys", allow = ["LGPL-2.1"] },
+exceptions = [
+    # FFmpeg bindings (planned in lumen-video). The Rust crates are WTFPL (permissive,
+    # public-domain-like, but not OSI-approved: confirm with legal before shipping).
+    # The FFmpeg C libraries themselves are LGPL-2.1+: they follow the LGPL rule above
+    # (dynamic loading of an LGPL build, enforced by the ffmpeg-sys-next ban below).
+    # cargo-deny warns "exception not encountered" until lumen-video depends on them.
+    { crate = "ffmpeg-next", allow = ["WTFPL"] },
+    { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
+
+    # PENDING DECISION (2026-11-03). The optional `cef` feature of lumen-web pulls
+    # cef-dll-sys, whose build script uses download-cef to fetch the CEF binaries.
+    # That build-time-only chain (nothing of it is linked into Lumen) brings two
+    # permissive licences that are not in `allow`, accepted here:
+    #   bzip2-1.0.6: BSD-style licence of the bzip2 code (download-cef -> bzip2).
+    #   CDLA-Permissive-2.0: licence of Mozilla's CA certificate data
+    #   (download-cef -> ureq -> webpki-roots).
+    { crate = "libbz2-rs-sys", allow = ["bzip2-1.0.6"] },
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
+
+# Workspace crates are `publish = false` with `license = "LicenseRef-Proprietary"`.
+[licenses.private]
+ignore = true
+
+# --- Bans --------------------------------------------------------------------------------
+[bans]
+# Duplicate versions cost build time and binary size; review, but do not block.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path dependencies (`lumen-* = { path = ... }`) have no version: allowed
+# because every workspace crate is `publish = false`.
+allow-wildcard-paths = true
+highlight = "all"
+
+# FFmpeg must stay dynamically linked against the system / shipped LGPL build:
+# `static` links it into our binary, `build` compiles it from source and links it
+# statically, and every `build-license-*` / `build-lib-*` feature implies `build`
+# (some of them turn the result into GPL or non-redistributable code).
+[[bans.features]]
+crate = "ffmpeg-sys-next"
+deny = ["static", "build"]
+
+# --- Sources -----------------------------------------------------------------------------
+# crates.io only. A git dependency (e.g. a patched glslang fork) must be added to
+# `allow-git` explicitly, with its licence reviewed.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

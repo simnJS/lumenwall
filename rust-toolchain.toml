@@ -1,0 +1,8 @@
+# Toolchain used by local builds and CI (rustup reads this file).
+# `stable` follows the latest stable release; pin an exact version (e.g. "1.99.1")
+# for a release branch that must rebuild bit-for-bit later.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

@@ -1,0 +1,160 @@
+# Lumen CI. What each job does and how to run the same checks locally: docs/CI.md.
+# Third-party actions are pinned to a commit SHA (tag in the trailing comment).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly: new RustSec advisories and new stable clippy lints show up without a push.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          system-deps: "false"
+          cache: "false"
+      - run: cargo fmt --all --check
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          system-deps: "false"
+          cache: "false"
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Advisories (RustSec)
+        run: cargo deny --locked check advisories
+      - name: Licences, bans, sources
+        if: ${{ !cancelled() }}
+        run: cargo deny --locked check bans licenses sources
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out with LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out with LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          software-gpu: "true"
+
+      - name: Tests (default features)
+        run: cargo test --workspace --locked
+
+      # GPU tests are #[ignore] with "gpu" in their path; see docs/CI.md.
+      - name: Select software GPU (Mesa lavapipe)
+        if: runner.os == 'Linux'
+        run: |
+          # lvp_icd.x86_64.json on Ubuntu 24.04, lvp_icd.json on 26.04.
+          shopt -s nullglob
+          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          if (( ${#icds[@]} == 0 )); then
+            echo "::error::Mesa lavapipe ICD not found in /usr/share/vulkan/icd.d"
+            exit 1
+          fi
+          icd=${icds[0]}
+          {
+            echo "VK_DRIVER_FILES=$icd"
+            echo "WGPU_BACKEND=vulkan"
+            echo "WGPU_ADAPTER_NAME=llvmpipe"
+          } >> "$GITHUB_ENV"
+          VK_DRIVER_FILES="$icd" vulkaninfo --summary
+      - name: Select software GPU (WARP)
+        if: runner.os == 'Windows'
+        run: |
+          {
+            echo "WGPU_BACKEND=dx12"
+            echo "WGPU_ADAPTER_NAME=Microsoft Basic Render Driver"
+          } >> "$GITHUB_ENV"
+      - name: GPU tests (software adapter)
+        env:
+          LUMEN_GPU_TESTS: "1"
+        run: cargo test --workspace --locked -- --ignored gpu
+
+  release:
+    name: release build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out with LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - run: cargo build --workspace --release --locked
+      # Private artifact (repository members only) for manual testing on a real desktop.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lumen-${{ runner.os }}-${{ github.sha }}
+          path: |
+            target/release/lumen
+            target/release/lumen.exe
+          if-no-files-found: error
+          retention-days: 7

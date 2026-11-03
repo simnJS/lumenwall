@@ -1,0 +1,5 @@
+# Stable options only: the toolchain is stable (see rust-toolchain.toml).
+edition = "2024"
+style_edition = "2024"
+use_field_init_shorthand = true
+use_try_shorthand = true

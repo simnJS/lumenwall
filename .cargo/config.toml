@@ -1,0 +1,31 @@
+# Workspace Cargo settings. Deliberately empty of active settings: everything here
+# applies to every build (local, CI, release), and any change to rustflags rebuilds
+# the whole dependency tree. Release tuning lives in [profile.release] (Cargo.toml).
+
+# --- CPU baseline -------------------------------------------------------------------
+# The release binary is distributed to customers: never use `target-cpu=native`. It
+# emits whatever the build machine has (AVX2, AVX-512...) and the binary then dies with
+# SIGILL / STATUS_ILLEGAL_INSTRUCTION on older CPUs.
+#
+# Candidate, NOT enabled: x86-64-v2 (SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, CMPXCHG16B).
+# - Present on every x86-64 CPU since ~2009 (Intel Nehalem, AMD Bulldozer). Windows 11
+#   24H2 already refuses to boot without SSE4.2 + POPCNT; RHEL 9 requires x86-64-v2.
+# - Expected gain is small: rendering runs on the GPU, and the CPU-heavy dependencies
+#   (rustfft/realfft, zune-jpeg) already pick SSE4.1/AVX/AVX2 paths at runtime. glam has
+#   no SSE4-specific code; the compiler may still use SSE4.1 (roundps, blendvps...) in
+#   particle and parsing loops.
+# - Enable only after a criterion benchmark or a frame-time capture shows a measurable
+#   gain (docs/PERFORMANCE.md), and then state the CPU requirement in the product's
+#   system requirements.
+#
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "target-cpu=x86-64-v2"]
+#
+# [target.x86_64-pc-windows-msvc]
+# rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+# --- Windows C runtime --------------------------------------------------------------
+# Also NOT enabled: `-C target-feature=+crt-static` on x86_64-pc-windows-msvc would
+# remove the dependency on the VC++ redistributable (vcruntime140.dll). Decide once the
+# installer exists: CEF and FFmpeg DLLs bring their own CRT, and objects allocated by
+# one CRT must never be freed by another.

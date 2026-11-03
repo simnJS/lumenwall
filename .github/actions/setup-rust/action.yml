@@ -1,0 +1,66 @@
+name: Set up Rust build
+description: >-
+  Installs the toolchain declared in rust-toolchain.toml, the Linux development
+  libraries the workspace links against, optionally a software Vulkan driver, and
+  the cargo cache. Requires a prior actions/checkout.
+
+inputs:
+  system-deps:
+    description: Install the Linux development packages (no effect on Windows).
+    default: "true"
+  software-gpu:
+    description: >-
+      Install the Vulkan loader and Mesa lavapipe on Linux for headless GPU tests.
+      Windows needs nothing: the WARP software adapter ships with the OS.
+    default: "false"
+  cache:
+    description: Restore and save target/ and ~/.cargo with Swatinem/rust-cache.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain (rust-toolchain.toml)
+      shell: bash
+      run: |
+        rustup --version
+        # No argument: installs or updates the toolchain pinned by rust-toolchain.toml,
+        # with its components and targets (rustup >= 1.28).
+        rustup toolchain install --no-self-update
+        rustc --version --verbose
+        cargo --version
+
+    - name: Install Linux development libraries
+      if: runner.os == 'Linux' && inputs.system-deps == 'true'
+      shell: bash
+      env:
+        SOFTWARE_GPU: ${{ inputs.software-gpu }}
+      run: |
+        packages=(
+          # Build tooling: pkg-config for *-sys crates, libclang for bindgen
+          # (pipewire-sys, libspa-sys, ffmpeg-sys-next).
+          pkg-config clang libclang-dev
+          # Wayland (smithay-client-toolkit, layer-shell) and keyboard maps.
+          libwayland-dev wayland-protocols libxkbcommon-dev
+          # X11 / XCB (x11rb, winit windowed mode).
+          libx11-dev libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev
+          libxcursor-dev libxrandr-dev libxi-dev
+          # Audio: ALSA (cpal playback), PipeWire, PulseAudio.
+          libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libpulse-dev
+          # Video: FFmpeg (ffmpeg-next), VA-API and DRM for zero-copy dmabuf import.
+          libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev
+          libavdevice-dev libswscale-dev libswresample-dev libva-dev libdrm-dev
+        )
+        if [[ "$SOFTWARE_GPU" == "true" ]]; then
+          # Vulkan loader + Mesa lavapipe (CPU Vulkan driver) + vulkaninfo.
+          packages+=(libvulkan1 mesa-vulkan-drivers vulkan-tools)
+        fi
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends "${packages[@]}"
+
+    - name: Cargo cache
+      if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        # Only main writes the cache; pull requests restore it without evicting it.
+        save-if: ${{ github.ref == 'refs/heads/main' }}
