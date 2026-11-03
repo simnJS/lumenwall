@@ -14,7 +14,7 @@
 **Lumenwall plays Wallpaper Engine Workshop scenes as your desktop wallpaper on Linux and Windows, with a native Rust engine that draws a frame only when something on screen changes, and nothing at all when the desktop is hidden.**
 
 > [!NOTE]
-> Lumenwall is in early development and has no release yet. Scene and video wallpapers and the desktop app run on Linux today. Web wallpapers and Windows at runtime are not done: see [Features](#features).
+> Lumenwall is in early development and has no release yet. Scene, video and web wallpapers and the desktop app run on Linux today. Windows at runtime is not done: see [Features](#features).
 
 ## Contents
 
@@ -77,7 +77,7 @@ Measure on your machine with `LUMENWALL_STATS=1 lumenwall <id>`: fps, CPU and GP
 | ✅ | Text layers | The wallpaper's font, scripted text such as clocks. 🚧 No outline, shadow or background box |
 | ✅ | Sound and audio-reactive effects | Scene sounds, audio spectrum captured from PulseAudio (or PipeWire's Pulse server), automatic mute when another app plays |
 | ✅ | Video wallpapers | Hardware decoding with Vulkan Video on the render device, zero copy (≈2.5 % of one core for 4K60 H.264 at 30 fps); NVDEC, VA-API, D3D11VA and software fallbacks; looped sound. 🚧 Videos inside scenes, HDR, 10-bit zero copy |
-| 🚧 | Web wallpapers | Chromium (CEF) host and the Wallpaper Engine web API written, not built or connected yet |
+| ✅ | Web wallpapers | Offscreen Chromium (CEF) in a separate process, frames shared with the GPU (DMA-BUF, zero copy; shared-memory fallback), the Wallpaper Engine web API (user properties, audio listener, pause), mouse and clicks, page sound under `--volume`/`--silent`; pages that stop changing cost no frame, paused pages are frozen (≈0.5 % of one core). Needs the optional host build below. 🚧 Linux only (no Direct3D import yet), no media integration source, automute does not apply to the page |
 | 🚧 | Playlists | Only the first item plays |
 | 🚧 | One wallpaper spanning several screens | Each screen shows the whole wallpaper |
 
@@ -133,6 +133,9 @@ GNOME, KDE, XFCE and other desktops start `lumenwall` at login from `~/.config/a
 ```bash
 git clone https://github.com/simnJS/lumenwall && cd lumenwall
 cargo build --release --locked          # target/release/lumenwall and target/release/lumenwall-ui
+# Optional, for web wallpapers: the Chromium host next to lumenwall. Downloads the CEF
+# distribution (≈333 MB, extracted ≈1.9 GB, kept in CEF_PATH) and needs cmake and ninja.
+CEF_PATH=~/.cache/lumenwall/cef cargo build --release --locked -p lumenwall-web --features cef
 ```
 
 The full set of checks (format, clippy, tests, GPU tests on a software adapter, `cargo deny`) is in [`docs/CI.md`](docs/CI.md).

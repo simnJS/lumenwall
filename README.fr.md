@@ -14,7 +14,7 @@
 **Lumenwall affiche les scènes du Workshop de Wallpaper Engine en fond d’écran sous Linux et Windows, avec un moteur natif en Rust qui ne dessine une image que lorsque quelque chose change à l’écran, et rien du tout quand le bureau est caché.**
 
 > [!NOTE]
-> Lumenwall est en début de développement et n’a pas encore de version publiée. Les fonds d’écran de type scène et vidéo et l’application de bureau fonctionnent aujourd’hui sous Linux. Le web et Windows à l’exécution ne sont pas terminés : voir [Fonctionnalités](#fonctionnalités).
+> Lumenwall est en début de développement et n’a pas encore de version publiée. Les fonds d’écran de type scène, vidéo et web et l’application de bureau fonctionnent aujourd’hui sous Linux. Windows à l’exécution n’est pas terminé : voir [Fonctionnalités](#fonctionnalités).
 
 ## Sommaire
 
@@ -77,7 +77,7 @@ Mesurez sur votre machine avec `LUMENWALL_STATS=1 lumenwall <id>` : i/s, temps 
 | ✅ | Calques de texte | La police du fond d’écran, textes scriptés comme les horloges. 🚧 Ni contour, ni ombre, ni fond |
 | ✅ | Son et effets réactifs à l’audio | Sons de la scène, spectre audio capturé depuis PulseAudio (ou le serveur Pulse de PipeWire), coupure automatique quand une autre application joue |
 | ✅ | Vidéo | Décodage matériel Vulkan Video sur le GPU de rendu, sans copie (≈ 2,5 % d’un cœur pour du H.264 4K60 à 30 i/s) ; replis NVDEC, VA-API, D3D11VA et logiciel ; son en boucle. 🚧 Vidéos dans les scènes, HDR, 10 bits sans copie |
-| 🚧 | Web | Hôte Chromium (CEF) et API web de Wallpaper Engine écrits, pas encore compilés ni branchés |
+| ✅ | Web | Chromium (CEF) hors écran dans un processus séparé, images partagées avec le GPU (DMA-BUF, sans copie ; repli par mémoire partagée), API web de Wallpaper Engine (propriétés utilisateur, écouteur audio, pause), souris et clics, son de la page soumis à `--volume`/`--silent` ; une page qui ne change plus ne coûte aucune image, une page en pause est gelée (≈ 0,5 % d’un cœur). Nécessite la compilation optionnelle de l’hôte ci-dessous. 🚧 Linux seulement (pas encore d’import Direct3D), pas de source pour l’intégration média, la coupure automatique ne s’applique pas à la page |
 | 🚧 | Listes de lecture | Seul le premier élément est joué |
 | 🚧 | Un fond d’écran sur plusieurs écrans | Chaque écran affiche le fond d’écran entier |
 
@@ -133,6 +133,9 @@ GNOME, KDE, XFCE et les autres bureaux lancent `lumenwall` à l’ouverture de s
 ```bash
 git clone https://github.com/simnJS/lumenwall && cd lumenwall
 cargo build --release --locked          # target/release/lumenwall et target/release/lumenwall-ui
+# Optionnel, pour les fonds web : l’hôte Chromium à côté de lumenwall. Télécharge la
+# distribution CEF (≈ 333 Mo, ≈ 1,9 Go extraite, gardée dans CEF_PATH) ; nécessite cmake et ninja.
+CEF_PATH=~/.cache/lumenwall/cef cargo build --release --locked -p lumenwall-web --features cef
 ```
 
 L’ensemble des vérifications (format, clippy, tests, tests GPU sur adaptateur logiciel, `cargo deny`) est décrit dans [`docs/CI.md`](docs/CI.md).
