@@ -49,15 +49,37 @@ fn fake_host() {
             size: 8,
         }],
         handle: 0,
+        memory: false,
     });
     tx.send(&frame, &[plane.as_fd()]).unwrap();
 
-    let mut released = false;
+    let mut released = 0;
     while let Ok(Some((command, _))) = rx.recv::<HostCommand>() {
         match command {
-            HostCommand::FrameReleased { id } => {
-                assert_eq!(id, 1);
-                released = true;
+            HostCommand::FrameReleased { id: 1 } => {
+                released += 1;
+                // Software painting: two rows of 2 BGRA pixels in shared memory.
+                let mut pixels = tempfile::tempfile().unwrap();
+                pixels.write_all(&[7u8; 16]).unwrap();
+                let frame = HostEvent::Frame(FrameInfo {
+                    id: 2,
+                    width: 2,
+                    height: 2,
+                    visible: [0, 0, 2, 2],
+                    format: PixelFormat::Bgra8,
+                    modifier: 0,
+                    planes: vec![PlaneInfo {
+                        offset: 0,
+                        stride: 8,
+                        size: 16,
+                    }],
+                    handle: 0,
+                    memory: true,
+                });
+                tx.send(&frame, &[pixels.as_fd()]).unwrap();
+            }
+            HostCommand::FrameReleased { id: 2 } => {
+                released += 1;
                 tx.send(&HostEvent::AudioListener { active: true }, &[])
                     .unwrap();
             }
@@ -65,7 +87,7 @@ fn fake_host() {
             _ => {}
         }
     }
-    assert!(released, "frame was released before shutdown");
+    assert_eq!(released, 2, "both frames were released before shutdown");
 }
 
 #[cfg(unix)]
@@ -91,6 +113,7 @@ fn main_process() {
         height: 1,
         fps: 30,
         pacing: Default::default(),
+        transport: Default::default(),
         properties: PropertySet::new(),
         audio: Default::default(),
         paused: false,
@@ -119,13 +142,27 @@ fn main_process() {
     };
     assert_eq!((frame.id, frame.width, frame.height), (1, 2, 1));
     assert!(!frame.is_revoked());
-    let SharedTexture::DmaBuf { planes, .. } = &frame.texture;
+    let SharedTexture::DmaBuf { planes, .. } = &frame.texture else {
+        panic!("expected a DMA-BUF frame")
+    };
     assert_eq!(planes.len(), 1);
     let mut file = std::fs::File::from(planes[0].fd.try_clone().unwrap());
     file.rewind().unwrap();
     let mut text = String::new();
     file.read_to_string(&mut text).unwrap();
     assert_eq!(text, "frame-bytes");
+    frame.release();
+
+    let WebEvent::Frame(frame) = next() else {
+        panic!("expected a memory frame")
+    };
+    let SharedTexture::Memory { fd, stride, size } = &frame.texture else {
+        panic!("expected a shared-memory frame")
+    };
+    assert_eq!((frame.id, *stride, *size), (2, 8, 16));
+    let mapped = lumenwall_web::ipc::frame::MappedMemory::map(fd, *size as usize).unwrap();
+    assert_eq!(mapped.as_slice(), &[7u8; 16]);
+    drop(mapped);
     frame.release();
     assert!(matches!(next(), WebEvent::AudioListener(true)));
 

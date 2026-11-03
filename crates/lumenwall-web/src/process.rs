@@ -30,6 +30,24 @@ pub fn default_host_executable() -> io::Result<PathBuf> {
     Ok(std::env::current_exe()?.with_file_name(host_executable_name()))
 }
 
+/// Environment variable naming the host executable explicitly.
+pub const HOST_ENV: &str = "LUMENWALL_WEB_HOST";
+
+/// The host executable to use: [`HOST_ENV`] when set, otherwise next to the current executable,
+/// otherwise one folder up (Cargo examples and test binaries live in a subfolder of the
+/// folder holding the binaries). `None` when none exists.
+pub fn find_host_executable() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(HOST_ENV).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(path)).filter(|p| p.is_file());
+    }
+    let next = default_host_executable().ok()?;
+    if next.is_file() {
+        return Some(next);
+    }
+    let up = next.parent()?.parent()?.join(host_executable_name());
+    up.is_file().then_some(up)
+}
+
 /// Something that happened in the web host.
 #[derive(Debug)]
 pub enum WebEvent {
@@ -88,6 +106,12 @@ impl WebHost {
             .arg(HOST_ARG)
             .args(extra_args)
             .stderr(Stdio::inherit());
+        // Chromium puts a Unix socket in a folder of the temporary directory; a socket path
+        // longer than 107 bytes aborts the browser. Fall back on /tmp for long TMPDIRs.
+        #[cfg(unix)]
+        if std::env::temp_dir().as_os_str().len() > 64 && Path::new("/tmp").is_dir() {
+            command.env("TMPDIR", "/tmp");
+        }
 
         let (commands, command_rx) = mpsc::channel::<HostCommand>();
         let (event_tx, events) = mpsc::channel::<WebEvent>();
@@ -315,6 +339,22 @@ fn unix_texture(info: &FrameInfo, fds: Vec<std::os::fd::OwnedFd>) -> io::Result<
             io::ErrorKind::InvalidData,
             "plane/descriptor count mismatch",
         ));
+    }
+    if info.memory {
+        let plane = info.planes[0];
+        let needed = u64::from(plane.stride) * u64::from(info.height);
+        if plane.offset != 0 || plane.size < needed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "memory frame smaller than its rows",
+            ));
+        }
+        let fd = fds.into_iter().next().expect("one descriptor");
+        return Ok(SharedTexture::Memory {
+            fd,
+            stride: plane.stride,
+            size: plane.size,
+        });
     }
     let planes = fds
         .into_iter()
