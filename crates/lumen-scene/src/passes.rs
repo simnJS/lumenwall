@@ -139,7 +139,7 @@ impl Project {
     /// effects live.
     pub fn image_passes(&self, obj: ObjectIndex) -> Option<ImagePasses> {
         let scene = self.scene.as_ref()?;
-        let image = scene.objects.get(obj.index())?.as_image()?;
+        let image = scene.objects.get(obj.index())?.as_layer()?;
         let model = scene.model(image.model?);
         let material = scene.material(model.material);
         let mut out = ImagePasses::default();
@@ -289,7 +289,7 @@ impl Project {
         pass: usize,
     ) -> Option<Parts<'a>> {
         let scene = self.scene.as_ref()?;
-        let image = scene.objects.get(obj.index())?.as_image()?;
+        let image = scene.objects.get(obj.index())?.as_layer()?;
         let desc = passes.passes.get(pass)?;
         let material = match desc.kind {
             PassKind::Material { material, pass } => {
@@ -501,7 +501,7 @@ impl Project {
     /// Main texture of an image (§12.1): lowest slot of the first model pass's `textures`.
     pub fn main_texture(&self, obj: ObjectIndex) -> Option<TextureRef> {
         let scene = self.scene.as_ref()?;
-        let image = scene.objects.get(obj.index())?.as_image()?;
+        let image = scene.objects.get(obj.index())?.as_layer()?;
         let material = scene.material(scene.model(image.model?).material);
         let &(_, name) = material.passes.first()?.textures.entries().first()?;
         Some(if is_render_target(self.strings.resolve(name)) {

@@ -350,7 +350,7 @@ impl<'s> Loader<'s, '_> {
         } else if let Some(source) = particle_source {
             ObjectKind::Particle(Box::new(self.particle(source, &mut raw)?))
         } else if !matches!(raw.text, RawSetting::Absent) {
-            ObjectKind::Text(Box::new(self.text(&raw)?))
+            ObjectKind::Text(Box::new(self.text(file, &raw)?))
         } else if raw.light != Json::Absent {
             self.warn(file, format!("object {id}: lights are not supported"));
             ObjectKind::Generic(GenericKind::Light)
@@ -548,9 +548,25 @@ impl<'s> Loader<'s, '_> {
         })
     }
 
-    fn text(&mut self, raw: &RawObject<'_>) -> Result<TextObject, Fail> {
+    fn text(&mut self, file: &str, raw: &RawObject<'_>) -> Result<TextObject, Fail> {
         let b = &mut self.b;
         let text = b.setting(&raw.text, None, false).at("text")?;
+        // Lumen (parity rule 5): the content string stays text. §5.2 would read "26 NOV 2024" as
+        // a vec3 and "2024" as a float, whose text view is empty: WE displays them.
+        let content = match &raw.text {
+            RawSetting::Scalar(Json::Str(s)) => Some(s),
+            RawSetting::Object(o) => match &o.value {
+                Json::Str(s) => Some(s),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(s) = content
+            && b.settings.meta(text).property.is_none()
+            && b.settings.value(text).tag() != crate::value::ValueTag::Text
+        {
+            b.settings.set(text, Value::from_text(s));
+        }
         let font = opt_str(&raw.font, "").at("font")?.to_owned();
         let point_size = b
             .setting(&raw.pointsize, Some(Value::from_float(32.0)), false)
@@ -572,7 +588,51 @@ impl<'s> Loader<'s, '_> {
         let vertical_align =
             Alignment::parse(opt_str(&raw.verticalalign, "center").at("verticalalign")?);
         let padding = strict_vec2_setting(&raw.padding).at("padding")?;
+        // Lumen: image-layer fields of a text (see `TextObject::layer`).
+        let brightness = b
+            .setting(&raw.brightness, Some(Value::from_float(1.0)), false)
+            .at("brightness")?;
+        let parallax_depth = b
+            .setting(
+                &raw.parallax_depth,
+                Some(Value::from_vec2(Vec2::ZERO)),
+                false,
+            )
+            .at("parallaxDepth")?;
+        let color_blend_mode = b
+            .setting(&raw.color_blend_mode, Some(Value::from_int(0)), false)
+            .at("colorBlendMode")?;
         let font = self.intern(&font);
+        let mut effects = Vec::new();
+        if raw.effects.kind == JsonKind::Array {
+            for (i, e) in raw.effects.items.iter().enumerate() {
+                if let Some(eff) = self.image_effect(file, e).at_idx(i).at("effects")? {
+                    effects.push(eff);
+                }
+            }
+        }
+        let model = self.text_model();
+        let layer = ImageObject {
+            file: self.intern(TEXT_MODEL),
+            model: Some(model),
+            scale,
+            angles: self.constant(Value::from_vec3(Vec3::ZERO)),
+            visible,
+            alpha: self.constant(Value::from_float(1.0)),
+            color: self.constant(Value::from_color(Vec4::ONE)),
+            alignment: Alignment {
+                top: vertical_align.top,
+                bottom: vertical_align.bottom,
+                left: horizontal_align.left,
+                right: horizontal_align.right,
+            },
+            size: Vec2::ZERO,
+            parallax_depth,
+            color_blend_mode,
+            brightness: self.constant(Value::from_float(1.0)),
+            effects,
+            animation_layers: Vec::new(),
+        };
         Ok(TextObject {
             text,
             font,
@@ -585,7 +645,49 @@ impl<'s> Loader<'s, '_> {
             horizontal_align,
             vertical_align,
             padding,
+            brightness,
+            layer,
         })
+    }
+
+    /// Synthetic model and material of a text layer: Wallpaper Engine's `font` shader (as in
+    /// its `materials/fonts/basefont.json`), translucent, no culling, the glyph texture
+    /// `TEXT_TEXTURE_PREFIX<material index>` in slot 0. Built in code, like the bloom
+    /// material, so a text never depends on an asset file of its own.
+    fn text_model(&mut self) -> ModelId {
+        let n = self.arenas.materials.len();
+        let texture = self.intern(&format!("{TEXT_TEXTURE_PREFIX}{n}"));
+        let shader = self.intern("font");
+        let file = self.intern(TEXT_MATERIAL);
+        self.arenas.materials.push(Material {
+            file,
+            passes: vec![MaterialPass {
+                shader,
+                blending: Blending::Translucent,
+                cull_mode: CullMode::NoCull,
+                depth_test: DepthMode::Disabled,
+                depth_write: DepthMode::Disabled,
+                textures: TextureMap(vec![(0, texture)]),
+                user_textures: TextureMap::default(),
+                combos: Vec::new(),
+                constants: Vec::new(),
+            }],
+        });
+        let material = MaterialId(n as u32);
+        let file = self.intern(TEXT_MODEL);
+        self.arenas.models.push(Model {
+            file,
+            material,
+            solid_layer: false,
+            fullscreen: false,
+            passthrough: false,
+            autosize: false,
+            nopadding: false,
+            width: None,
+            height: None,
+            puppet: None,
+        });
+        ModelId(self.arenas.models.len() as u32 - 1)
     }
 
     fn particle(

@@ -489,7 +489,7 @@ impl Project {
         let mut need_tint = false;
         let mut need_passthrough = false;
         for o in scene.file_objects() {
-            if let ObjectKind::Image(img) = &o.kind {
+            if let Some(img) = o.as_layer() {
                 need_tint |= img.effects.iter().any(|e| {
                     e.overrides.iter().any(|ov| {
                         ov.combos

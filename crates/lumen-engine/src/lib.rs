@@ -16,6 +16,7 @@ mod particles;
 pub mod plan;
 mod scene;
 pub mod shaders;
+pub mod text;
 mod texture;
 mod wallpaper;
 

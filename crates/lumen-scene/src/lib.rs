@@ -53,7 +53,7 @@ pub use scene::{
     CullMode, DepthMode, Effect, EffectId, EffectPass, Fbo, GenericKind, ImageEffect, ImageObject,
     Material, MaterialId, MaterialPass, Model, ModelId, Object, ObjectIndex, ObjectKind,
     OrthogonalProjection, ParticleObject, ParticleSource, PassOverride, Scene, SceneGeneral,
-    SoundObject, TextObject, TextureMap,
+    SoundObject, TEXT_TEXTURE_PREFIX, TextObject, TextureMap,
 };
 pub use setting::{Script, ScriptId, SettingId, SettingMeta, Settings};
 pub use text::ColorError;

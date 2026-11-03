@@ -38,6 +38,7 @@ use crate::assets::SceneSource;
 use crate::particles::{self, ParticleFrame, ParticleRuntime, PendingParticle};
 use crate::plan::DebugPlan;
 use crate::shaders::{ConstantParam, PassKind, ShaderProvider, ShaderRequest};
+use crate::text;
 use crate::texture::{LoadedTexture, TextureCache};
 
 /// Scene construction settings.
@@ -68,6 +69,8 @@ impl Default for SceneOptions {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SceneStats {
     pub images: usize,
+    /// Text objects drawn (also counted in `images`: each is an image layer).
+    pub texts: usize,
     pub passes: usize,
     pub particle_systems: usize,
     pub textures: usize,
@@ -100,6 +103,8 @@ struct ImageRuntime {
     /// Own `visible` then each created ancestor's (see [`visibility_chain`]).
     visible: Box<[SettingId]>,
     shown: bool,
+    /// Origin offset in local pixels (× scale, y up): a text's anchor point (zero for images).
+    anchor: Vec2,
 }
 
 /// A pass whose slot 0 is an animated texture (spec 04 §16.3).
@@ -149,6 +154,9 @@ pub struct SceneRuntime {
     near: f32,
     far: f32,
     images: Vec<ImageRuntime>,
+    /// Text objects (their layers are in `images`) and the fonts they use.
+    texts: Vec<text::TextRuntime>,
+    fonts: Option<Box<text::Fonts>>,
     particles: Vec<ParticleRuntime>,
     animated_passes: Vec<AnimatedPass>,
     live: Vec<LiveUniform>,
@@ -346,6 +354,8 @@ pub fn build_scene(
 
     // Phase 1: creation order.
     let mut pending: HashMap<usize, Pending> = HashMap::new();
+    let mut fonts: Option<Box<text::Fonts>> = None;
+    let mut pending_texts: HashMap<usize, (text::TextRuntime, (f32, f32))> = HashMap::new();
     let creation = build.creation_order.clone();
     for idx in creation {
         if build.bloom.is_some_and(|bl| bl.object == idx) {
@@ -437,10 +447,45 @@ pub fn build_scene(
                 }
             }
             ObjectKind::Text(_) => {
-                tracing::warn!(
-                    "text object {id} not rendered (text objects are not integrated yet)"
-                );
-                stats.skipped_objects += 1;
+                // A text is an image layer whose main texture is the rasterised text.
+                let fonts = fonts.get_or_insert_with(Box::default);
+                let prepared = text::prepare(
+                    &mut b,
+                    project,
+                    vfs,
+                    fonts,
+                    &mut textures,
+                    idx,
+                    raw.get(&i64::from(id)),
+                )
+                .and_then(|t| match t {
+                    Some(t) => prepare_image(
+                        &mut b,
+                        project,
+                        vfs,
+                        &mut textures,
+                        shaders,
+                        &build,
+                        idx,
+                        root,
+                        st.full,
+                        size,
+                        opts,
+                    )
+                    .map(|img| img.map(|img| (img, t))),
+                    None => Ok(None),
+                });
+                match prepared {
+                    Ok(Some((img, t))) => {
+                        pending.insert(idx.index(), Pending::Image(Box::new(img)));
+                        pending_texts.insert(idx.index(), (t.runtime, t.offset));
+                    }
+                    Ok(None) => stats.skipped_objects += 1,
+                    Err(e) => {
+                        tracing::warn!("text object {id} not rendered: {e}");
+                        stats.skipped_objects += 1;
+                    }
+                }
             }
             _ => {}
         }
@@ -465,6 +510,7 @@ pub fn build_scene(
         ],
     });
     let mut images = Vec::new();
+    let mut texts = Vec::new();
     let mut particle_rts = Vec::new();
     let mut animated_passes = Vec::new();
     let mut live = Vec::new();
@@ -610,6 +656,15 @@ pub fn build_scene(
                     }
                 }
                 let transform = node(project.world_transform(img.object, &build));
+                let mut anchor = Vec2::ZERO;
+                if let Some((mut t, offset)) = pending_texts.remove(&idx.index())
+                    && let Some(&glyph_pass) = handle.passes.first()
+                {
+                    t.attach(&mut b, glyph_pass, &project.settings);
+                    live.retain(|l: &LiveUniform| Some(&l.slot) != t.color_slot());
+                    texts.push(t);
+                    anchor = Vec2::from(offset);
+                }
                 images.push(ImageRuntime {
                     object: img.object,
                     handle,
@@ -618,6 +673,7 @@ pub fn build_scene(
                     parallax_depth: img.parallax_depth,
                     visible: visibility_chain(project, &build, img.object),
                     shown: true,
+                    anchor,
                 });
             }
             Some(Pending::Particle(p)) => match p.finish(&mut b) {
@@ -632,6 +688,7 @@ pub fn build_scene(
         }
     }
 
+    stats.texts = texts.len();
     stats.textures = textures.len();
     stats.texture_bytes = textures.uploaded_bytes;
     stats.stand_in_shaders = shaders.replaced();
@@ -665,6 +722,8 @@ pub fn build_scene(
         near: settings_float(project, camera.nearz),
         far: settings_float(project, camera.farz),
         images,
+        texts,
+        fonts,
         particles: particle_rts,
         animated_passes,
         live,
@@ -720,7 +779,7 @@ fn split_combos(
         lumen_scene::OverrideRef::Effect { effect, index } => {
             if let Some(ov) = scene
                 .object(idx)
-                .as_image()
+                .as_layer()
                 .and_then(|i| i.effects.get(effect as usize))
                 .and_then(|e| e.overrides.get(index as usize))
             {
@@ -804,7 +863,7 @@ fn prepare_image(
     let scene = project.scene.as_ref().ok_or("not a scene project")?;
     let obj = scene.object(idx);
     let id = obj.id;
-    let img = obj.as_image().ok_or("not an image")?;
+    let img = obj.as_layer().ok_or("not an image layer")?;
     let model = scene.model(img.model.ok_or("image without model")?);
     let (fullscreen, passthrough, solid) = (model.fullscreen, model.passthrough, model.solid_layer);
     let puppet_path = model.puppet.map(|p| project.strings.resolve(p).to_owned());
@@ -1148,6 +1207,8 @@ impl SceneRuntime {
             if img.fullscreen {
                 transform.origin = center;
             }
+            transform.origin.x += img.anchor.x * transform.scale.x;
+            transform.origin.y += img.anchor.y * transform.scale.y;
             let parallax = if self.parallax_on {
                 parallax_translation(
                     settings.value(img.parallax_depth).vec2(),
@@ -1167,6 +1228,11 @@ impl SceneRuntime {
                     scene_size: self.size,
                 },
             );
+        }
+        if let Some(fonts) = &mut self.fonts {
+            for t in &mut self.texts {
+                t.update(ctx, &mut self.scene, fonts, settings);
+            }
         }
         for a in &self.animated_passes {
             let Some(anim) = &a.texture.animation else {
@@ -1231,6 +1297,38 @@ impl SceneRuntime {
     /// Live particles over every system (statistics).
     pub fn live_particles(&self) -> usize {
         self.particles.iter().map(ParticleRuntime::live).sum()
+    }
+
+    /// Replaces the content of the text object `object_id` (SceneScript `thisLayer.text = …`,
+    /// `getLayer(…).text = …`). The glyph texture is regenerated by the next [`Self::update`],
+    /// and only if the string differs from the one shown; calling this every frame with the same
+    /// string costs a comparison. Returns `false` when no drawn text object has this id.
+    pub fn set_text(&mut self, object_id: i32, text: &str) -> bool {
+        match self.texts.iter_mut().find(|t| t.object_id == object_id) {
+            Some(t) => {
+                t.set_text(text);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// String currently displayed by the text object `object_id`.
+    pub fn text(&self, object_id: i32) -> Option<&str> {
+        self.texts
+            .iter()
+            .find(|t| t.object_id == object_id)
+            .map(text::TextRuntime::shown)
+    }
+
+    /// Glyph textures regenerated since load, and the time spent (layout + rasterisation +
+    /// upload), over every text object.
+    pub fn text_regenerations(&self) -> (u64, std::time::Duration) {
+        self.texts
+            .iter()
+            .fold((0, std::time::Duration::ZERO), |(n, d), t| {
+                (n + t.regenerations, d + t.regeneration_time)
+            })
     }
 }
 

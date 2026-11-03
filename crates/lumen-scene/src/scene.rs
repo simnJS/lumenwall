@@ -250,6 +250,16 @@ impl Object {
             _ => None,
         }
     }
+
+    /// Image layer drawn for this object: the image itself, or the layer a text object is
+    /// rendered as ([`TextObject::layer`]). Render passes (§12) are built from it.
+    pub fn as_layer(&self) -> Option<&ImageObject> {
+        match &self.kind {
+            ObjectKind::Image(i) => Some(i),
+            ObjectKind::Text(t) => Some(&t.layer),
+            _ => None,
+        }
+    }
 }
 
 /// Type of an object (§7.1).
@@ -421,7 +431,25 @@ pub struct TextObject {
     pub vertical_align: Alignment,
     /// Padding, frozen at load.
     pub padding: Vec2,
+    /// `brightness`: multiplies the glyph colour.
+    pub brightness: SettingId,
+    /// Lumen (Wallpaper Engine behaviour, parity rule 5; the reference draws texts outside the
+    /// pass chain, spec 04 §18): the image layer the text is drawn as. Synthetic model and
+    /// material (WE `font` shader, translucent, glyph texture [`TEXT_TEXTURE_PREFIX`]`<n>` in
+    /// slot 0), the object's `effects`, `colorBlendMode`, `parallaxDepth` and visibility,
+    /// alignment from `horizontalalign` + `verticalalign`, size from the texture. Its colour,
+    /// alpha and brightness are neutral constants: the glyph pass applies the text's own
+    /// ([`Self::color`], [`Self::alpha`], [`Self::brightness`]).
+    pub layer: ImageObject,
 }
+
+/// Name prefix of the glyph texture of a text layer (slot 0 of its synthetic material). The
+/// renderer registers the rasterised text under the name it finds there.
+pub const TEXT_TEXTURE_PREFIX: &str = "<lumen>/text/";
+/// Label of the synthetic material of a text layer.
+pub(crate) const TEXT_MATERIAL: &str = "<lumen>/text/material.json";
+/// Label of the synthetic model of a text layer.
+pub(crate) const TEXT_MODEL: &str = "<lumen>/text/model.json";
 
 /// Where a particle system definition comes from. The content is parsed by `lumen-particles`.
 #[derive(Debug)]

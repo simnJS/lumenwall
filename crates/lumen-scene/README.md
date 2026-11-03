@@ -74,3 +74,13 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 - Failed object setups are memoised instead of being retried on each reference. The predicate is deterministic, so the result is the same.
 - No per-load cache of referenced files: each reference re-reads and re-parses its file (independent copies, §1.1-4). Parsing is microseconds, and an mmap `AssetSource` returns borrowed bytes.
 - Structure dump (§15.2): the indentation and the `(not loaded)` marker are Lumen's choice.
+- Text objects (§7.7) also read `effects`, `colorBlendMode`, `parallaxDepth` and `brightness`,
+  and carry `TextObject::layer`: the image layer the renderer draws them as (Wallpaper Engine
+  behaviour, parity rule 5). Its synthetic model and material use the WE `font` shader with the
+  glyph texture `<lumen>/text/<n>` in slot 0; its colour, alpha and brightness are neutral
+  constants. `Object::as_layer` returns it (and an image's own data), and the pass builder
+  (`image_passes`, `pass_*`, `main_texture`, compatibility materials) works on layers.
+  `Object::as_image` is unchanged.
+- The `text` content of a text object stays text: §5.2 would turn `"26 NOV 2024"` into a vec3 and
+  `"2024"` into a float, whose text view is empty, so the text would disappear (WE displays it).
+  Text bound to a property keeps the property's value.
