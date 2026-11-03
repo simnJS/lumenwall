@@ -155,8 +155,11 @@ buffer, no extra pass, no per-frame work).
   linear interpolation, instants stretched to the duration when the last one differs (`demon_core`).
   `LUMENWALL_STATIC_CAMERA=1` keeps the `scene.json` pose (debugging aid).
 - **Lights**: the first four visible `point`/`lpoint` lights: `g_LightsPosition[4]`,
-  `g_LightsColorRadius[4]` = (colour × intensity, radius), unused slots zero. Other types are
-  warned about and skipped.
+  `g_LightsColorRadius[4]` = (colour × intensity, radius), unused slots zero, and the same lights
+  for the `LightingV1` module of lumenwall-shader (`g_LumenLightPosition[4]` with the exponent,
+  `g_LumenLightColor[4]`): `generic4` and its family get PBR point lighting (checked on WE's
+  `collisionmodel` preview scene). Other types are warned about and skipped.
+- **Models of a 2D scene** get `SCENE_ORTHO` = 1 (spec 09 §2.4, §3.12).
 - **Depth**: one `Depth32Float` buffer on `_rt_FullFrameBuffer` (and on `_rt_Reflection`), cleared
   once per frame. Every pass drawn into the scene target gets a depth state (images, particles,
   bloom: "always", no write).
@@ -196,7 +199,7 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | Feature | Current behaviour |
 |---|---|
 | 3D: integer colour properties | `"1 0 0"` is read as 0–255 (spec 02 Q1): `fantasticcar`'s body, `demon_core`'s core and `retro`'s stripes (through `usershadervalues`) come out black while their previews show red. Renders with `--set "carbodycolor=1.0 0.0 0.0"` match. To settle in spec 02 Q1 (the 3D previews are evidence for floats). `usershadervalues` are applied to 3D passes only for now (images would turn `retro` black). |
-| 3D: P2/P3 of spec 09 | `LightingV1` (generic4 family) still returns 0, no fog, no `_rt_MipMappedFrameBuffer` mips, no shadows, volumetrics or HDR, spot/tube/directional lights skipped, no camera fade or shake, no parallax in perspective, models without skeleton animation. |
+| 3D: P2/P3 of spec 09 | No fog, no `_rt_MipMappedFrameBuffer` mips, no shadows, volumetrics or HDR, spot/tube/directional lights skipped, no camera fade or shake, no parallax in perspective, models without skeleton animation. |
 | Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
 | Integer colour strings | `lumenwall-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumenwall matches the preview). To settle in spec 02 Q1. |
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |

@@ -54,6 +54,8 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 
 Dialect macros (§3.3) are textual macros with C semantics in the assembled header: `mul`, swapped `max`, `lerp`, `frac`, `saturate`, `CAST2/3/4/3X3`, `float2…4`, `int2…4`, `texSample2D(Lod)`, `log10`, `atan2`, `fmod`, `ddx`, `ddy`, `GLSL` (`compat_macros`). Not in §3.3: `texSample3D(Lod)`, the volume lookup of `ccsimple.frag` (superset). Includes, `#require LightingV1`, combos, annotations, workshop/zcompat substitution and the virtual `commands/copy` shader have unit tests.
 
+`#require LightingV1` (spec 09 §2.4): when `ComputePBRLightShadow` (`common_pbr_2.h`) appears earlier in the unit, the module is the sum of `ComputePBRLightShadow` over four engine lights, `uniform vec4 g_LumenLightPosition[4]` (position, exponent) and `g_LumenLightColor[4]` (colour × intensity, radius; radius 0 = unused), shadow factor 1; rim lighting, toon gradient and double-sided lighting stay inside WE's own function. Passes the engine does not feed read zeros, so their result is 0 like the reference's module (still used when the helpers are absent).
+
 ## Decisions on the open questions (spec 03 §17)
 
 | Q | Decision | Policy |

@@ -265,6 +265,8 @@ struct Slots {
     view_up: Option<UniformSlot>,
     lights_position: Option<UniformSlot>,
     lights_color: Option<UniformSlot>,
+    lumen_position: Option<UniformSlot>,
+    lumen_color: Option<UniformSlot>,
     ambient: Option<UniformSlot>,
     skylight: Option<UniformSlot>,
 }
@@ -292,6 +294,9 @@ impl Slots {
             view_up: u("g_ViewUp"),
             lights_position: u("g_LightsPosition"),
             lights_color: u("g_LightsColorRadius"),
+            // `LightingV1` module of lumenwall-shader (spec 09 §2.4).
+            lumen_position: u("g_LumenLightPosition"),
+            lumen_color: u("g_LumenLightColor"),
             ambient: u("g_LightAmbientColor"),
             skylight: u("g_LightSkylightColor"),
         }
@@ -316,6 +321,8 @@ pub(crate) struct CameraFrame {
 struct LightFrame {
     positions: [f32; 3 * MAX_LIGHTS],
     color_radius: [f32; 4 * MAX_LIGHTS],
+    /// `LightingV1`: (position, exponent).
+    position_exponent: [f32; 4 * MAX_LIGHTS],
 }
 
 struct DrawPass {
@@ -341,6 +348,7 @@ struct LightRuntime {
     color: SettingId,
     intensity: SettingId,
     radius: SettingId,
+    exponent: SettingId,
 }
 
 /// One pass of a mesh, prepared before the draws exist.
@@ -447,6 +455,11 @@ fn pass_slots(
     let mut out = [None; 8];
     for (slot, name) in names.iter().enumerate() {
         let Some(name) = name else { continue };
+        if name.starts_with("_alias_") {
+            // Engine aliases (`_alias_lightCookie`, spec 09 §1.13): cookies are not rendered.
+            tracing::debug!("{label}: slot {slot} '{name}' not provided");
+            continue;
+        }
         out[slot] = if name.starts_with("_rt_") {
             if name == REFLECTION && reflection.is_none() {
                 // §3.7: created only when a material references it, in the scene scope.
@@ -486,6 +499,7 @@ fn prepare_material(
     reflection: &mut Option<RtId>,
     size: (u32, u32),
     label: &str,
+    perspective: bool,
 ) -> Result<Vec<PreparedPass>, String> {
     let scene = project.scene.as_ref().ok_or("not a scene")?;
     let mut out = Vec::new();
@@ -496,8 +510,12 @@ fn prepare_material(
             .iter()
             .map(|c| (project.strings.resolve(c.key).to_owned(), c.value))
             .collect();
-        // Engine combos of 3D passes (spec 09 §2.10): HLSL = 1 with GLSL = 1.
-        let override_combos = vec![("HLSL".to_owned(), 1)];
+        // Engine combos of 3D passes (spec 09 §2.10): HLSL = 1 with GLSL = 1; models of a 2D
+        // scene also get SCENE_ORTHO = 1 (§3.12, §2.4).
+        let mut override_combos = vec![("HLSL".to_owned(), 1)];
+        if !perspective {
+            override_combos.push(("SCENE_ORTHO".to_owned(), 1));
+        }
         let used_slots: Vec<u32> = mp.textures.entries().iter().map(|e| e.0).collect();
         let shader = shaders.pass_shader(
             b,
@@ -685,6 +703,7 @@ impl Builder3d {
                     color: l.color,
                     intensity: l.intensity,
                     radius: l.radius,
+                    exponent: l.exponent,
                 });
             }
         }
@@ -754,6 +773,7 @@ impl Builder3d {
                         reflection,
                         size,
                         &mesh_label,
+                        self.perspective,
                     ) {
                         Ok(p) => p,
                         Err(e) => {
@@ -787,7 +807,17 @@ impl Builder3d {
                     ));
                 };
                 let passes = prepare_material(
-                    b, project, vfs, textures, shaders, root, material, reflection, size, &label,
+                    b,
+                    project,
+                    vfs,
+                    textures,
+                    shaders,
+                    root,
+                    material,
+                    reflection,
+                    size,
+                    &label,
+                    self.perspective,
                 )?;
                 // §1.7: four vertices at the origin, UVs at the corners, two triangles.
                 let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
@@ -1213,6 +1243,12 @@ impl Scene3d {
                 c.z,
                 settings.value(l.radius).float(),
             ]);
+            lights.position_exponent[4 * n..4 * n + 4].copy_from_slice(&[
+                p.x,
+                p.y,
+                p.z,
+                settings.value(l.exponent).float(),
+            ]);
             n += 1;
         }
         let ambient = settings.value(self.ambient).vec3().to_array();
@@ -1274,6 +1310,8 @@ impl Scene3d {
                 fl(sh, &s.view_up, &camera.up.to_array());
                 fl(sh, &s.lights_position, &lights.positions);
                 fl(sh, &s.lights_color, &lights.color_radius);
+                fl(sh, &s.lumen_position, &lights.position_exponent);
+                fl(sh, &s.lumen_color, &lights.color_radius);
                 fl(sh, &s.ambient, &ambient);
                 fl(sh, &s.skylight, &skylight);
             }

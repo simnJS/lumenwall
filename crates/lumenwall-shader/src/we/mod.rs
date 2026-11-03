@@ -156,7 +156,15 @@ fn insertion_point(text: &str) -> Result<usize, ShaderError> {
     Ok(p.min(main_line))
 }
 
+/// `LightingV1` when `ComputePBRLightShadow` (`common_pbr_2.h`) is not defined before the
+/// directive: no light (the reference's module).
 const LIGHTING_V1: &str = "vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir, vec3 specularTint, vec3 baseReflectance, float roughness, float metallic) { return vec3(0.0); }\n";
+
+/// `LightingV1` of spec 09 §2.4 (point lights): the sum of `ComputePBRLightShadow` over the
+/// engine's lights, without shadows. `g_LumenLightPosition[i]` = (position, exponent),
+/// `g_LumenLightColor[i]` = (colour × intensity, radius); a light of radius 0 is unused. Passes
+/// the engine does not feed read zeros: the sum is 0, as with [`LIGHTING_V1`].
+const LIGHTING_V1_PBR: &str = "uniform vec4 g_LumenLightPosition[4];\nuniform vec4 g_LumenLightColor[4];\nvec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir, vec3 specularTint, vec3 baseReflectance, float roughness, float metallic) {\n\tvec3 lumenLight = vec3(0.0, 0.0, 0.0);\n\tfor (int lumenI = 0; lumenI < 4; lumenI++) {\n\t\tif (g_LumenLightColor[lumenI].w > 0.0) {\n\t\t\tlumenLight += ComputePBRLightShadow(normal, g_LumenLightPosition[lumenI].xyz - worldPos, viewDir, albedo, g_LumenLightColor[lumenI].xyz, g_LumenLightColor[lumenI].w, g_LumenLightPosition[lumenI].w, specularTint, baseReflectance, roughness, metallic, 1.0);\n\t\t}\n\t}\n\treturn lumenLight;\n}\n";
 
 /// §4.2 `#require` modules.
 fn apply_requires(text: &mut String, warnings: &mut Vec<String>) {
@@ -179,8 +187,14 @@ fn apply_requires(text: &mut String, warnings: &mut Vec<String>) {
         }
         text.replace_range(pos..pos + 2, "//");
         if name == "LightingV1" {
-            text.insert_str(pos, LIGHTING_V1);
-            from = pos + LIGHTING_V1.len() + 2;
+            // Lumenwall (spec 09 §2.4): real point lights when the PBR helpers are in the text.
+            let module = if text[..pos].contains("vec3 ComputePBRLightShadow(") {
+                LIGHTING_V1_PBR
+            } else {
+                LIGHTING_V1
+            };
+            text.insert_str(pos, module);
+            from = pos + module.len() + 2;
         } else {
             warnings.push(format!("unknown #require module '{name}'"));
             from = pos + 2;
@@ -316,6 +330,14 @@ mod tests {
         assert!(u.body.contains("//equire Other"));
         let u = preprocess_unit(&fs, "#require\nvoid main() {}\n").unwrap();
         assert!(u.body.contains("#require\n"));
+        // With the PBR helpers before it: the light sum of spec 09 §2.4.
+        let u = preprocess_unit(
+            &fs,
+            "vec3 ComputePBRLightShadow(vec3 N) { return N; }\n#require LightingV1\nvoid main() {}\n",
+        )
+        .unwrap();
+        assert!(u.body.contains("uniform vec4 g_LumenLightColor[4];"));
+        assert!(u.body.contains("lumenLight += ComputePBRLightShadow("));
     }
 
     #[test]
