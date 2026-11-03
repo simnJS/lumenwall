@@ -103,6 +103,10 @@ Rule numbers refer to `docs/PARITY-POLICY.md`.
 - Failed object setups are memoised instead of being retried on each reference. The predicate is deterministic, so the result is the same.
 - No per-load cache of referenced files: each reference re-reads and re-parses its file (independent copies, §1.1-4). Parsing is microseconds, and an mmap `AssetSource` returns borrowed bytes.
 - Structure dump (§15.2): the indentation and the `(not loaded)` marker are Lumenwall's choice.
+- `Project::add_object` adds an object after build (SceneScript `createLayer`, a public Wallpaper
+  Engine API absent from spec 02): one `scene.json` object converted like the file's, appended to
+  `Scene::objects` without id registration (like the bloom object); `Settings::values_in` /
+  `restore` reset it when the engine reuses it; `Project::set_up_error` applies the §13.1 rules.
 - Text objects (§7.7) also read `effects`, `colorBlendMode`, `parallaxDepth` and `brightness`,
   and carry `TextObject::layer`: the image layer the renderer draws them as (Wallpaper Engine
   behaviour, parity rule 5). Its synthetic model and material use the WE `font` shader with the

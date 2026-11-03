@@ -50,6 +50,7 @@ lumenwall-video = { workspace = true, features = ["ffmpeg"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+png = "0.18"
 
 [[example]]
 name = "render_png"

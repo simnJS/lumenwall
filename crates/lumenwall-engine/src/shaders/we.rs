@@ -159,4 +159,8 @@ impl ShaderProvider for WeShaders {
     fn replaced(&self) -> usize {
         self.fallback.replaced()
     }
+
+    fn detach(&mut self) -> Option<Box<dyn ShaderProvider>> {
+        Some(Box::new(std::mem::take(self)))
+    }
 }

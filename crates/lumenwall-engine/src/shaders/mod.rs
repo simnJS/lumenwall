@@ -89,6 +89,52 @@ pub trait ShaderProvider {
 
     /// Number of distinct WE shaders replaced by stand-ins so far.
     fn replaced(&self) -> usize;
+
+    /// Moves this provider's state (translations, the shader ids of the scene it built) into a
+    /// new box and leaves this one empty. The scene keeps it to compile the layers scripts
+    /// create after load, reusing the shaders it already has. `None`: not supported (a new
+    /// provider is used, duplicating shared shaders).
+    fn detach(&mut self) -> Option<Box<dyn ShaderProvider>> {
+        None
+    }
+}
+
+/// Answers a repeated request (same shader, combos, slots and slot-0 format) from memory:
+/// layers created after load ask for the same few shaders again, and the translator's own
+/// lookup (sources, combos, on-disk cache key) costs far more than this one.
+pub(crate) struct Memoized {
+    inner: Box<dyn ShaderProvider>,
+    answers: HashMap<String, PassShader>,
+}
+
+impl Memoized {
+    pub(crate) fn new(inner: Box<dyn ShaderProvider>) -> Self {
+        Memoized {
+            inner,
+            answers: HashMap::new(),
+        }
+    }
+}
+
+impl ShaderProvider for Memoized {
+    fn pass_shader(
+        &mut self,
+        b: &mut SceneBuilder<'_>,
+        vfs: &Vfs,
+        req: &ShaderRequest<'_>,
+    ) -> Result<PassShader, String> {
+        let key = format!("{req:?}");
+        if let Some(s) = self.answers.get(&key) {
+            return Ok(s.clone());
+        }
+        let s = self.inner.pass_shader(b, vfs, req)?;
+        self.answers.insert(key, s.clone());
+        Ok(s)
+    }
+
+    fn replaced(&self) -> usize {
+        self.inner.replaced()
+    }
 }
 
 const FALLBACK_WGSL: &str = include_str!("fallback.wgsl");
@@ -186,6 +232,10 @@ impl ShaderProvider for FallbackShaders {
 
     fn replaced(&self) -> usize {
         self.logged.len()
+    }
+
+    fn detach(&mut self) -> Option<Box<dyn ShaderProvider>> {
+        Some(Box::new(std::mem::take(self)))
     }
 }
 

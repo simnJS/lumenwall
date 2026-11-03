@@ -50,7 +50,8 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `scene` | `build_scene`: `Project::build` → render graph in two phases (creation order: textures, composites, effect `fbos` scopes, slot candidates, targets, shaders, constants; render order: `add_image`, particle passes, bloom). `SceneRuntime::update`: frame globals, parallax, image geometry, visibility, animated textures, particles. |
 | `text` | Text objects as image layers: `Fonts` (empty `cosmic-text` database, the wallpaper's font file through the VFS, fallback fonts loaded only on need), layout (300 dpi, line breaks, `limitwidth`/`maxwidth` wrapping, `limitrows`/`maxrows`, ellipsis), R8 glyph texture registered in the texture cache under the layer's slot-0 name, anchor offset, `TextRuntime` (per-frame `g_Color4` of the glyph pass, regeneration only when the string or point size changes). |
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
-| `script` | SceneScript (`lumenwall-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. |
+| `script` | SceneScript (`lumenwall-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. `script/dynamic.rs`: layers scripts create, destroy and sort (scene-model side, pools). |
+| `scene/layers.rs` | GPU side of the layers scripts create after load: `RenderScene::extend`, parking and reuse, draw order (see "Layers created by scripts"). |
 | `audio` | Scene sounds (`lumenwall-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
 | `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device). |
 | `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
@@ -228,6 +229,9 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | Web page audio and automute | `--volume`, `--silent` and pause apply; automute does not (the page's stream comes from the host process, which the detector would count as another application and mute the page in a loop), and that stream can automute the scene sounds of other outputs (spec 07 §15.6). |
 | Web media integration | Listeners register, but no MPRIS / Windows media source feeds them. |
 | `thisScene.createLayer` / `destroyLayer` / `sortLayer` | Neutral results (`undefined` / `false`): layers cannot be added to the render graph after load. Scripts that build layers in `init` (audio visualizers) fail there. |
+| Web wallpapers | Load error (`lumenwall-web` not integrated). |
+| Created layers | Puppet meshes are not created after load (the image gets the plain quad); scripts carried by a creation configuration do not run; a created particle system starts at the layer's origin but does not follow later `origin` writes (like the scene's own systems); 3D models (`.mdl`) cannot be created. |
+| Sound layers | Listed and found (`getLayer('jump')`), but `play()`/`stop()` are neutral: the scene does not drive the audio player yet. |
 | Media events | No media source (MPRIS / Windows media session) yet: `SceneRuntime::media_changed` / `media_status` are the entry points. |
 | Script effects on fixed state | Effect visibility, particle `origin`/`scale`/`angles` (read by `lumenwall-particles` at creation), camera/bloom/clear-colour members: scripts can read and write them, the image is unchanged. |
 | `localStorage` | In memory (not persisted between runs). |
@@ -271,6 +275,43 @@ Effect and constant scripts are bound to `ObjectRef::Effect` / `ObjectRef::Mater
 is the `IEffect` / `IMaterial`, the material index being the effect pass override); their bound
 member carries a location suffix (`visible@effect0`, `multiply@effect1.pass0`) so that the
 `<member>_<layer>` keys of `lumenwall-script` stay unique.
+
+### Layers created by scripts
+
+`thisScene.createLayer(asset | path | configuration)`, `destroyLayer`, `sortLayer`,
+`getInitialLayerConfig` and `engine.registerAsset` (Wallpaper Engine's public `IScene` /
+`IEngine` reference) work when a script of the scene names one of them (`build_scene` checks the
+sources; otherwise nothing below exists).
+
+- **Scene model.** A created layer is a `lumenwall-scene` object added after build
+  (`Project::add_object`, the same conversion as `scene.json` objects): settings, model, material,
+  effects, constants and user-property bindings like a file layer, so every script member works.
+  A path names an image model (`models/*.json`), a particle system (`particles/*.json`) or a
+  sound; a configuration object is a `scene.json` object (a `text` member makes a text layer).
+  Workshop scripts name assets relative to their folder: `models/bar.json` resolves to
+  `models/workshop/<__workshopId>/bar.json` when the exact path does not exist.
+- **Pools.** `destroyLayer` parks the object and its runtime state (image, animated passes,
+  particle system, text); the next layer of the same configuration takes it back with its
+  initial setting values and a new id (stale script references stay dead). The scene model and
+  the GPU resources therefore grow with the peak number of live layers, not with the number of
+  `createLayer` calls. `registerAsset` prepares one object at once, set up with the scene, so the
+  first `createLayer` in the frame loop creates nothing.
+- **GPU.** New objects get their passes through `RenderScene::extend` with the scene's shader
+  provider (requests memoised), texture cache, compiled shaders, pipelines and bind group
+  layouts: only uniform blocks, quad vertices, composites, bind groups (and a particle stream)
+  are created. Uniform blocks and vertices go to the scene's dynamic buffer, which grows with
+  headroom.
+- **Order.** The frame operations of every drawn object are kept from load; when scripts create,
+  destroy or sort layers, the operations are rebuilt in the scripts' layer order
+  (`RenderScene::set_ops`) once per frame, and only the render bundles whose runs of passes
+  changed are re-recorded. `getLayerIndex` / `sortLayer` indices count every layer, sounds
+  included; a created layer goes on top.
+- **Timing.** Structural changes made during a frame's scripts (or at load, in `init`) are applied
+  after them, before drawing: a layer created and positioned in the same `update` appears at its
+  position, and a particle system created there starts at the origin the script gave it.
+- `ILayer.alignment` (read/write) moves the anchor of an image's rectangle.
+- `render_png` options for these checks: `--pointer X,Y`, `--click frames`, `--audio synthetic`
+  (a moving spectrum, nothing is played).
 
 ### Text junction (`TextSink`)
 
@@ -316,7 +357,11 @@ Every other text property scripts can change (`pointsize`, `color`, `alpha`, `vi
     §2.2 would reset `w` to 0 and hide layers whose shader reads `g_Color4`);
   - scripts on effect visibility and effect pass constants run (spec 06 §1.3: never executed);
   - groups are scriptable layers (spec 06 §1.2: not scriptable), so their scripts move or hide
-    their children.
+    their children;
+  - layer members read by scripts are copies (`lumenwall-script`), and sound objects are layers;
+  - cursor events go to the topmost layer under the cursor whose scripts handle cursor events
+    (Wallpaper Engine's Dino Run draws a full-screen post-process layer, scripted through its
+    effect, over the dinosaur that receives the clicks).
 - Text objects follow Wallpaper Engine rather than the reference renderer of spec 04 §18 (rule 5;
   evidence: the `size` the WE editor stores for every text of 3044659344, 3089056751 and
   3372348904, and their WE preview images registered against Lumenwall renders of the same scene):
@@ -384,6 +429,8 @@ LUMENWALL_STATS=1 ...                                          # fps, CPU/GPU ms
 cargo run -p lumenwall-engine --example render_png -- --size 1720x720 --frames 60 --save 0,30,59 3018340632
 cargo run -p lumenwall-engine --example render_png -- --no-particles --debug object=28 --debug pass-log <path>
 cargo run --release -p lumenwall-engine --example render_png -- --frames 90 --save 0,45,89 --pointer 1400,300 <web wallpaper>
+cargo run -p lumenwall-engine --example render_png -- --audio synthetic --frames 60 3372348904 # visualizer
+cargo run -p lumenwall-engine --example render_png -- --size 686x386 --frames 225 --pointer 214,340 --click 200 <dino_run> # jump into a coin
 ```
 
 Web wallpapers run in real time off screen (frame `i` at `1 + i/fps` s after the first painted
@@ -435,7 +482,17 @@ SceneScript (headless 1280×720, release, `render_png`; script time = `SceneScri
 | Local test variant of 3089056751 (8 animated scripts) | 7 `update`, 1 timer | 11–18 µs | every frame |
 
 JS heap 190–245 KiB per wallpaper; no heap allocation on the Rust side in a steady-state frame of
-numeric scripts (unit test `steady_state_frames_do_not_allocate`).
+numeric scripts (unit test `steady_state_frames_do_not_allocate`), also with 16 created layers
+moved every frame (`steady_state_with_created_layers_does_not_allocate`; vectors made with
+`new Vec3` or read from a layer each frame allocate in `lumenwall-script`).
+
+Created layers (same machine and settings, `render_png`; `created layers:` log line):
+
+| Wallpaper | Result |
+|---|---|
+| Dino Run, 60 s at 30 fps, 3 jumps | 2 objects prepared at load (coin, pickup particles: 1 ms each, first shader translations); 1 more coin object at run time (scene model 120 µs from the loose folder, GPU 49 µs); 12 `createLayer` served by the pools; 24 order rebuilds, 17 µs each (operations, segments, changed bundles); CPU 0.12 ms/frame (base revision 0.09 ms with its script disabled by the missing API), GPU 0.07 ms |
+| 3372348904, visualizer | 63 bars in `init`: 27 µs each in the scene model, 12 µs each on the GPU (5 µs once the shader request is memoised), one order rebuild (80 µs); +0.1 MiB GPU memory; script 106 µs/frame for 64 bars (JS), CPU 0.27 ms/frame |
+| Every other installed scene | pixel-identical to the base revision (particles off, frames 0 and 44) |
 
 Text (release, same machine, `cargo test -p lumenwall-engine --release --test text_content -- --ignored --nocapture`):
 
@@ -474,6 +531,9 @@ previous build without particles (the clock text of 3044659344 aside).
   wallpaper renders with real shaders (0 stand-in, bloom included), 1 image, 4 particle systems,
   live rain; the colour LUTs of `materials/lut` load as 32³ volume textures (`tests/volume_lut.rs`);
   3463520581 has 16 puppets, all skinned on the GPU, and 58 attached objects.
+- `cargo test -p lumenwall-engine -- --ignored` also runs `tests/runtime_layers.rs`: Dino Run
+  (coins from a registered model, pickup particles after a click, pools) and 3372348904 (63 bars,
+  one order rebuild, bars standing on their baseline only with a spectrum).
 - `cargo test -p lumenwall-engine -- --ignored` also runs `tests/text_content.rs` (3044659344,
   3372348904): every text drawn with the WE font shader, no regeneration in the steady state,
   one regeneration per `set_text` change, none for the same string.

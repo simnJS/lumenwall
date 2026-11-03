@@ -15,9 +15,11 @@
 //!   --scaling MODE     stretch | fit | fill | default (default: default)
 //!   --hwdec MODE       video decoding: auto | nvdec-copy | no (default: auto)
 //!   --no-particles     particle systems are not created
+//!   --pointer X,Y      pointer in output pixels from the top-left (default: mouse disabled)
+//!   --click a,b,c      frames during which the left button is held
+//!   --audio synthetic  feed a synthetic moving spectrum (nothing is played)
 //!   --debug VALUE      render debug switch (repeatable): base-only | pass-log |
 //!                      no-solid-final | object=<id> | skip-object=<id> | skip-effect=<id>
-//!   --pointer X,Y      pointer in output pixels from the top-left corner (default: none)
 //! ```
 //!
 //! Web wallpapers run in real time: frame `i` is taken `1 + i / fps` seconds after the page
@@ -56,7 +58,11 @@ fn main() {
             "--frames" => opts.frames = val().parse().unwrap_or(1),
             "--fps" => opts.fps = val().parse().unwrap_or(30.0),
             "--start" => opts.start_time = val().parse().unwrap_or(1.0),
-            "--audio" => opts.audio_level = val().parse().unwrap_or(0.0),
+            // A level (constant spectrum) or `synthetic` (a moving test spectrum).
+            "--audio" => match val().as_str() {
+                "synthetic" => opts.synthetic_audio = true,
+                v => opts.audio_level = v.parse().unwrap_or(0.0),
+            },
             "--save" => {
                 opts.save = val()
                     .split(',')
@@ -80,6 +86,12 @@ fn main() {
             }
             "--software" => opts.software = true,
             "--no-particles" => opts.particles = false,
+            "--click" => {
+                opts.clicks = val()
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+            }
             "--debug" => {
                 let v = val();
                 let d = &mut opts.debug;

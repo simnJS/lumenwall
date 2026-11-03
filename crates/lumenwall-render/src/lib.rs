@@ -43,8 +43,8 @@ pub use context::{ContextOptions, GpuCaps, GpuContext, GpuInstance};
 pub use dynbuf::{FrameInputs, UniformSlot};
 pub use error::{RenderError, Result};
 pub use graph::{
-    DEPTH_FORMAT, DepthState, Geometry, MeshAttribute, MeshId, MeshLayout, Op, PassDesc, PassId,
-    RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding, StreamAttribute, StreamId,
+    DEPTH_FORMAT, DepthState, Extension, Geometry, MeshAttribute, MeshId, MeshLayout, Op, PassDesc,
+    PassId, RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding, StreamAttribute, StreamId,
     StreamLayout, TextureId, TextureRef,
 };
 pub use headless::HeadlessOutput;

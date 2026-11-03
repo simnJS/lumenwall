@@ -37,6 +37,11 @@ pub struct HeadlessOptions {
     pub properties: BTreeMap<String, String>,
     /// Pointer in output pixels from the top-left corner; `None` = mouse disabled (centre).
     pub pointer: Option<Vec2>,
+    /// Frames during which the left button is held (scripts' `cursorDown`/`cursorUp`).
+    pub clicks: Vec<u32>,
+    /// Feed a synthetic, time-varying spectrum instead of silence (audio-reactive
+    /// wallpapers; nothing is played).
+    pub synthetic_audio: bool,
     pub debug: DebugPlan,
     /// Use a CPU adapter (lavapipe).
     pub software: bool,
@@ -62,6 +67,8 @@ impl Default for HeadlessOptions {
             particles: true,
             properties: BTreeMap::new(),
             pointer: None,
+            clicks: Vec::new(),
+            synthetic_audio: false,
             debug: DebugPlan::default(),
             software: false,
             hwdec: lumenwall_video::HwDecode::Auto,
@@ -85,6 +92,24 @@ pub struct HeadlessReport {
     pub gpu_memory: u64,
     pub live_particles: usize,
     pub pngs: Vec<PathBuf>,
+    /// Layers scripts created after load, when they do.
+    pub layers: Option<crate::scene::LayerStats>,
+}
+
+/// A deterministic spectrum for audio-reactive checks: bass-heavy, every band moving at its
+/// own rate, values in `[0, 1]`. The 32 and 16 band arrays average neighbouring bands.
+fn synthetic_spectrum(time: f64, a16: &mut [f32; 16], a32: &mut [f32; 32], a64: &mut [f32; 64]) {
+    for (i, v) in a64.iter_mut().enumerate() {
+        let x = i as f64 / 64.0;
+        let wave = 0.5 + 0.5 * (time * (2.0 + 5.0 * x) + i as f64 * 0.7).sin();
+        *v = ((1.0 - 0.7 * x) * (0.15 + 0.85 * wave)) as f32;
+    }
+    for (i, v) in a32.iter_mut().enumerate() {
+        *v = 0.5 * (a64[2 * i] + a64[2 * i + 1]);
+    }
+    for (i, v) in a16.iter_mut().enumerate() {
+        *v = 0.5 * (a32[2 * i] + a32[2 * i + 1]);
+    }
 }
 
 /// Renders `frames` frames of the wallpaper at `wallpaper` and writes the requested PNGs.
@@ -147,7 +172,7 @@ pub fn render_headless(
     std::fs::create_dir_all(&opts.out_dir)
         .map_err(|e| format!("{}: {e}", opts.out_dir.display()))?;
     let level = opts.audio_level;
-    let (a16, a32, a64) = ([level; 16], [level; 32], [level; 64]);
+    let (mut a16, mut a32, mut a64) = ([level; 16], [level; 32], [level; 64]);
     let mut uv = UvRange::FULL;
     let mut cpu = Duration::ZERO;
     let mut gpu_total = Duration::ZERO;
@@ -175,6 +200,9 @@ pub fn render_headless(
             ),
             None => pointer_disabled(uv),
         };
+        if opts.synthetic_audio {
+            synthetic_spectrum(time, &mut a16, &mut a32, &mut a64);
+        }
         let start = Instant::now();
         rt.update(
             &ctx,
@@ -193,7 +221,7 @@ pub fn render_headless(
                 screen: ScreenState {
                     size: (opts.width, opts.height),
                     cursor,
-                    left_down: false,
+                    left_down: opts.clicks.contains(&i),
                 },
             },
         );
@@ -262,6 +290,20 @@ pub fn render_headless(
             tick.as_secs_f64() * 1e6,
             s.memory_used as f64 / 1024.0,
             opts.frames,
+        );
+    }
+    report.layers = rt.layer_stats();
+    if let Some(l) = report.layers {
+        let us = |d: Duration, n: u32| d.as_secs_f64() * 1e6 / f64::from(n.max(1));
+        tracing::info!(
+            "created layers: {} object(s) added ({:.0} µs each), {} reused, {} set up on the GPU ({:.0} µs each), {} order rebuild(s) ({:.0} µs each)",
+            l.objects_added,
+            us(l.add_time, l.objects_added),
+            l.reused,
+            l.gpu_created,
+            us(l.gpu_time, l.gpu_created),
+            l.reorders,
+            us(l.reorder_time, l.reorders),
         );
     }
     rt.shutdown_scripts(&mut wp.project);

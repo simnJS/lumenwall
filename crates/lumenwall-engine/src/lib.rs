@@ -40,7 +40,9 @@ pub use plan::{
     AudioPlan, DebugPlan, EngineControl, EnginePlan, OutputMode, PausePlan, ReloadDone, Stopped,
     TargetPlan,
 };
-pub use scene::{FrameState, SceneOptions, SceneRuntime, SceneStats, ScreenState, build_scene};
+pub use scene::{
+    FrameState, LayerStats, SceneOptions, SceneRuntime, SceneStats, ScreenState, build_scene,
+};
 pub use script::TextSink;
 pub use shaders::{ShaderProvider, default_provider};
 pub use texture::{LoadedTexture, TextureCache};

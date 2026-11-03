@@ -135,6 +135,19 @@ impl Settings {
     pub fn push_constant(&mut self, value: Value) -> SettingId {
         self.push(value, SettingMeta::default())
     }
+
+    /// Values of the settings at positions `range` (see [`crate::Project::add_object`]).
+    pub fn values_in(&self, range: std::ops::Range<usize>) -> &[Value] {
+        self.values.get(range).unwrap_or(&[])
+    }
+
+    /// Writes `values` into the settings from position `start` on (resets an object added
+    /// with [`crate::Project::add_object`] to its initial values when it is reused).
+    pub fn restore(&mut self, start: usize, values: &[Value]) {
+        if let Some(dst) = self.values.get_mut(start..start + values.len()) {
+            dst.clone_from_slice(values);
+        }
+    }
 }
 
 /// Converts a JSON number (or numeric string for combos) to the decimal text used by combo

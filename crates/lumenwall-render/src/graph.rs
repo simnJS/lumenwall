@@ -355,7 +355,8 @@ const RESOLUTION_NAMES: [&str; MAX_SLOTS] = [
     "g_Texture7Resolution",
 ];
 
-/// Load-time builder of a [`RenderScene`].
+/// Load-time builder of a [`RenderScene`], also used to add passes to a built scene
+/// ([`RenderScene::extend`]).
 pub struct SceneBuilder<'c> {
     ctx: &'c GpuContext,
     /// Render targets: create scene, image and effect targets here.
@@ -371,6 +372,19 @@ pub struct SceneBuilder<'c> {
     passes: Vec<PassRecord>,
     ops: Vec<Op>,
     scene_size: (f32, f32),
+    /// The built scene being extended: uniform blocks and vertices go to its dynamic buffer.
+    live: Option<&'c mut RenderScene>,
+    /// Id of the first pass added by this builder (passes of the extended scene come first).
+    pass_base: u32,
+}
+
+/// Passes and frame operations added by [`RenderScene::extend`]. The operations are not
+/// placed in the frame: the caller inserts them where the layer belongs
+/// ([`RenderScene::set_ops`]).
+#[derive(Clone, Debug, Default)]
+pub struct Extension {
+    pub passes: Vec<PassId>,
+    pub ops: Vec<Op>,
 }
 
 impl<'c> SceneBuilder<'c> {
@@ -522,6 +536,22 @@ impl<'c> SceneBuilder<'c> {
             passes: Vec::new(),
             ops: Vec::new(),
             scene_size,
+            live: None,
+            pass_base: 0,
+        }
+    }
+
+    /// Frame operations appended so far ([`Self::push`] and the image helpers).
+    #[must_use]
+    pub fn ops(&self) -> &[Op] {
+        &self.ops
+    }
+
+    /// The uniform shadow passes write into: the extended scene's when extending.
+    fn dyn_shadow(&mut self) -> &mut Shadow {
+        match &mut self.live {
+            Some(scene) => scene.dynbuf.shadow_mut(),
+            None => self.dynbuf.shadow_mut(),
         }
     }
 
@@ -570,7 +600,10 @@ impl<'c> SceneBuilder<'c> {
 
     /// Vertices in the dynamic region (rewritable per frame).
     pub fn add_vertices(&mut self, v: &[Vertex]) -> VertexRange {
-        self.dynbuf.alloc_vertices(v)
+        match &mut self.live {
+            Some(scene) => scene.dynbuf.alloc_vertices(v),
+            None => self.dynbuf.alloc_vertices(v),
+        }
     }
 
     /// Static 16-bit indices.
@@ -631,17 +664,29 @@ impl<'c> SceneBuilder<'c> {
         {
             return Err(RenderError::BadHandle("mesh"));
         }
-        let uniform = shader
-            .interface()
-            .uniform_size
-            .map(|s| self.dynbuf.alloc_uniform(s));
+        let size = shader.interface().uniform_size;
+        let uniform = size.map(|s| match &mut self.live {
+            Some(scene) => scene.dynbuf.alloc_uniform(s),
+            None => self.dynbuf.alloc_uniform(s),
+        });
         if let Some(block) = uniform {
-            let fields = shader.interface().uniforms.clone();
+            let fields = self.shaders[desc.shader.0 as usize]
+                .interface()
+                .uniforms
+                .clone();
             let ts = [1.0 / self.scene_size.0, 1.0 / self.scene_size.1];
             for f in &fields {
                 let slot = f.slot(block.offset);
                 let name = f.name.as_str();
-                let sh = self.dynbuf.shadow_mut();
+                let res = RESOLUTION_NAMES
+                    .iter()
+                    .position(|r| *r == name)
+                    .and_then(|n| match (n, desc.slot0_variants.first()) {
+                        (0, Some(v)) => Some(*v),
+                        _ => desc.slots[n].map(|b| b.texture),
+                    })
+                    .map(|r| self.resolution(r));
+                let sh = self.dyn_shadow();
                 if IDENTITY_MATRICES.contains(&name) {
                     sh.write_floats(&slot, &identity_for(&slot.ty));
                 } else if ONE_DEFAULTS.contains(&name) {
@@ -650,26 +695,22 @@ impl<'c> SceneBuilder<'c> {
                     sh.write_floats(&slot, &ts);
                 } else if name == "g_TexelSizeHalf" {
                     sh.write_floats(&slot, &[ts[0] * 0.5, ts[1] * 0.5]);
-                } else if let Some(n) = RESOLUTION_NAMES.iter().position(|r| *r == name) {
-                    let r = match (n, desc.slot0_variants.first()) {
-                        (0, Some(v)) => Some(*v),
-                        _ => desc.slots[n].map(|b| b.texture),
-                    };
-                    if let Some(r) = r {
-                        let res = self.resolution(r);
-                        self.dynbuf.shadow_mut().write_floats(&slot, &res);
-                    }
+                } else if let Some(res) = res {
+                    sh.write_floats(&slot, &res);
                 }
             }
         }
         self.passes.push(PassRecord { desc, uniform });
-        Ok(PassId(self.passes.len() as u32 - 1))
+        Ok(PassId(self.pass_base + self.passes.len() as u32 - 1))
     }
 
     /// Write handle of a uniform of a pass (load time: resolve names once).
     #[must_use]
     pub fn uniform(&self, pass: PassId, name: &str) -> Option<UniformSlot> {
-        let rec = self.passes.get(pass.0 as usize)?;
+        let Some(local) = pass.0.checked_sub(self.pass_base) else {
+            return self.live.as_ref()?.uniform(pass, name);
+        };
+        let rec = self.passes.get(local as usize)?;
         let block = rec.uniform?;
         let shader = self.shaders.get(rec.desc.shader.0 as usize)?;
         shader.interface().field(name).map(|f| f.slot(block.offset))
@@ -677,7 +718,7 @@ impl<'c> SceneBuilder<'c> {
 
     /// Initial values (material constants, image values…).
     pub fn shadow_mut(&mut self) -> &mut Shadow {
-        self.dynbuf.shadow_mut()
+        self.dyn_shadow()
     }
 
     /// Append a frame operation.
@@ -752,29 +793,8 @@ impl<'c> SceneBuilder<'c> {
             label: Some("lumenwall.uniforms.bgl"),
             entries: &[uniform_entry(0, true), uniform_entry(1, false)],
         });
-        let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lumenwall.uniforms.bg"),
-            layout: &uniform_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: dynbuf.buffer(),
-                        offset: 0,
-                        size: wgpu::BufferSize::new(u64::from(dynbuf.binding_size())),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: dynbuf.buffer(),
-                        offset: 0,
-                        size: wgpu::BufferSize::new(u64::from(frame_globals::SIZE)),
-                    }),
-                },
-            ],
-        });
-        ctx.note_resources(2);
+        ctx.note_resources(1);
+        let uniform_bg = uniform_bind_group(ctx, &uniform_layout, &dynbuf);
 
         // The 1×1×1 volume exists only when a shader has a `texture_3d` slot.
         let default_volume = self
@@ -814,6 +834,11 @@ impl<'c> SceneBuilder<'c> {
             feedback: false,
             accumulates: false,
             last_encode: Duration::ZERO,
+            shaders: Vec::new(),
+            pipelines: HashMap::new(),
+            scene_size: self.scene_size,
+            bundles_stale: false,
+            bundle_runs: Vec::new(),
         };
 
         let mut pipelines: HashMap<PipelineKey, wgpu::RenderPipeline> = HashMap::new();
@@ -822,10 +847,120 @@ impl<'c> SceneBuilder<'c> {
             let pass = scene.compile_pass(ctx, shader, rec, &mut pipelines)?;
             scene.passes.push(pass);
         }
+        // Kept for passes added later (RenderScene::extend): modules and pipelines are reused.
+        scene.shaders = std::mem::take(&mut self.shaders);
+        scene.pipelines = pipelines;
         scene.analyse_ops();
         scene.rebuild_bindings(ctx)?;
         Ok(scene)
     }
+
+    /// Compiles the passes added to a scene being extended and gives the scene its resources
+    /// back (see [`RenderScene::extend`]).
+    fn finish_extension(mut self) -> Result<Extension> {
+        let ctx = self.ctx;
+        let scene = self
+            .live
+            .take()
+            .expect("finish_extension on an extending builder");
+        scene.targets = std::mem::take(&mut self.targets);
+        scene.textures = std::mem::take(&mut self.textures);
+        scene.streams = std::mem::take(&mut self.streams);
+        let shaders = std::mem::take(&mut self.shaders);
+        for s in &shaders[scene.interfaces.len()..] {
+            scene.interfaces.push(s.interface().clone());
+        }
+        if scene.default_volume.is_none() && shaders.iter().any(|s| s.interface().volume_slots != 0)
+        {
+            scene.default_volume = Some(default_volume(ctx));
+        }
+        // The shadow may have grown even if nothing is compiled below: the GPU buffer follows.
+        let rebound = scene.dynbuf.sync(ctx);
+        if rebound {
+            scene.uniform_bg = uniform_bind_group(ctx, &scene.uniform_layout, &scene.dynbuf);
+            // Bundles recorded the old buffer or binding size: re-recorded before the next frame.
+            scene.bundles_stale = true;
+            scene.bundle_runs.clear();
+        }
+        if !self.indices.is_empty() || !self.skins.is_empty() {
+            scene.shaders = shaders;
+            return Err(RenderError::Pass {
+                label: "extension".into(),
+                reason: "indexed or skinned geometry cannot be added to a built scene".into(),
+            });
+        }
+        for rec in &self.passes {
+            let (Some(block), Some(shader)) =
+                (rec.uniform, shaders.get(rec.desc.shader.0 as usize))
+            else {
+                continue;
+            };
+            for f in &shader.interface().uniforms {
+                if frame_globals::FIELDS.iter().any(|g| g.0 == f.name) {
+                    patches_for(&f.name, &f.slot(block.offset), &mut scene.patches);
+                }
+            }
+        }
+        let first = scene.passes.len();
+        let mut pipelines = std::mem::take(&mut scene.pipelines);
+        let mut compiled = Ok(());
+        for rec in &self.passes {
+            let shader = &shaders[rec.desc.shader.0 as usize];
+            match scene.compile_pass(ctx, shader, rec, &mut pipelines) {
+                Ok(p) => scene.passes.push(p),
+                Err(e) => {
+                    compiled = Err(e);
+                    break;
+                }
+            }
+        }
+        scene.pipelines = pipelines;
+        scene.shaders = shaders;
+        for i in first..scene.passes.len() {
+            scene.hazard_for(ctx, i);
+            scene.bind_groups_for(ctx, i);
+        }
+        scene.dirty = true;
+        compiled?;
+        Ok(Extension {
+            passes: (first..scene.passes.len())
+                .map(|i| PassId(i as u32))
+                .collect(),
+            ops: std::mem::take(&mut self.ops),
+        })
+    }
+}
+
+/// Uniform bind group: pass blocks (dynamic offset) and the frame globals block.
+fn uniform_bind_group(
+    ctx: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    dynbuf: &DynamicBuffer,
+) -> wgpu::BindGroup {
+    let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("lumenwall.uniforms.bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: dynbuf.buffer(),
+                    offset: 0,
+                    size: wgpu::BufferSize::new(u64::from(dynbuf.binding_size())),
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: dynbuf.buffer(),
+                    offset: 0,
+                    size: wgpu::BufferSize::new(u64::from(frame_globals::SIZE)),
+                }),
+            },
+        ],
+    });
+    ctx.note_resources(1);
+    bg
 }
 
 /// Format of a default-fed vertex input.
@@ -1006,6 +1141,15 @@ pub struct RenderScene {
     feedback: bool,
     accumulates: bool,
     last_encode: Duration,
+    /// Compiled shaders and pipelines, reused by passes added after load.
+    shaders: Vec<PassShader>,
+    pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
+    scene_size: (f32, f32),
+    /// Segments and bundles must be rebuilt before the next frame (structure changed).
+    bundles_stale: bool,
+    /// Passes recorded in each of `bundles`: a rebuild reuses the bundle of an unchanged
+    /// run. Emptied when bind groups or the dynamic buffer change.
+    bundle_runs: Vec<Vec<usize>>,
 }
 
 /// Default number of extra frames rendered after the last change when the
@@ -1475,83 +1619,160 @@ impl RenderScene {
         }
         // Hazards: a pass sampling its own destination reads a copy (spec 04 §24.6).
         for i in 0..self.passes.len() {
-            let desc = &self.passes[i].desc;
-            let target = desc.target;
-            let samples_target = desc
-                .slots
-                .iter()
-                .flatten()
-                .map(|b| b.texture)
-                .chain(desc.slot0_variants.iter().copied())
-                .any(|t| t == TextureRef::Target(target));
-            let scratch = if samples_target {
-                let size = self.targets.get(target).size();
-                Some(self.targets.scratch(ctx, size))
-            } else {
-                None
-            };
-            self.passes[i].hazard_scratch = scratch;
+            self.hazard_for(ctx, i);
         }
-
         for i in 0..self.passes.len() {
-            let iface = &self.interfaces[self.passes[i].shader.0 as usize];
-            let (slots_mask, volume_mask) = (iface.slots, iface.volume_slots);
-            self.texture_layout(ctx, (slots_mask, volume_mask));
-            let pass = &self.passes[i];
-            let hazard = pass.hazard_scratch.map(|s| (pass.desc.target, s));
-            let variants: Vec<Option<TextureRef>> = if pass.desc.slot0_variants.is_empty() {
-                vec![None]
-            } else {
-                pass.desc.slot0_variants.iter().copied().map(Some).collect()
-            };
-            let (bgl, _) = &self.texture_layouts[&(slots_mask, volume_mask)];
-            let mut groups = Vec::with_capacity(variants.len());
-            for v in variants {
-                let mut views = Vec::new();
-                for n in 0..MAX_SLOTS {
-                    if slots_mask & (1 << n) == 0 {
-                        continue;
-                    }
-                    let mut b = pass.desc.slots[n];
-                    if n == 0
-                        && let Some(t) = v
-                    {
-                        b = Some(SlotBinding {
-                            texture: t,
-                            sampler: b.and_then(|b| b.sampler),
-                        });
-                    }
-                    let volume = volume_mask & (1 << n) != 0;
-                    views.push((n as u32, self.view_and_sampler(ctx, b, hazard, volume)));
-                }
-                let mut entries = Vec::with_capacity(views.len() * 2);
-                for (n, (view, sampler)) in &views {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 * n,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    });
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 * n + 1,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    });
-                }
-                groups.push(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&pass.label),
-                    layout: bgl,
-                    entries: &entries,
-                }));
-                ctx.note_resources(1);
-            }
-            self.passes[i].bind_groups = groups;
-            self.passes[i].variant = self.passes[i]
-                .variant
-                .min(self.passes[i].bind_groups.len() - 1);
+            self.bind_groups_for(ctx, i);
         }
-
+        self.bundle_runs.clear();
         self.build_segments();
         self.build_bundles(ctx);
+        self.bundles_stale = false;
         self.dirty = true;
         Ok(())
+    }
+
+    /// Scratch copy of the target of pass `i` when it samples it (spec 04 §24.6).
+    fn hazard_for(&mut self, ctx: &GpuContext, i: usize) {
+        let desc = &self.passes[i].desc;
+        let target = desc.target;
+        let samples_target = desc
+            .slots
+            .iter()
+            .flatten()
+            .map(|b| b.texture)
+            .chain(desc.slot0_variants.iter().copied())
+            .any(|t| t == TextureRef::Target(target));
+        let scratch = if samples_target {
+            let size = self.targets.get(target).size();
+            Some(self.targets.scratch(ctx, size))
+        } else {
+            None
+        };
+        self.passes[i].hazard_scratch = scratch;
+    }
+
+    /// Texture bind groups of pass `i` (one per slot-0 variant).
+    fn bind_groups_for(&mut self, ctx: &GpuContext, i: usize) {
+        let iface = &self.interfaces[self.passes[i].shader.0 as usize];
+        let (slots_mask, volume_mask) = (iface.slots, iface.volume_slots);
+        self.texture_layout(ctx, (slots_mask, volume_mask));
+        let pass = &self.passes[i];
+        let hazard = pass.hazard_scratch.map(|s| (pass.desc.target, s));
+        let variants: Vec<Option<TextureRef>> = if pass.desc.slot0_variants.is_empty() {
+            vec![None]
+        } else {
+            pass.desc.slot0_variants.iter().copied().map(Some).collect()
+        };
+        let (bgl, _) = &self.texture_layouts[&(slots_mask, volume_mask)];
+        let mut groups = Vec::with_capacity(variants.len());
+        for v in variants {
+            let mut views = Vec::new();
+            for n in 0..MAX_SLOTS {
+                if slots_mask & (1 << n) == 0 {
+                    continue;
+                }
+                let mut b = pass.desc.slots[n];
+                if n == 0
+                    && let Some(t) = v
+                {
+                    b = Some(SlotBinding {
+                        texture: t,
+                        sampler: b.and_then(|b| b.sampler),
+                    });
+                }
+                let volume = volume_mask & (1 << n) != 0;
+                views.push((n as u32, self.view_and_sampler(ctx, b, hazard, volume)));
+            }
+            let mut entries = Vec::with_capacity(views.len() * 2);
+            for (n, (view, sampler)) in &views {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 2 * n,
+                    resource: wgpu::BindingResource::TextureView(view),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 2 * n + 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                });
+            }
+            groups.push(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&pass.label),
+                layout: bgl,
+                entries: &entries,
+            }));
+            ctx.note_resources(1);
+        }
+        self.passes[i].bind_groups = groups;
+        self.passes[i].variant = self.passes[i]
+            .variant
+            .min(self.passes[i].bind_groups.len() - 1);
+    }
+
+    /// Adds passes to the built scene (layers created after load, e.g. SceneScript
+    /// `thisScene.createLayer`). `f` receives a builder whose `targets`, textures, shaders,
+    /// streams and dynamic buffer are this scene's: already compiled shader modules and
+    /// pipelines (by shader, blend, write mask, cull) and bind group layouts are reused, and
+    /// only the new passes get pipelines (from the cache when possible) and bind groups.
+    /// Uniform blocks and vertices are appended to the dynamic buffer, which grows with
+    /// headroom (a reallocation re-records the bundles before the next frame).
+    ///
+    /// The frame operations `f` pushes are returned, not placed: put them where the layer
+    /// belongs with [`Self::set_ops`]. Indexed and skinned geometry (puppet meshes) cannot be
+    /// added. On error the passes compiled before the failure stay unused.
+    pub fn extend<'a, R>(
+        &'a mut self,
+        ctx: &'a GpuContext,
+        f: impl FnOnce(&mut SceneBuilder<'a>) -> R,
+    ) -> (R, Result<Extension>) {
+        let align = ctx.device().limits().min_uniform_buffer_offset_alignment;
+        let mut b = SceneBuilder {
+            ctx,
+            targets: std::mem::take(&mut self.targets),
+            textures: std::mem::take(&mut self.textures),
+            shaders: std::mem::take(&mut self.shaders),
+            dynbuf: DynamicBufferBuilder::new(align),
+            indices: Vec::new(),
+            skins: Vec::new(),
+            streams: std::mem::take(&mut self.streams),
+            // Layers created after load are 2D quads: no new mesh and no new depth target.
+            meshes: Vec::new(),
+            depth_targets: Vec::new(),
+            passes: Vec::new(),
+            ops: Vec::new(),
+            scene_size: self.scene_size,
+            pass_base: self.passes.len() as u32,
+            live: Some(self),
+        };
+        let r = f(&mut b);
+        (r, b.finish_extension())
+    }
+
+    /// Frame operations in order.
+    #[must_use]
+    pub fn ops(&self) -> &[Op] {
+        &self.ops
+    }
+
+    /// Replaces the frame operations (layers added, removed or reordered after load). Passes
+    /// left out are kept, compiled, for a later reuse. Cross-frame dependencies are analysed
+    /// again; segments and bundles are rebuilt once, before the next frame.
+    pub fn set_ops(&mut self, ops: Vec<Op>) {
+        self.ops = ops;
+        self.accumulates = false;
+        self.feedback = false;
+        self.analyse_ops();
+        self.bundles_stale = true;
+        self.dirty = true;
+    }
+
+    /// Rebuilds segments and bundles now if the structure changed (also done by
+    /// [`Self::encode`]).
+    pub fn refresh(&mut self, ctx: &GpuContext) {
+        if self.bundles_stale {
+            self.build_segments();
+            self.build_bundles(ctx);
+            self.bundles_stale = false;
+        }
     }
 
     fn build_segments(&mut self) {
@@ -1697,9 +1918,17 @@ impl RenderScene {
         }
     }
 
-    /// Group runs of frozen passes (a single bind group) into render bundles.
+    /// Group runs of frozen passes (a single bind group) into render bundles. A run recorded
+    /// by the previous build is reused as is (layers added, removed or hidden re-record only
+    /// the runs they change).
     fn build_bundles(&mut self, ctx: &GpuContext) {
         let mut bundles = Vec::new();
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        let mut previous: HashMap<Vec<usize>, wgpu::RenderBundle> =
+            std::mem::take(&mut self.bundle_runs)
+                .into_iter()
+                .zip(std::mem::take(&mut self.bundles))
+                .collect();
         let mut new_segments = Vec::with_capacity(self.segments.len());
         let segments = std::mem::take(&mut self.segments);
         for seg in segments {
@@ -1717,11 +1946,17 @@ impl RenderScene {
                     });
                     let mut out = Vec::new();
                     let mut run: Vec<usize> = Vec::new();
-                    let close_run =
+                    let mut close_run =
                         |run: &mut Vec<usize>,
                          out: &mut Vec<Item>,
                          bundles: &mut Vec<wgpu::RenderBundle>| {
                             if run.is_empty() {
+                                return;
+                            }
+                            if let Some(b) = previous.remove(run.as_slice()) {
+                                bundles.push(b);
+                                runs.push(std::mem::take(run));
+                                out.push(Item::Bundle(bundles.len() - 1));
                                 return;
                             }
                             let mut enc = ctx.device().create_render_bundle_encoder(
@@ -1740,8 +1975,8 @@ impl RenderScene {
                                 label: Some("lumenwall.bundle"),
                             }));
                             ctx.note_resources(1);
+                            runs.push(std::mem::take(run));
                             out.push(Item::Bundle(bundles.len() - 1));
-                            run.clear();
                         };
                     for item in items {
                         let Item::Pass(p) = item else {
@@ -1770,6 +2005,7 @@ impl RenderScene {
         }
         self.segments = new_segments;
         self.bundles = bundles;
+        self.bundle_runs = runs;
     }
 
     /// Feed the per-frame engine values (frame globals + pass copies).
@@ -1856,6 +2092,7 @@ impl RenderScene {
         if changed {
             self.build_segments();
             self.build_bundles(ctx);
+            self.bundles_stale = false;
             self.dirty = true;
         }
     }
@@ -1887,6 +2124,7 @@ impl RenderScene {
     /// Upload the dirty uniforms (one `write_buffer`) and record the frame.
     pub fn encode(&mut self, ctx: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
         let t0 = Instant::now();
+        self.refresh(ctx);
         let changed = self.dynbuf.flush(ctx.queue()) || self.dirty;
         self.dirty = false;
         if changed {
