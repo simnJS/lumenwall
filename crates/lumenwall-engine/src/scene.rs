@@ -878,6 +878,10 @@ pub fn build_scene(
         }
     }
 
+    if let Some(s3d) = &mut scene3d {
+        // Spec 09 §3.4 step 8: camera fade after the bloom.
+        s3d.emit_fade(&mut b);
+    }
     stats.texts = texts.len();
     // Children hanging from puppet attachments (spec 08 §9.10).
     let mut attached = attachments(project, &build, &raw, &puppet_of, &puppets);
@@ -1806,7 +1810,7 @@ impl SceneRuntime {
         // 3D content (spec 09 §3.4 steps 1, 2): camera, lights, objects.
         let camera3d = self.scene3d.as_mut().map(|s| {
             let cam = s.camera(project, f.time, (self.size.x, self.size.y));
-            s.update(ctx, &mut self.scene, project, &cam);
+            s.update(ctx, &mut self.scene, project, &cam, f.time);
             cam
         });
         let center = Vec3::new(self.size.x * 0.5, self.size.y * 0.5, 0.0);

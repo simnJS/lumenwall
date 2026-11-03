@@ -154,6 +154,12 @@ buffer, no extra pass, no per-frame work).
   with a warning), `math::perspective_we`. Paths (`camera.paths`): played in order and looped,
   linear interpolation, instants stretched to the duration when the last one differs (`demon_core`).
   `LUMENWALL_STATIC_CAMERA=1` keeps the `scene.json` pose (debugging aid).
+  `camerashake` (QO-3D-25, provisional, `// parity:`): the same offset added to the eye and the
+  target, Perlin slices (`lumenwall_particles::noise`) of distinct seeds per axis at
+  `t·speed`, the vertical one with a double-frequency octave × `roughness`, × `amplitude`.
+  `camerafade` with two paths or more (QO-3D-24, provisional): a pass after the bloom darkens
+  the target (black, alpha `1 − φ`), `φ` going 1 → 0 over the last 0.5 s of a path and 0 → 1
+  over the first 0.5 s of the next (not at the very start); the pass is disabled while `φ` = 1.
 - **Lights**: the first four visible `point`/`lpoint` lights: `g_LightsPosition[4]`,
   `g_LightsColorRadius[4]` = (colour × intensity, radius), unused slots zero, and the same lights
   for the `LightingV1` module of lumenwall-shader (`g_LumenLightPosition[4]` with the exponent,
@@ -199,7 +205,7 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | Feature | Current behaviour |
 |---|---|
 | 3D: integer colour properties | `"1 0 0"` is read as 0–255 (spec 02 Q1): `fantasticcar`'s body, `demon_core`'s core and `retro`'s stripes (through `usershadervalues`) come out black while their previews show red. Renders with `--set "carbodycolor=1.0 0.0 0.0"` match. To settle in spec 02 Q1 (the 3D previews are evidence for floats). `usershadervalues` are applied to 3D passes only for now (images would turn `retro` black). |
-| 3D: P2/P3 of spec 09 | No fog, no `_rt_MipMappedFrameBuffer` mips, no shadows, volumetrics or HDR, spot/tube/directional lights skipped, no camera fade or shake, no parallax in perspective, models without skeleton animation. |
+| 3D: P2/P3 of spec 09 | No fog (keys unknown), no `_rt_MipMappedFrameBuffer` mips (no installed scene reads it), no shadows, volumetrics or HDR, spot/tube/directional lights skipped, no parallax in perspective (`parallaxDepth` of models ignored), models without skeleton animation, no `TEX<n>FORMAT` from `formatcombo` (materials that need it set it, e.g. `fantasticcar`). |
 | Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
 | Integer colour strings | `lumenwall-scene` reads `"1 1 1"` as 0–255 (spec 02 Q1): the default white clock tint of 3089056751 draws black, while its WE preview shows white (with `--set "clocktint=1.0 1.0 1.0"` Lumenwall matches the preview). To settle in spec 02 Q1. |
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
@@ -444,4 +450,9 @@ previous build without particles (the clock text of 3044659344 aside).
   `tests/puppet_alloc.rs`: the per-frame puppet path allocates nothing.
 - `cargo run -p lumenwall-engine --example render_png -- <ids>`: visual checks (`--start T` sets
   the scene time, `--audio L` feeds a constant spectrum to audio-reactive scenes).
-- `model3d::tests`: vectors M-1, M-2, N-1, C-1 to C-3 and R-1 of spec 09 §4.5.
+- `model3d::tests`: vectors M-1, M-2, N-1, C-1 to C-3 and R-1 of spec 09 §4.5, camera fade
+  ramps and shake determinism.
+- `tests/scene3d_content.rs` (`--ignored`, GPU + `LUMENWALL_WE_ASSETS`): the nine installed 3D
+  projects render with their expected 3D objects and meshes, no stand-in shader, no skipped
+  object; `arsenal`'s per-frame update (camera path, lights, uniforms) performs zero heap
+  allocations over 120 frames and dirties every frame.

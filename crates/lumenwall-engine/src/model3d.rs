@@ -415,6 +415,9 @@ pub(crate) struct Builder3d {
     paths: Vec<CameraPath>,
     /// §3.6: blended objects sorted back to front.
     sort_transparent: bool,
+    shake: Option<Shake>,
+    camera_fade: bool,
+    fade: Option<FadePass>,
     common: Common,
     objects: HashMap<usize, PreparedObject>,
     lights: Vec<LightRuntime>,
@@ -640,6 +643,16 @@ impl Builder3d {
             // sun quad that comes first in the file (otherwise the quad's depth cuts a hole in
             // the terrain). Absent counts as true, like the key of WE's 3D templates.
             sort_transparent: scene.general.transparent_sorting != Some(false),
+            shake: v
+                .value(scene.general.camera_shake)
+                .boolean()
+                .then(|| Shake {
+                    amplitude: v.value(scene.general.camera_shake_amplitude).float(),
+                    roughness: v.value(scene.general.camera_shake_roughness).float(),
+                    speed: v.value(scene.general.camera_shake_speed).float(),
+                }),
+            camera_fade: v.value(scene.general.camera_fade).boolean(),
+            fade: None,
             common: Common {
                 target,
                 reflection: None,
@@ -1071,9 +1084,49 @@ impl Builder3d {
     }
 
     /// Runtime part, once every draw exists. Live uniforms join the scene's list.
+    /// Camera fade (spec 09 §3.2.5): a pass drawn after everything else (bloom included) that
+    /// darkens the scene target around path changes. Only with `camerafade` and two paths or
+    /// more; disabled while the fade factor is 1.
+    pub fn emit_fade(&mut self, b: &mut SceneBuilder<'_>) {
+        if !self.camera_fade || self.paths.len() < 2 || !self.perspective {
+            return;
+        }
+        const FADE_WGSL: &str = "struct Pass { g_LumenFade: vec4<f32> }\n@group(0) @binding(0) var<uniform> u: Pass;\n@vertex fn vs(@location(0) a_Position: vec3<f32>) -> @builtin(position) vec4<f32> { return vec4<f32>(a_Position.xy, 0.0, 1.0); }\n@fragment fn fs() -> @location(0) vec4<f32> { return u.g_LumenFade; }\n";
+        let shader =
+            lumenwall_render::ShaderDesc::from_wgsl("lumenwall.camerafade", FADE_WGSL, "vs", "fs")
+                .map_err(|e| e.to_string())
+                .and_then(|d| b.add_shader(d).map_err(|e| e.to_string()));
+        let shader = match shader {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("camera fade not drawn: {e}");
+                return;
+            }
+        };
+        let quad = b.add_vertices(&lumenwall_render::math::unit_quad());
+        let mut desc = PassDesc::new(
+            "camera fade",
+            shader,
+            self.common.target,
+            Geometry::Vertices(quad),
+        );
+        desc.blend = BlendMode::Translucent;
+        let Ok(pass) = b.add_pass(desc) else { return };
+        b.push(Op::Draw(pass));
+        if let Some(slot) = b.uniform(pass, "g_LumenFade") {
+            self.fade = Some(FadePass {
+                pass,
+                slot,
+                shown: true,
+            });
+        }
+    }
+
     pub fn finish(self, live: &mut Vec<LiveUniform>) -> Scene3d {
         live.extend(self.live);
         Scene3d {
+            shake: self.shake,
+            fade: self.fade,
             perspective: self.perspective,
             pose: self.pose,
             fov: self.fov,
@@ -1146,7 +1199,59 @@ fn object_values(project: &Project, idx: ObjectIndex) -> Option<(SettingId, Sett
 }
 
 /// 3D state of a running scene.
+/// Camera shake of `general` (spec 09 §3.2.6).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shake {
+    amplitude: f32,
+    roughness: f32,
+    speed: f32,
+}
+
+impl Shake {
+    /// Offset added to the eye and the target (QO-3D-25, provisional): Perlin noise slices of
+    /// distinct seeds per axis at `t·speed`, the vertical one with a double-frequency octave
+    /// weighted by `roughness`. Deterministic and frame-rate independent.
+    fn offset(&self, time: f64) -> Vec3 {
+        // parity: WE's shake formula is unknown; this follows the proposal of spec 09 §3.2.6.
+        let x = time * f64::from(self.speed);
+        let n = |seed: f64, x: f64| lumenwall_particles::noise(x, seed, 0.5) as f32;
+        let y = n(31.7, x) + self.roughness * n(53.3, 2.0 * x);
+        Vec3::new(n(11.3, x), y, n(71.9, x)) * self.amplitude
+    }
+}
+
+/// The camera fade pass and its colour uniform (black, alpha `1 − φ`).
+struct FadePass {
+    pass: PassId,
+    slot: UniformSlot,
+    shown: bool,
+}
+
+/// Fade factor `φ` of spec 09 §3.2.5 (QO-3D-24, provisional): 1 → 0 over the last 0.5 s of a
+/// path, 0 → 1 over the first 0.5 s of the next (not at the very start of the wallpaper).
+fn fade_factor(paths: &[CameraPath], time: f64) -> f32 {
+    const RAMP: f64 = 0.5;
+    let total: f64 = paths.iter().map(|p| f64::from(p.duration)).sum();
+    if paths.len() < 2 || total <= 0.0 {
+        return 1.0;
+    }
+    let mut t = time.rem_euclid(total);
+    let first_cycle = time < total;
+    for (k, p) in paths.iter().enumerate() {
+        let d = f64::from(p.duration);
+        if t < d {
+            let fade_in = if k == 0 && first_cycle { 1.0 } else { t / RAMP };
+            let fade_out = (d - t) / RAMP;
+            return fade_in.min(fade_out).clamp(0.0, 1.0) as f32;
+        }
+        t -= d;
+    }
+    1.0
+}
+
 pub(crate) struct Scene3d {
+    shake: Option<Shake>,
+    fade: Option<FadePass>,
     perspective: bool,
     paths: Vec<CameraPath>,
     /// Static pose of `scene.json`.
@@ -1161,9 +1266,10 @@ pub(crate) struct Scene3d {
 }
 
 impl Scene3d {
-    /// Whether the camera moves by itself (a path with distinct key frames).
+    /// Whether the camera moves by itself (a path with distinct key frames, or shake).
     pub fn camera_moves(&self) -> bool {
-        self.paths.len() > 1
+        self.shake.is_some()
+            || self.paths.len() > 1
             || self
                 .paths
                 .iter()
@@ -1172,7 +1278,12 @@ impl Scene3d {
 
     /// Camera of the frame (spec 09 §3.2): pose from the paths or `scene.json`, `V`, `P`.
     pub fn camera(&self, project: &Project, time: f64, size: (f32, f32)) -> CameraFrame {
-        let pose = path_pose(&self.paths, time).unwrap_or(self.pose);
+        let mut pose = path_pose(&self.paths, time).unwrap_or(self.pose);
+        if let Some(shake) = &self.shake {
+            let d = shake.offset(time);
+            pose.eye += d;
+            pose.center += d;
+        }
         let aspect = size.0 / size.1.max(1.0);
         let (view, proj, proj_up) = if self.perspective {
             let fov = project.settings.value(self.fov).float();
@@ -1224,7 +1335,21 @@ impl Scene3d {
         scene: &mut RenderScene,
         project: &Project,
         camera: &CameraFrame,
+        time: f64,
     ) {
+        if let Some(f) = &mut self.fade {
+            let phi = fade_factor(&self.paths, time);
+            let shown = phi < 1.0;
+            if shown != f.shown {
+                scene.set_enabled(ctx, &[f.pass], shown);
+                f.shown = shown;
+            }
+            if shown {
+                scene
+                    .shadow_mut()
+                    .write_floats(&f.slot, &[0.0, 0.0, 0.0, 1.0 - phi]);
+            }
+        }
         let settings = &project.settings;
         // §2.2, §2.3: the first four visible lights.
         let mut lights = LightFrame::default();
@@ -1396,6 +1521,30 @@ mod tests {
             path_pose(&[p], 7.0).unwrap().eye,
             Vec3::new(1.0, 2.0, 3.0)
         ));
+    }
+
+    #[test]
+    fn camera_fade_and_shake() {
+        let a = path(30.0, &[(0.0, [0.0, 0.0, 0.0])]);
+        let b = path(40.0, &[(0.0, [1.0, 0.0, 0.0])]);
+        let paths = [a.clone(), b];
+        assert_eq!(fade_factor(&paths, 0.0), 1.0, "no fade-in at start");
+        assert_eq!(fade_factor(&paths, 10.0), 1.0);
+        assert!((fade_factor(&paths, 29.75) - 0.5).abs() < 1e-4);
+        assert!((fade_factor(&paths, 30.25) - 0.5).abs() < 1e-4);
+        assert!(
+            (fade_factor(&paths, 70.1) - 0.2).abs() < 1e-4,
+            "second cycle fades in"
+        );
+        assert_eq!(fade_factor(&[a], 29.9), 1.0, "one path: no fade");
+        let s = Shake {
+            amplitude: 0.01,
+            roughness: 0.1,
+            speed: 5.0,
+        };
+        let d = s.offset(1.234);
+        assert!(d.abs().max_element() <= 0.011 * 1.2 && d != Vec3::ZERO);
+        assert_eq!(s.offset(1.234), d, "deterministic");
     }
 
     #[test]
