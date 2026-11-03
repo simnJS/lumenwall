@@ -59,6 +59,38 @@ fn exercise_pkg(data: Vec<u8>) {
     }
 }
 
+/// Structured puppet reader: never panics, and what it returns is consistent.
+fn exercise_model(data: &[u8]) {
+    let Ok(m) = mdl::parse_model(data) else {
+        return;
+    };
+    let nv = m.mesh.positions.len();
+    assert!(m.mesh.indices.iter().all(|&i| (i as usize) < nv));
+    assert_eq!(m.skin.len(), nv);
+    assert_eq!(m.mesh.uvs.len(), nv);
+    if let Some(sk) = &m.skeleton {
+        let n = sk.bones.len();
+        assert!(n > 0);
+        for (i, b) in sk.bones.iter().enumerate() {
+            assert!(b.parent.is_none_or(|p| p < i));
+        }
+        assert!(m.attachments.iter().all(|a| a.bone < n));
+        for s in &m.skin {
+            for (j, w) in s.joints.iter().zip(&s.weights) {
+                assert!(*w == 0.0 || (*j as usize) < n);
+            }
+        }
+    }
+    let mut last = 0;
+    for s in &m.sections {
+        assert!(s.start >= last && s.end > s.start && s.end <= data.len());
+        last = s.end;
+    }
+    for w in &m.warnings {
+        let _ = w.to_string();
+    }
+}
+
 fn mutate(mut data: Vec<u8>, edits: &[(usize, u8)], cut: Option<usize>) -> Vec<u8> {
     for &(pos, byte) in edits {
         if !data.is_empty() {
@@ -114,6 +146,7 @@ proptest! {
         exercise_tex(&data, true);
         exercise_pkg(data.clone());
         let _ = mdl::parse_puppet(&data);
+        exercise_model(&data);
         let mut prefixed = b"TEXV0005\0TEXI0001\0".to_vec();
         prefixed.extend_from_slice(&data);
         exercise_tex(&prefixed, false);
@@ -162,6 +195,36 @@ proptest! {
         if let Ok(mesh) = mdl::parse_puppet(&data) {
             prop_assert!(mesh.indices.iter().all(|&i| (i as usize) < mesh.positions.len()));
         }
+    }
+
+    #[test]
+    fn mutated_skeleton_puppets_never_panic(
+        mode in 0usize..3,
+        edits in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..8),
+        cut in proptest::option::of(any::<usize>()),
+    ) {
+        let base = match mode {
+            0 => fp1_mdl(),
+            1 => fp1_with_mode("mirror"),
+            _ => fp1_with_mode("single"),
+        };
+        exercise_model(&mutate(base, &edits, cut));
+    }
+
+    #[test]
+    fn prefixed_random_sections_never_panic(
+        tail in proptest::collection::vec(any::<u8>(), 0..256),
+        magic in 0usize..4,
+    ) {
+        // A valid mesh followed by a section of the right magic but random content.
+        let mut data = fp1_mdl()[..0x154].to_vec();
+        data.extend_from_slice([b"MDLS0004", b"MDAT0001", b"MDLA0006", b"MDLE0002"][magic]);
+        data.push(0);
+        let end = (data.len() + 4 + tail.len()) as u32;
+        data.extend_from_slice(&end.to_le_bytes());
+        data.extend_from_slice(&tail);
+        data.push(0);
+        exercise_model(&data);
     }
 
     #[test]

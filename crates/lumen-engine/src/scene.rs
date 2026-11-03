@@ -8,14 +8,15 @@
 //!    shaders and constants of every image; particle systems and their vertex streams;
 //! 2. render order: `add_image` / particle passes / bloom, which append the draws.
 
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use glam::{Mat4, Vec2, Vec3};
 use lumen_assets::Vfs;
+use lumen_formats::mdl::PuppetModel;
 use lumen_particles::ParallaxInput;
-use lumen_render::dynbuf::{FrameInputs, UniformSlot, frame_globals};
+use lumen_render::dynbuf::{FrameInputs, UniformSlot, UniformType, VertexRange, frame_globals};
 use lumen_render::image::composite_sampler;
 use lumen_render::math::{
     Alignment as RAlign, HAlign, NodeTransform, OrthoCamera, Parallax, ParallaxSmoothing, Pointer,
@@ -25,8 +26,8 @@ use lumen_render::targets::{ScopeId, scaled_size};
 use lumen_render::texture::{SamplerKey, TexFlags};
 use lumen_render::{
     BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImagePass, ImageSpec, Op,
-    PassId, PuppetGeometry, RenderScene, RtId, SceneBuilder, SlotSource, TextureRef, Vertex,
-    add_image_with_puppet,
+    PassId, PuppetGeometry, RenderScene, RtId, SceneBuilder, SkinVertex, SlotSource, TextureRef,
+    Vertex, add_image_with_puppet,
 };
 use lumen_scene::{
     BuildOptions, ConstantSource, ImagePasses, MAX_PARENT_DEPTH, MainTextureFormat, ObjectIndex,
@@ -38,6 +39,7 @@ use serde_json::Value as Json;
 use crate::assets::SceneSource;
 use crate::particles::{self, ParticleFrame, ParticleRuntime, PendingParticle};
 use crate::plan::DebugPlan;
+use crate::puppet::{Layer, MAX_GPU_BONES, MAX_STEP, Puppet, Rig, decompose_attachment};
 use crate::script::{SceneScripts, TextSink};
 use crate::shaders::{ConstantParam, PassKind, ShaderProvider, ShaderRequest};
 use crate::text;
@@ -79,6 +81,11 @@ pub struct SceneStats {
     pub texture_bytes: u64,
     pub stand_in_shaders: usize,
     pub skipped_objects: usize,
+    /// Images with a puppet skeleton (spec 08), and how many are skinned on the GPU.
+    pub puppets: usize,
+    pub gpu_skinned_puppets: usize,
+    /// Objects hanging from a puppet attachment.
+    pub attached_objects: usize,
 }
 
 /// A uniform fed by a setting, rewritten when the setting changes (properties, scripts).
@@ -100,6 +107,9 @@ struct ImageRuntime {
     object: ObjectIndex,
     handle: ImageHandle,
     transform: NodeTransform,
+    /// Transform chain from the root when an ancestor (or the image) hangs from a puppet
+    /// attachment: recomposed every frame (spec 08 §9.10). `None` = `transform` is used.
+    chain: Option<Box<[ChainStep]>>,
     fullscreen: bool,
     parallax_depth: SettingId,
     /// Own `visible` then each created ancestor's (see [`visibility_chain`]).
@@ -109,6 +119,77 @@ struct ImageRuntime {
     size: Vec2,
     /// Origin offset in local pixels (× scale, y up): a text's anchor point (zero for images).
     anchor: Vec2,
+}
+
+/// One link of a transform chain (spec 04 §8.1 with the attachment nodes of spec 08 §9.10).
+#[derive(Clone, Copy, Debug)]
+enum ChainStep {
+    /// Local transform of an object.
+    Object(ObjectIndex),
+    /// Attachment frame of a puppet (index into `SceneRuntime::puppets`).
+    Attachment { puppet: usize, index: usize },
+}
+
+/// How a puppet pose reaches the mesh (spec 08 §9.8).
+enum PuppetOutput {
+    /// GPU skinning: the `g_Bones` palette of the passes drawing the mesh.
+    Palette {
+        slots: Vec<UniformSlot>,
+        half: Vec2,
+        palette: Vec<f32>,
+    },
+    /// CPU skinning: the mesh vertices are rewritten (shader without a skinning path).
+    Vertices {
+        range: VertexRange,
+        half: Vec2,
+        rest: Vec<Vertex>,
+        skin: Vec<SkinVertex>,
+        out: Vec<Vertex>,
+    },
+}
+
+/// Animated skeleton of an image object (spec 08 §9).
+struct PuppetRuntime {
+    puppet: Puppet,
+    /// `visible` of the image and its created ancestors: a hidden image does not advance its
+    /// layers (spec 08 §9.11).
+    visible: Box<[SettingId]>,
+    /// `(rate, blend, visible)` settings of each layer, read every frame.
+    layer_settings: Vec<(SettingId, SettingId, SettingId)>,
+    /// `None` when the image draws no mesh (e.g. not set up): attachments only.
+    output: Option<PuppetOutput>,
+    /// The pose changed since `output` was last written.
+    pending: bool,
+}
+
+impl PuppetRuntime {
+    fn write_output(&mut self, scene: &mut RenderScene) {
+        match &mut self.output {
+            Some(PuppetOutput::Palette {
+                slots,
+                half,
+                palette,
+            }) => {
+                self.puppet.write_palette(*half, palette);
+                let sh = scene.shadow_mut();
+                for slot in slots.iter() {
+                    sh.write_floats(slot, palette);
+                }
+            }
+            Some(PuppetOutput::Vertices {
+                range,
+                half,
+                rest,
+                skin,
+                out,
+            }) => {
+                self.puppet.skin_vertices(*half, rest, skin, out);
+                scene.set_vertices(*range, out);
+            }
+            None => {}
+        }
+        self.pending = false;
+    }
 }
 
 /// A pass whose slot 0 is an animated texture (spec 04 §16.3).
@@ -135,6 +216,8 @@ struct PendingImage {
     parallax_depth: SettingId,
     main: Option<Rc<LoadedTexture>>,
     puppet: Option<PuppetGeometry>,
+    /// Pass 0 was compiled with the `SKINNING` combo (spec 08 §9.8).
+    skinning: bool,
 }
 
 enum Pending {
@@ -162,6 +245,7 @@ pub struct SceneRuntime {
     texts: Vec<text::TextRuntime>,
     fonts: Option<Box<text::Fonts>>,
     particles: Vec<ParticleRuntime>,
+    puppets: Vec<PuppetRuntime>,
     animated_passes: Vec<AnimatedPass>,
     live: Vec<LiveUniform>,
     parallax: Parallax,
@@ -386,6 +470,9 @@ pub fn build_scene(
     let mut stats = SceneStats::default();
     let raw = raw_objects(vfs, &project.file);
     let props = properties_json(project);
+    // Puppet skeletons by object index (spec 08 §9), drawn or not: attachments need them.
+    let mut puppets: Vec<PuppetRuntime> = Vec::new();
+    let mut puppet_of: HashMap<usize, usize> = HashMap::new();
 
     // Phase 1: creation order.
     let mut pending: HashMap<usize, Pending> = HashMap::new();
@@ -414,6 +501,14 @@ pub fn build_scene(
         }
         match &obj.kind {
             ObjectKind::Image(_) => {
+                let model = load_puppet(project, vfs, idx);
+                if let Some(rt) = model
+                    .as_ref()
+                    .and_then(|m| puppet_runtime(project, &build, idx, m, raw.get(&i64::from(id))))
+                {
+                    puppet_of.insert(idx.index(), puppets.len());
+                    puppets.push(rt);
+                }
                 match prepare_image(
                     &mut b,
                     project,
@@ -426,6 +521,7 @@ pub fn build_scene(
                     st.full,
                     size,
                     opts,
+                    model.as_ref(),
                 ) {
                     Ok(Some(img)) => {
                         pending.insert(idx.index(), Pending::Image(Box::new(img)));
@@ -506,6 +602,7 @@ pub fn build_scene(
                         st.full,
                         size,
                         opts,
+                        None,
                     )
                     .map(|img| img.map(|img| (img, t))),
                     None => Ok(None),
@@ -695,6 +792,9 @@ pub fn build_scene(
                         });
                     }
                 }
+                if let Some(&pi) = puppet_of.get(&img.object.index()) {
+                    bind_puppet(&mut b, &mut puppets[pi], &img, &handle);
+                }
                 let transform = node(project.world_transform(img.object, &build));
                 let mut anchor = Vec2::ZERO;
                 if let Some((mut t, offset)) = pending_texts.remove(&idx.index())
@@ -709,6 +809,7 @@ pub fn build_scene(
                     object: img.object,
                     handle,
                     transform,
+                    chain: None,
                     fullscreen: img.fullscreen,
                     parallax_depth: img.parallax_depth,
                     visible: visibility_chain(project, &build, img.object),
@@ -730,6 +831,42 @@ pub fn build_scene(
     }
 
     stats.texts = texts.len();
+    // Children hanging from puppet attachments (spec 08 §9.10).
+    let mut attached = attachments(project, &build, &raw, &puppet_of, &puppets);
+    // A skeleton that neither draws a mesh nor carries a child does no work per frame.
+    let carriers: std::collections::HashSet<usize> = attached
+        .values()
+        .filter_map(|s| match s {
+            ChainStep::Attachment { puppet, .. } => Some(*puppet),
+            ChainStep::Object(_) => None,
+        })
+        .collect();
+    let mut remap = vec![usize::MAX; puppets.len()];
+    let mut kept = Vec::with_capacity(puppets.len());
+    for (i, p) in puppets.into_iter().enumerate() {
+        if p.output.is_some() || carriers.contains(&i) {
+            remap[i] = kept.len();
+            kept.push(p);
+        }
+    }
+    let puppets = kept;
+    for step in attached.values_mut() {
+        if let ChainStep::Attachment { puppet, .. } = step {
+            *puppet = remap[*puppet];
+        }
+    }
+    stats.puppets = puppets.len();
+    stats.gpu_skinned_puppets = puppets
+        .iter()
+        .filter(|p| matches!(p.output, Some(PuppetOutput::Palette { .. })))
+        .count();
+    stats.attached_objects = attached.len();
+    if !attached.is_empty() {
+        for img in &mut images {
+            img.chain = attachment_chain(project, &build, &attached, img.object);
+        }
+    }
+
     stats.textures = textures.len();
     stats.texture_bytes = textures.uploaded_bytes;
     stats.stand_in_shaders = shaders.replaced();
@@ -749,6 +886,7 @@ pub fn build_scene(
     let animated = uses_time
         || !particle_rts.is_empty()
         || !animated_passes.is_empty()
+        || puppets.iter().any(|p| p.puppet.is_animated())
         || scene_rt.accumulates();
     // Spec 06 §8.1: scripts load once every object exists; what they write at load reaches
     // the renderer with the first update.
@@ -786,6 +924,7 @@ pub fn build_scene(
         texts,
         fonts,
         particles: particle_rts,
+        puppets,
         animated_passes,
         live,
         parallax: Parallax::default(),
@@ -947,6 +1086,7 @@ fn prepare_image(
     scene_target: RtId,
     scene_size: Vec2,
     opts: &SceneOptions,
+    puppet: Option<&PuppetModel>,
 ) -> Result<Option<PendingImage>, String> {
     let ctx = b.context();
     let Some(passes) = build.image_passes[idx.index()].clone() else {
@@ -961,7 +1101,9 @@ fn prepare_image(
     let img = obj.as_layer().ok_or("not an image layer")?;
     let model = scene.model(img.model.ok_or("image without model")?);
     let (fullscreen, passthrough, solid) = (model.fullscreen, model.passthrough, model.solid_layer);
-    let puppet_path = model.puppet.map(|p| project.strings.resolve(p).to_owned());
+    // GPU skinning of the mesh pass through the shader's own path (spec 08 §9.8).
+    let bones = puppet.map_or(0, PuppetModel::bone_count);
+    let mut skinning = (1..=MAX_GPU_BONES).contains(&bones);
     let effect_ids: Vec<i32> = img.effects.iter().map(|e| e.id).collect();
     let effects: Vec<lumen_scene::EffectId> = img.effects.iter().map(|e| e.effect).collect();
     let values = ImageValues {
@@ -1113,18 +1255,32 @@ fn prepare_image(
             .iter()
             .map(|e| e.0)
             .collect();
-        let shader = shaders.pass_shader(
-            b,
-            vfs,
-            &ShaderRequest {
-                kind,
-                name: &shader_name,
-                override_combos: &override_combos,
-                material_combos: &material_combos,
-                used_slots: &used_slots,
-                slot0_format: main_tex.as_ref().map(|t| t.format).filter(|_| k == 0),
-            },
-        )?;
+        let mut request = ShaderRequest {
+            kind,
+            name: &shader_name,
+            override_combos: &override_combos,
+            material_combos: &material_combos,
+            used_slots: &used_slots,
+            slot0_format: main_tex.as_ref().map(|t| t.format).filter(|_| k == 0),
+        };
+        let shader = if k == 0 && skinning {
+            // Engine combos, declared by no annotation: SKINNING and BONECOUNT = max(1, n).
+            let mut combos = override_combos.clone();
+            combos.push(("SKINNING".into(), 1));
+            combos.push(("BONECOUNT".into(), bones as i32));
+            request.override_combos = &combos;
+            match shaders.pass_shader(b, vfs, &request)? {
+                s if !s.stand_in => s,
+                _ => {
+                    // No usable skinning path: same shader without it, CPU skinning.
+                    skinning = false;
+                    request.override_combos = &override_combos;
+                    shaders.pass_shader(b, vfs, &request)?
+                }
+            }
+        } else {
+            shaders.pass_shader(b, vfs, &request)?
+        };
         // Texture slots (§12.3), highest-priority resolvable candidate.
         let defaults: Vec<(u32, &str)> = shader
             .texture_defaults
@@ -1204,26 +1360,23 @@ fn prepare_image(
         prepared.push(PreparedPass { pass, constants });
     }
 
-    // Puppet mesh in its rest pose (spec 04 §20; skeleton and animations are not applied).
-    let puppet = puppet_path.and_then(|path| {
-        let bytes = vfs
-            .read(&path)
-            .inspect_err(|e| tracing::warn!("object {id}: puppet '{path}': {e}"))
-            .ok()?;
-        match lumen_formats::mdl::parse_puppet(&bytes) {
-            Ok(mesh) => Some(PuppetGeometry {
-                vertices: mesh
-                    .placed_positions([s.x, s.y])
-                    .zip(&mesh.uvs)
-                    .map(|(position, uv)| Vertex { position, uv: *uv })
-                    .collect(),
-                indices: mesh.indices,
-            }),
-            Err(e) => {
-                tracing::warn!("object {id}: puppet '{path}': {e}");
-                None
-            }
-        }
+    // Puppet mesh (spec 04 §20) with its bone weights when it has a skeleton (spec 08).
+    let puppet = puppet.map(|m| PuppetGeometry {
+        vertices: m
+            .mesh
+            .placed_positions([s.x, s.y])
+            .zip(&m.mesh.uvs)
+            .map(|(position, uv)| Vertex { position, uv: *uv })
+            .collect(),
+        indices: m.mesh.indices.clone(),
+        skin: if m.skeleton.is_some() {
+            m.skin
+                .iter()
+                .map(|v| SkinVertex::new(v.joints, v.weights, v.normal, v.tangent))
+                .collect()
+        } else {
+            Vec::new()
+        },
     });
     let label = format!(
         "object {id} ({})",
@@ -1254,7 +1407,280 @@ fn prepare_image(
         parallax_depth,
         main: main_tex,
         puppet,
+        skinning,
     }))
+}
+
+/// Reads and parses the puppet file of an image's model (spec 08). Problems are logged with
+/// the path; a mesh failure keeps the standard quad (spec 01 §3.1).
+fn load_puppet(project: &Project, vfs: &Vfs, idx: ObjectIndex) -> Option<PuppetModel> {
+    let scene = project.scene.as_ref()?;
+    let obj = scene.object(idx);
+    let path = project
+        .strings
+        .resolve(scene.model(obj.as_image()?.model?).puppet?);
+    let id = obj.id;
+    let bytes = vfs
+        .read(path)
+        .inspect_err(|e| tracing::warn!("object {id}: puppet '{path}': {e}"))
+        .ok()?;
+    match lumen_formats::mdl::parse_model(&bytes) {
+        Ok(m) => {
+            for w in &m.warnings {
+                tracing::warn!("object {id}: puppet '{path}': {w}");
+            }
+            tracing::debug!(
+                "object {id}: puppet '{path}': {} vertices, {} bones, {} attachment(s), {} animation(s)",
+                m.mesh.positions.len(),
+                m.bone_count(),
+                m.attachments.len(),
+                m.animations.len()
+            );
+            Some(m)
+        }
+        Err(e) => {
+            tracing::warn!("object {id}: puppet '{path}': {e}");
+            None
+        }
+    }
+}
+
+/// `key` of a raw `scene.json` object, also accepting the `{"value": …}` form.
+fn raw_value<'a>(obj: Option<&'a Json>, key: &str) -> Option<&'a Json> {
+    let v = obj?.get(key)?;
+    Some(v.get("value").unwrap_or(v))
+}
+
+/// Skeleton and animation layers of a puppet image (spec 08 §9.1, §9.2). `None` without a
+/// valid skeleton.
+fn puppet_runtime(
+    project: &Project,
+    build: &SceneBuild,
+    idx: ObjectIndex,
+    model: &PuppetModel,
+    raw: Option<&Json>,
+) -> Option<PuppetRuntime> {
+    let rig = Rig::new(model)?;
+    let scene = project.scene.as_ref()?;
+    let obj = scene.object(idx);
+    let image = obj.as_image()?;
+    let raw_layers = raw_value(raw, "animationlayers").and_then(Json::as_array);
+    let settings = &project.settings;
+    let mut layers = Vec::with_capacity(image.animation_layers.len());
+    let mut layer_settings = Vec::with_capacity(image.animation_layers.len());
+    for (i, l) in image.animation_layers.iter().enumerate() {
+        let wanted = settings.value(l.animation).int();
+        let animation = u32::try_from(wanted)
+            .ok()
+            .and_then(|a| rig.animation_index(a));
+        if animation.is_none() {
+            tracing::warn!(
+                "object {}: animation layer {}: animation {wanted} not in the puppet, layer inactive",
+                obj.id,
+                l.id
+            );
+        }
+        // Keys lumen-scene does not model (spec 08 §9.2), read from the raw object.
+        let extra = raw_layers.and_then(|a| a.get(i));
+        let flag = |key: &str| raw_value(extra, key).and_then(Json::as_bool) == Some(true);
+        let mut layer = Layer::new(animation);
+        layer.additive = flag("additive");
+        layer.blend_in = flag("blendin");
+        layer.blend_out = flag("blendout");
+        layer.blend_time = raw_value(extra, "blendtime")
+            .and_then(Json::as_f64)
+            .map_or(0.5, |v| v as f32);
+        layer.rate = settings.value(l.rate).float();
+        layer.blend = settings.value(l.blend).float();
+        layer.visible = settings.value(l.visible).boolean();
+        if let Some(a) = animation.and_then(|a| rig.animations().get(a))
+            && a.mode == lumen_formats::mdl::AnimationMode::Unknown
+        {
+            tracing::warn!(
+                "object {}: animation {} has mode '{}', played as 'loop'",
+                obj.id,
+                a.id,
+                a.mode_name
+            );
+        }
+        layers.push(layer);
+        layer_settings.push((l.rate, l.blend, l.visible));
+    }
+    let mut puppet = Puppet::new(rig, layers);
+    puppet.evaluate();
+    Some(PuppetRuntime {
+        puppet,
+        visible: visibility_chain(project, build, idx),
+        layer_settings,
+        output: None,
+        pending: true,
+    })
+}
+
+/// Chooses how the pose of a drawn puppet reaches its mesh: the `g_Bones` palette when the
+/// mesh passes were compiled with `SKINNING` and expose it, CPU skinning otherwise.
+fn bind_puppet(
+    b: &mut SceneBuilder<'_>,
+    rt: &mut PuppetRuntime,
+    img: &PendingImage,
+    handle: &ImageHandle,
+) {
+    let (Some(range), Some(geometry)) = (handle.puppet_vertices(), img.puppet.as_ref()) else {
+        return;
+    };
+    if geometry.skin.len() != geometry.vertices.len() {
+        return;
+    }
+    let n = rt.puppet.rig().bone_count();
+    let half = img.spec.size * 0.5;
+    let palette_slot = |b: &SceneBuilder<'_>, pass: PassId| {
+        b.uniform(pass, "g_Bones").filter(|slot| {
+            matches!(&slot.ty, UniformType::Array { element, len, .. }
+                if **element == UniformType::Matrix { columns: 4, rows: 3 } && *len as usize >= n)
+        })
+    };
+    let slots: Vec<UniformSlot> = handle
+        .puppet_passes()
+        .iter()
+        .filter_map(|&p| palette_slot(b, p))
+        .collect();
+    let reads_skin = b
+        .shader_interface(img.passes[0].pass.shader)
+        .is_some_and(|i| {
+            ["a_BlendIndices", "a_BlendWeights"]
+                .iter()
+                .all(|name| i.vertex_input_names.iter().any(|(_, n)| n == name))
+        });
+    let gpu = img.skinning && reads_skin && slots.len() == handle.puppet_passes().len();
+    let mut palette = vec![0.0; 12 * n];
+    if gpu {
+        rt.puppet.write_palette(half, &mut palette);
+    } else {
+        // Skinned on the CPU: a palette the shader may still read must be the identity.
+        for m in palette.as_chunks_mut::<12>().0 {
+            m.copy_from_slice(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        }
+    }
+    for slot in &slots {
+        b.shadow_mut().write_floats(slot, &palette);
+    }
+    rt.output = Some(if gpu {
+        PuppetOutput::Palette {
+            slots,
+            half,
+            palette,
+        }
+    } else {
+        tracing::debug!("{}: puppet skinned on the CPU", img.spec.label);
+        PuppetOutput::Vertices {
+            range,
+            half,
+            rest: geometry.vertices.clone(),
+            skin: geometry.skin.clone(),
+            out: geometry.vertices.clone(),
+        }
+    });
+    rt.pending = true;
+}
+
+/// Objects hanging from an attachment of their parent's puppet: object index →
+/// `(puppet, attachment)` (spec 08 §9.9). Invalid keys are logged once and ignored.
+fn attachments(
+    project: &Project,
+    build: &SceneBuild,
+    raw: &HashMap<i64, Json>,
+    puppet_of: &HashMap<usize, usize>,
+    puppets: &[PuppetRuntime],
+) -> HashMap<usize, ChainStep> {
+    let mut out = HashMap::new();
+    let Some(scene) = &project.scene else {
+        return out;
+    };
+    for (i, obj) in scene.objects.iter().enumerate() {
+        let Some(name) =
+            raw_value(raw.get(&i64::from(obj.id)), "attachment").and_then(Json::as_str)
+        else {
+            continue;
+        };
+        let Some(parent) = obj.parent.and_then(|p| build.created_object(p)) else {
+            continue;
+        };
+        let found = puppet_of.get(&parent.index()).and_then(|&pi| {
+            puppets[pi]
+                .puppet
+                .rig()
+                .attachment(name)
+                .map(|index| ChainStep::Attachment { puppet: pi, index })
+        });
+        match found {
+            Some(step) => {
+                out.insert(i, step);
+            }
+            None => tracing::warn!(
+                "object {}: attachment '{name}' not found in the puppet of its parent, ignored",
+                obj.id
+            ),
+        }
+    }
+    out
+}
+
+/// Root-to-object transform chain with the attachment nodes inserted, or `None` when no
+/// attachment is involved.
+fn attachment_chain(
+    project: &Project,
+    build: &SceneBuild,
+    attached: &HashMap<usize, ChainStep>,
+    idx: ObjectIndex,
+) -> Option<Box<[ChainStep]>> {
+    let scene = project.scene.as_ref()?;
+    let mut steps = Vec::new();
+    let mut any = false;
+    let mut cur = idx;
+    loop {
+        steps.push(ChainStep::Object(cur));
+        if let Some(step) = attached.get(&cur.index()) {
+            steps.push(*step);
+            any = true;
+        }
+        if steps.len() > 2 * (lumen_scene::MAX_PARENT_DEPTH + 1) {
+            break;
+        }
+        match scene
+            .object(cur)
+            .parent
+            .and_then(|p| build.created_object(p))
+        {
+            Some(parent) => cur = parent,
+            None => break,
+        }
+    }
+    steps.reverse();
+    any.then(|| steps.into_boxed_slice())
+}
+
+/// Resolved transform of a chain (spec 04 §8.1, spec 08 §9.10). Allocation-free.
+fn compose_chain(
+    project: &Project,
+    puppets: &[PuppetRuntime],
+    chain: &[ChainStep],
+) -> NodeTransform {
+    let mut acc = lumen_scene::Transform::default();
+    for step in chain {
+        let local = match *step {
+            ChainStep::Object(i) => project.local_transform(i),
+            ChainStep::Attachment { puppet, index } => {
+                let n = decompose_attachment(&puppets[puppet].puppet.attachment_frame(index));
+                lumen_scene::Transform {
+                    origin: n.origin,
+                    scale: n.scale,
+                    angle: n.angle,
+                }
+            }
+        };
+        acc = acc.then(&local);
+    }
+    node(acc)
 }
 
 impl SceneRuntime {
@@ -1305,6 +1731,22 @@ impl SceneRuntime {
                 ParallaxSmoothing::WallpaperEngine,
             );
         }
+        // Puppets (spec 08 §9.11): clocks, poses, then their meshes; before the transforms.
+        let dt = f64::from(f.dt).clamp(0.0, MAX_STEP);
+        for p in &mut self.puppets {
+            for (l, &(rate, blend, visible)) in p.puppet.layers.iter_mut().zip(&p.layer_settings) {
+                l.rate = settings.value(rate).float();
+                l.blend = settings.value(blend).float();
+                l.visible = settings.value(visible).boolean();
+            }
+            if chain_visible(settings, &p.visible) {
+                p.puppet.advance(dt);
+            }
+            p.pending |= p.puppet.evaluate();
+            if p.pending {
+                p.write_output(&mut self.scene);
+            }
+        }
         let center = Vec3::new(self.size.x * 0.5, self.size.y * 0.5, 0.0);
         for img in &mut self.images {
             let shown = chain_visible(settings, &img.visible);
@@ -1315,7 +1757,10 @@ impl SceneRuntime {
             if !shown {
                 continue;
             }
-            let mut transform = img.transform;
+            let mut transform = match &img.chain {
+                Some(chain) => compose_chain(project, &self.puppets, chain),
+                None => img.transform,
+            };
             if img.fullscreen {
                 transform.origin = center;
             }

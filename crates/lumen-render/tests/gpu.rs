@@ -19,7 +19,7 @@ use lumen_render::targets::SceneTargets;
 use lumen_render::texture::{
     MipLevel, SamplerKey, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload,
 };
-use lumen_render::{ContextOptions, GpuContext, RenderScene, TextureId};
+use lumen_render::{ContextOptions, GpuContext, RenderScene, SkinVertex, TextureId, Vertex};
 
 const SRC: &str = r"
 struct Pass {
@@ -447,6 +447,101 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32> }
         near(px(&d, 8, 4, 4), [64, 0, 0, 255], 1),
         "{:?}",
         px(&d, 8, 4, 4)
+    );
+}
+
+/// Skinned meshes (spec 08 §9.8): skin attributes come from their own buffer at the mesh's
+/// first record, the `mat4x3` palette keeps its column stride, and the mesh moves with it.
+#[test]
+fn skinned_geometry_follows_the_bone_palette() {
+    let ctx = gpu!();
+    let src = r"
+struct Pass { g_Bones: array<mat4x3<f32>, 2> }
+@group(0) @binding(0) var<uniform> u: Pass;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32> }
+@vertex fn vs(
+    @location(0) a_Position: vec3<f32>,
+    @location(1) a_BlendIndices: vec4<u32>,
+    @location(2) a_BlendWeights: vec4<f32>,
+    @location(3) a_Normal: vec3<f32>,
+) -> VOut {
+    let m = u.g_Bones[a_BlendIndices.x] * a_BlendWeights.x
+        + u.g_Bones[a_BlendIndices.y] * a_BlendWeights.y;
+    var o: VOut;
+    o.pos = vec4<f32>(m * vec4<f32>(a_Position, 1.0), 1.0);
+    o.c = vec4<f32>(a_Normal, 1.0);
+    return o;
+}
+@fragment fn fs(i: VOut) -> @location(0) vec4<f32> { return i.c; }
+";
+    let mut s = setup(ctx, 8, 8, [0.0, 0.0, 0.0, 1.0]);
+    let sh =
+        s.b.add_shader(ShaderDesc::from_wgsl("skin", src, "vs", "fs").unwrap())
+            .unwrap();
+    // Unrelated vertices and skin records first: both buffers must start at the mesh.
+    let _ = s.b.add_vertices(&unit_quad());
+    let _ = s.b.add_skin(&[SkinVertex::default(); 3]);
+    let strip = |x: f32, y: f32| Vertex {
+        position: [x, y, 0.0],
+        uv: [0.0, 0.0],
+    };
+    let vertices = s.b.add_vertices(&[
+        strip(-1.0, -1.0),
+        strip(-1.0, 1.0),
+        strip(-0.5, -1.0),
+        strip(-0.5, 1.0),
+    ]);
+    let indices = s.b.add_indices(&[0, 1, 2, 2, 1, 3]);
+    let rec = SkinVertex::new(
+        [1, 0, 0, 0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0; 4],
+    );
+    let skin = s.b.add_skin(&[rec; 4]);
+    let id =
+        s.b.add_pass(PassDesc::new(
+            "skin",
+            sh,
+            s.st.full,
+            Geometry::Skinned {
+                vertices,
+                indices,
+                skin,
+            },
+        ))
+        .unwrap();
+    s.b.push(Op::Draw(id));
+    let bones = s.b.uniform(id, "g_Bones").unwrap();
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let mut palette = identity.to_vec();
+    palette.extend_from_slice(&identity);
+    s.b.shadow_mut().write_floats(&bones, &palette);
+    let mut scene = s.b.build().unwrap();
+    scene.render(ctx);
+    let d = read(ctx, &scene, &s.st);
+    assert!(
+        near(px(&d, 8, 0, 4), [0, 0, 255, 255], 1),
+        "{:?}",
+        px(&d, 8, 0, 4)
+    );
+    assert!(near(px(&d, 8, 7, 4), [0, 0, 0, 255], 1));
+    // Bone 1 moves by 1.5 in x: the strip lands on the right edge.
+    palette[21] = 1.5;
+    let slot = scene.uniform(id, "g_Bones").unwrap();
+    assert!(scene.shadow_mut().write_floats(&slot, &palette));
+    assert!(scene.needs_redraw());
+    scene.render(ctx);
+    let d = read(ctx, &scene, &s.st);
+    assert!(
+        near(px(&d, 8, 0, 4), [0, 0, 0, 255], 1),
+        "{:?}",
+        px(&d, 8, 0, 4)
+    );
+    assert!(
+        near(px(&d, 8, 7, 4), [0, 0, 255, 255], 1),
+        "{:?}",
+        px(&d, 8, 7, 4)
     );
 }
 

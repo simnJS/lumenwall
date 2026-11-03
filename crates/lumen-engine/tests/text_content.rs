@@ -80,7 +80,10 @@ fn steady_state_and_set_text(id: &str, texts: usize, object: i32, initial: &str)
     // The first frame may show the string computed by a clock script (one regeneration).
     frame(&ctx, &mut rt, &mut wp, 1.0);
     let base = rt.text_regenerations().0;
-    assert!(base <= texts as u64, "at most one regeneration per text on the first frame");
+    assert!(
+        base <= texts as u64,
+        "at most one regeneration per text on the first frame"
+    );
     let mut cpu = Duration::ZERO;
     for i in 1..120 {
         cpu += frame(&ctx, &mut rt, &mut wp, 1.0 + f64::from(i) / 30.0);

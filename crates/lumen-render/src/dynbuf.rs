@@ -232,6 +232,13 @@ pub(crate) fn patches_for(name: &str, slot: &UniformSlot, out: &mut Vec<Patch>) 
     }
 }
 
+/// Source of the 32-bit words written by [`Shadow::write_floats`] / [`Shadow::write_ints`].
+struct Words<'a> {
+    n: usize,
+    next: usize,
+    word: &'a dyn Fn(usize) -> u32,
+}
+
 /// CPU shadow of the dynamic buffer with dirty-range tracking.
 #[derive(Debug, Default)]
 pub struct Shadow {
@@ -276,37 +283,54 @@ impl Shadow {
     }
 
     fn write_words(&mut self, slot: &UniformSlot, n: usize, word: impl Fn(usize) -> u32) -> bool {
-        let mut changed = false;
-        let mut idx = 0usize;
-        let mut put = |shadow: &mut Self, at: u32, count: u32, idx: &mut usize| {
-            for c in 0..count {
-                if *idx >= n {
-                    return;
-                }
-                changed |= shadow.write_bytes(at + 4 * c, &word(*idx).to_le_bytes());
-                *idx += 1;
-            }
+        let mut words = Words {
+            n,
+            next: 0,
+            word: &word,
         };
-        match &slot.ty {
-            UniformType::Scalar(_) => put(self, slot.offset, 1, &mut idx),
-            UniformType::Vector(_, c) => put(self, slot.offset, u32::from(*c), &mut idx),
+        self.write_typed(slot.offset, &slot.ty, &mut words)
+    }
+
+    /// Writes consecutive values into one member, following its layout recursively (array
+    /// elements may be matrices, e.g. the `mat4x3[]` bone palette of spec 08 §9.8).
+    fn write_typed(&mut self, at: u32, ty: &UniformType, w: &mut Words<'_>) -> bool {
+        match ty {
+            UniformType::Scalar(_) => self.put_words(at, 1, w),
+            UniformType::Vector(_, c) => self.put_words(at, u32::from(*c), w),
             UniformType::Matrix { columns, rows } => {
                 let stride = if *rows == 2 { 8 } else { 16 };
+                let mut changed = false;
                 for col in 0..u32::from(*columns) {
-                    put(self, slot.offset + col * stride, u32::from(*rows), &mut idx);
+                    changed |= self.put_words(at + col * stride, u32::from(*rows), w);
                 }
+                changed
             }
             UniformType::Array {
                 element,
                 len,
                 stride,
             } => {
-                let per = element.components();
+                let mut changed = false;
                 for e in 0..*len {
-                    put(self, slot.offset + e * stride, per, &mut idx);
+                    if w.next >= w.n {
+                        break;
+                    }
+                    changed |= self.write_typed(at + e * stride, element, w);
                 }
+                changed
             }
-            UniformType::Opaque { size } => put(self, slot.offset, size / 4, &mut idx),
+            UniformType::Opaque { size } => self.put_words(at, size / 4, w),
+        }
+    }
+
+    fn put_words(&mut self, at: u32, count: u32, w: &mut Words<'_>) -> bool {
+        let mut changed = false;
+        for c in 0..count {
+            if w.next >= w.n {
+                break;
+            }
+            changed |= self.write_bytes(at + 4 * c, &(w.word)(w.next).to_le_bytes());
+            w.next += 1;
         }
         changed
     }
@@ -608,6 +632,42 @@ mod tests {
             i32::from_le_bytes(s.bytes[200..204].try_into().unwrap()),
             -3
         );
+    }
+
+    #[test]
+    fn matrix_arrays_keep_the_column_stride() {
+        // `mat4x3 g_Bones[2]`: 4 columns of 3 floats, columns 16 bytes apart, 64 per bone.
+        let mut s = shadow(256);
+        let bones = UniformSlot {
+            offset: 32,
+            ty: UniformType::Array {
+                element: Box::new(UniformType::Matrix {
+                    columns: 4,
+                    rows: 3,
+                }),
+                len: 2,
+                stride: 64,
+            },
+        };
+        let values: Vec<f32> = (1..=24).map(|v| v as f32).collect();
+        assert!(s.write_floats(&bones, &values));
+        assert_eq!((f(&s, 32), f(&s, 40), f(&s, 44)), (1.0, 3.0, 0.0));
+        assert_eq!((f(&s, 48), f(&s, 80), f(&s, 88)), (4.0, 10.0, 12.0));
+        assert_eq!((f(&s, 96), f(&s, 144 + 8)), (13.0, 24.0));
+        assert_eq!(s.dirty, Some((32, 156)));
+        s.dirty = None;
+        assert!(
+            !s.write_floats(&bones, &values),
+            "unchanged palette: no upload"
+        );
+        let mut first = values[..12].to_vec();
+        first[0] = -1.0;
+        assert!(
+            s.write_floats(&bones, &first),
+            "a prefix updates the first bone only"
+        );
+        assert_eq!((f(&s, 32), f(&s, 96)), (-1.0, 13.0));
+        assert_eq!(s.dirty, Some((32, 36)));
     }
 
     #[test]

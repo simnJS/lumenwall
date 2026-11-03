@@ -87,7 +87,7 @@ fn main() {
             .map_or_else(|| "wallpaper".into(), |n| n.to_string_lossy().into_owned());
         match render_headless(&path, &assets, &o) {
             Ok(r) => println!(
-                "{w}: OK {}x{} on {} | load {:.0} ms | {} image(s), {} pass(es), {} particle system(s) ({} live), {} texture(s) {:.1} MiB, {} stand-in shader(s), {} skipped object(s) | CPU {:.2} ms/frame, GPU {} | GPU memory {:.1} MiB | {}",
+                "{w}: OK {}x{} on {} | load {:.0} ms | {} image(s), {} pass(es), {} particle system(s) ({} live), {} texture(s) {:.1} MiB, {} stand-in shader(s), {} skipped object(s), {} puppet(s) ({} GPU-skinned, {} attached object(s)) | CPU {:.2} ms/frame, GPU {} | GPU memory {:.1} MiB | {}",
                 r.scene_size.0,
                 r.scene_size.1,
                 r.adapter,
@@ -100,6 +100,9 @@ fn main() {
                 r.stats.texture_bytes as f64 / 1048576.0,
                 r.stats.stand_in_shaders,
                 r.stats.skipped_objects,
+                r.stats.puppets,
+                r.stats.gpu_skinned_puppets,
+                r.stats.attached_objects,
                 r.cpu_frame.as_secs_f64() * 1000.0,
                 r.gpu_frame.map_or("n/a".into(), |g| format!(
                     "{:.2} ms/frame",
