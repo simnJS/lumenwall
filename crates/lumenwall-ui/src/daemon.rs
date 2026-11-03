@@ -3,7 +3,7 @@
 //! through an iced subscription. Nothing here runs on a timer.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use iced::futures::{SinkExt, StreamExt};
 
 use lumenwall_ipc::{
     Client, ClientEvent, Endpoint, Error, Event, Output, PropertyMap, Request, Response, Scaling,
-    ServerInfo, Settings, State, Stats, Topic,
+    ServerInfo, Settings, State, Stats, Topic, WallpaperAudio, wallpaper_key,
 };
 
 use crate::platform;
@@ -254,6 +254,26 @@ impl DaemonLink {
         self.send(Cmd::Call(Request::SetVolume { volume }));
     }
 
+    /// Sound level of the wallpaper in `dir`: `None` when the daemon has no per-wallpaper
+    /// levels (offline or older), else its level (the default when never set).
+    pub fn wallpaper_audio(&self, dir: &Path) -> Option<WallpaperAudio> {
+        let levels = self.state.as_ref()?.wallpaper_audio.as_ref()?;
+        Some(levels.get(&wallpaper_key(dir)).copied().unwrap_or_default())
+    }
+
+    pub fn set_wallpaper_audio(
+        &self,
+        wallpaper: PathBuf,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) {
+        self.send(Cmd::Call(Request::SetWallpaperAudio {
+            wallpaper,
+            volume,
+            muted,
+        }));
+    }
+
     pub fn set_settings(&mut self, settings: Settings) {
         self.settings = Some(settings.clone());
         self.send(Cmd::Call(Request::SetSettings { settings }));
@@ -277,6 +297,26 @@ impl DaemonLink {
 
     pub fn fetch_properties(&self, output: String) {
         self.send(Cmd::FetchProperties(output));
+    }
+}
+
+/// Whether `next` makes `queued` pointless: the same volume control set again.
+fn supersedes(next: &Request, queued: &Request) -> bool {
+    match (next, queued) {
+        (Request::SetVolume { .. }, Request::SetVolume { .. }) => true,
+        (
+            Request::SetWallpaperAudio {
+                wallpaper: a,
+                volume: Some(_),
+                muted: None,
+            },
+            Request::SetWallpaperAudio {
+                wallpaper: b,
+                volume: Some(_),
+                muted: None,
+            },
+        ) => a == b,
+        _ => false,
     }
 }
 
@@ -323,7 +363,18 @@ impl Worker {
                 }
                 Cmd::Connect => self.connect(),
                 Cmd::Launch => self.launch(),
-                Cmd::Call(req) => {
+                Cmd::Call(mut req) => {
+                    // A slider being dragged queues one call per step: only the latest
+                    // position of the same control matters.
+                    while let Ok(next) = rx.try_recv() {
+                        match next {
+                            Cmd::Call(n) if supersedes(&n, &req) => req = n,
+                            other => {
+                                pending = Some(other);
+                                break;
+                            }
+                        }
+                    }
                     let refresh = matches!(
                         req,
                         Request::Apply { .. }
@@ -331,6 +382,7 @@ impl Worker {
                             | Request::SetPaused { .. }
                             | Request::SetMuted { .. }
                             | Request::SetVolume { .. }
+                            | Request::SetWallpaperAudio { .. }
                     );
                     let settings = matches!(req, Request::SetSettings { .. });
                     if self.call(req).is_some() {
@@ -478,5 +530,39 @@ impl Worker {
             Err(Error::Remote(e)) => Err(e.message),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_latest_volume_is_sent() {
+        let vol = |volume| Request::SetVolume { volume };
+        let level = |w: &str, volume, muted| Request::SetWallpaperAudio {
+            wallpaper: w.into(),
+            volume,
+            muted,
+        };
+        assert!(supersedes(&vol(0.2), &vol(0.1)));
+        assert!(supersedes(
+            &level("/w/1", Some(0.2), None),
+            &level("/w/1", Some(0.1), None)
+        ));
+        assert!(!supersedes(
+            &level("/w/2", Some(0.2), None),
+            &level("/w/1", Some(0.1), None)
+        ));
+        // A mute toggle is never dropped.
+        assert!(!supersedes(
+            &level("/w/1", None, Some(true)),
+            &level("/w/1", Some(0.1), None)
+        ));
+        assert!(!supersedes(
+            &level("/w/1", Some(0.1), None),
+            &level("/w/1", None, Some(true))
+        ));
+        assert!(!supersedes(&vol(0.2), &Request::SetMuted { muted: true }));
     }
 }

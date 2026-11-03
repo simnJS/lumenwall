@@ -228,12 +228,30 @@ pub const MAX_SCREENSHOT_DELAY: u32 = 5;
 pub const MAX_VOLUME: u8 = 128;
 /// Defaults of spec 07 §2.4.
 pub const DEFAULT_FPS: u32 = 30;
-pub const DEFAULT_VOLUME: u8 = 15;
 pub const DEFAULT_SCREENSHOT_DELAY: u32 = 5;
+/// Default volume: 64 of 128, the 50 % the settings window shows. Deviation: the reference's
+/// default is [`REFERENCE_DEFAULT_VOLUME`] (12 %), barely audible on most devices.
+pub const DEFAULT_VOLUME: u8 = 64;
+/// The reference's `--volume` default (spec 07 §2.4).
+pub const REFERENCE_DEFAULT_VOLUME: u8 = 15;
+/// Default of `automute`: off. Deviation: the reference mutes by default; see the README.
+pub const DEFAULT_AUTOMUTE: bool = false;
 
 /// Clamps a parsed volume to `[0, 128]` (spec 07 §2.2).
 pub fn clamp_volume(volume: i64) -> u8 {
     volume.clamp(0, i64::from(MAX_VOLUME)) as u8
+}
+
+/// `--volume` / `volume` (0..=128) as the fraction the protocol and the UI use (0.0..=1.0;
+/// the UI shows it × 100 %): 64 → 0.5, 128 → 1.0.
+pub fn volume_fraction(volume: u8) -> f32 {
+    f32::from(volume.min(MAX_VOLUME)) / f32::from(MAX_VOLUME)
+}
+
+/// A fraction from a client (0.0..=1.0) as a `volume` value, rounded: 0.5 → 64.
+pub fn volume_from_fraction(fraction: f32) -> u8 {
+    let f = if fraction.is_finite() { fraction } else { 0.0 };
+    (f.clamp(0.0, 1.0) * f32::from(MAX_VOLUME)).round() as u8
 }
 
 /// Validates a frame-rate cap. Deviation (QO-1): 0 and negative values are rejected instead of
@@ -403,6 +421,29 @@ mod tests {
         assert_eq!(validate_screenshot_delay(9), Ok(5));
         assert_eq!(validate_screenshot_delay(0), Ok(0));
         assert!(validate_screenshot_delay(-1).is_err());
+    }
+
+    #[test]
+    fn volume_conversions() {
+        assert_eq!(volume_fraction(DEFAULT_VOLUME), 0.5);
+        assert_eq!(volume_fraction(128), 1.0);
+        assert_eq!(volume_fraction(0), 0.0);
+        assert_eq!(volume_fraction(200), 1.0);
+        assert_eq!(volume_from_fraction(0.5), DEFAULT_VOLUME);
+        assert_eq!(volume_from_fraction(1.0), 128);
+        assert_eq!(volume_from_fraction(2.0), 128);
+        assert_eq!(volume_from_fraction(-1.0), 0);
+        assert_eq!(volume_from_fraction(f32::NAN), 0);
+        // The reference default shows as 12 %.
+        assert_eq!(
+            (volume_fraction(REFERENCE_DEFAULT_VOLUME) * 100.0).round(),
+            12.0
+        );
+        // Every percent the UI can send survives the round trip.
+        for p in 0..=100u8 {
+            let v = volume_from_fraction(f32::from(p) / 100.0);
+            assert_eq!((volume_fraction(v) * 100.0).round() as u8, p, "{p} %");
+        }
     }
 
     #[test]

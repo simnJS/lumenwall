@@ -344,5 +344,5 @@ fn configuration_hot_reload() {
     assert_eq!(first_changes, &[PlanChange::Fps, PlanChange::Audio]);
     assert_eq!((first.fps, first.audio.volume), (20, 3));
     assert_eq!(second_changes, &[PlanChange::Fps, PlanChange::Audio]);
-    assert_eq!((second.fps, second.audio.volume), (30, 15));
+    assert_eq!((second.fps, second.audio.volume), (30, 64));
 }

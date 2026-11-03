@@ -228,9 +228,18 @@ pub fn ensure(root: &Path) -> std::io::Result<PathBuf> {
             } else {
                 (2560, 1440)
             };
+            // Every other scene has a sound object (the file itself is not generated: the
+            // UI only reads headers), so the per-wallpaper sound level shows up.
+            let objects = if i % 2 == 0 {
+                r#","objects":[{"sound":["sounds/ambience.ogg"],"playbackmode":"loop"}]"#
+            } else {
+                ""
+            };
             std::fs::write(
                 dir.join("scene.json"),
-                format!(r#"{{"general":{{"orthogonalprojection":{{"width":{w},"height":{h}}}}}}}"#),
+                format!(
+                    r#"{{"general":{{"orthogonalprojection":{{"width":{w},"height":{h}}}}}{objects}}}"#
+                ),
             )?;
         }
     }

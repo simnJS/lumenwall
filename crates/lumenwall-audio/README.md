@@ -18,9 +18,26 @@ Scene sound playback, audio capture and spectrum analysis for audio-reactive wal
   - `pulse` (feature): monitor of the default sink in the reference format (U8 mono 44.1 kHz, fragsize 4410, maxlength fragment + 7.5 s); subscription to sink/source/server events and reconnection to the new default monitor.
   - `pipewire` (feature): `stream.capture.sink`, reference format requested from PipeWire, `node.latency = 4410/44100`; the session manager follows the default output.
   - `wasapi` (Windows): cpal input stream on the default render device (loopback), rebuilt when cpal reports a default-device change.
-- `automute`: `AutomuteDetector` (§12.1 rules: disabled → never, fullscreen → playing, else watcher), `PlayingFlag` with change callback. Watchers: Pulse sink-input subscription (PID ≠ ours, average volume ≠ 0), PipeWire registry + node `Props` events, Windows `IAudioSessionManager2` + `IAudioSessionEvents` + `IMMNotificationClient`. One blocking thread each, connection timeout 2 s, retry every 5 s, loss logged once.
+- `automute`: `AutomuteDetector` (§12.1 rules: disabled → never, fullscreen → playing, else watcher), `PlayingFlag` with change callback. Every backend describes its streams as a `Stream` and `classify` decides; only media being played counts (see "Automute rule" below). Watchers: Pulse sink-input subscription, PipeWire registry + node `info` (state) + `Props` (volume, mute) events, Windows `IAudioSessionManager2` + `IAudioSessionEvents` + `IAudioVolumeDuckNotification` + `IMMNotificationClient`. One blocking thread each, connection timeout 2 s, retry every 5 s, loss logged once. Each change of the decision is logged at `info` with the stream that caused it (`automute: 'Spotify' is playing media…`); every stream's verdict is logged at `debug` (`LUMENWALL_LOG=lumenwall_audio=debug`).
 - `sound`: `SoundObject::from_json` (`sound`, `playbackmode`, plus WE `volume`, `mintime`, `maxtime`, `startsilent`).
 - `playback` (feature): `Player` / `PlayerHandle`. symphonia decoding (mp3, ogg/vorbis, wav, flac, aac/m4a, adpcm) from shared bytes (zero copy from a mapped `.pkg`), resampling to the device, lock-free ring per voice, callback mixing `out = clamp(out + s·volume/128, −1, 1)` per stream in creation order. Preferred device format 48 kHz f32 stereo, 4096 frames; otherwise the device default is adopted.
+
+### Automute rule
+
+A stream mutes the wallpapers only if it is media being played by another program. It does **not** count when it is:
+
+| Case | How it is recognised |
+|---|---|
+| This process | `application.process.id` (Windows: session process id) |
+| No owning process | no `application.process.id` (server internals) and no media role, system sounds session; Spotify's stream has no process id but declares `music` and counts |
+| Another Lumenwall process | application name or binary containing `lumenwall` (also `PipeWire ALSA [lumenwall]`, the ALSA plug-in's stream, which has no process id) |
+| Paused | Pulse `corked`; PipeWire node state not `running`; Windows session not active |
+| Muted or inaudible | mute flag, or average gain below −60 dB (Pulse volumes are cubic) |
+| A call | `media.role` `phone` / `Communication`; a call program by binary or name (Discord and its builds, Vesktop, WebCord, Teams, Zoom, Skype, Mumble, TeamSpeak, Slack, Signal, Element, Jitsi, Linphone, Jami…); any application name containing `WEBRTC` (Discord's voice stream is an untagged `WEBRTC VoiceEngine` stream of the `Discord` binary); Windows sessions the system reports as communications (ducking notifications) |
+| Speech synthesis | Speech Dispatcher (`speech-dispatcher-*`, `sd_*`), Orca, eSpeak, Festival, RHVoice; role `a11y` / `Accessibility` |
+| Another declared role | any `media.role` other than `music`, `video`/`Movie`, `game`, `production` (notifications, alarms, tests…) |
+
+Measured on the development machine (GNOME 50, PipeWire 1.6.2, a Discord call): pipewire-pulse lists Discord's voice stream as `WEBRTC VoiceEngine` / `Discord` without a role (verdict `Call`), Speech Dispatcher's idle stream as **not corked** although its node is idle (`Accessibility`), a paused Spotify as corked with role `music` and no process id (`Paused`), and Lumenwall's own output as `PipeWire ALSA [lumenwall]` without a process id (`Lumenwall`). With automute on, Lumenwall's stream stayed running during the call. The PulseAudio protocol cannot tell an idle open stream from a playing one; the PipeWire backend can (node state). Hence the name rules, and the application's default of automute off (`lumenwall` README).
 
 ### Why no kira/rodio
 
@@ -31,6 +48,7 @@ Both sit on cpal like this crate, but keep their output stream (and its wake-ups
 - §13.1: `SpectrumAnalyzer::new(fps)` if a wallpaper declares `supportsaudioprocessing` and `--no-audio-processing` is absent, else `disabled()`. `default_capture(analyzer.feed())`, `start()` on resume, `stop()` on pause. Call `update(dt)` once per rendered frame; upload `left*/right*`.
 - `AutomuteDetector::new(settings, Some(cb))` with `cb` forwarding to `PlayerHandle::set_other_app_playing` (reacts even when no frame is rendered); per frame `update(fullscreen)` and forward changes.
 - `Player::new(PlayerConfig { volume: clamp_volume(v), silent })`. For §9.4 parity, pause scene sounds in fullscreen only through automute (with `--noautomute` they keep playing).
+- `DEFAULT_VOLUME` is 64 (50 % in the UI, gain 0.5); `REFERENCE_DEFAULT_VOLUME` is the reference's 15 (12 %, gain 0.12, −18.6 dB). The `lumenwall` application sets the volume; per-wallpaper levels are applied by it on top of this global volume.
 
 ## Build and test matrix
 
@@ -54,10 +72,11 @@ Linux release builds should enable `pipewire,pulse` (runtime fallback: PipeWire 
 - No capture data for 0.5 s → targets 0. WASAPI loopback and suspended PipeWire sinks deliver nothing, where the reference's Pulse monitor delivers silence (which gives 0).
 - Conversion to the reference format is ours (mean downmix, rounding quantiser); the server's exact algorithms are unknown. Tones differ by ≤ 1 LSB and < 0.01 on their band.
 - Rule 4 (QO-12): `volume` scales the object; `random` plays one random file then pauses `[mintime, maxtime]` s; `startsilent` waits for `Player::set_object_playing`. `SoundObject::reference_only()` gives the reference reading. The reference wallpaper's sound object is `random` with 5 mp3: the reference starts all five at once.
-- Windows automute counts active, unmuted, non-zero-volume sessions of other processes (§22); Linux keeps the reference rule (paused or muted streams count, QO-13).
+- Automute only reacts to media being played (rule 5: Wallpaper Engine mutes while other applications *play* audio): paused, muted or inaudible streams, calls, speech synthesis, notification sounds and Lumenwall's own streams do not count (table above). The reference counts any stream with a PID and a non-zero volume, paused or muted (QO-13), so a voice call or an idle speech stream muted the wallpapers.
+- `PlayerConfig::default()` uses volume 64 instead of the reference's 15 (barely audible).
 - Mono/surround devices: mono files are duplicated, extra device channels get the matching source channel or silence.
 
 ## Not tested
 
-- PipeWire backends (not compiled), Windows backends (not run), default-device change following on every backend, audible output and device reopen after a device change.
+- PipeWire backends (not compiled; the automute watcher's node `info` and mute handling were written against pipewire 0.10.1 and are unchecked), Windows backends (not run; the ducking notifications in particular), default-device change following on every backend, audible output and device reopen after a device change.
 - No captured reference output is available: spectrum parity is checked against a literal f64 transcription of the formula and hand-computed values. Bands whose power is exactly zero mathematically (perfectly periodic quantised test tones) depend on FFT rounding and cannot match bit for bit; real audio never has them.

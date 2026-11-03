@@ -8,12 +8,16 @@
 //! ```toml
 //! wallpaper = "2317494988"        # default wallpaper (Workshop ID or path)
 //! fps = 30
-//! volume = 15
+//! volume = 64                     # 0..=128 like --volume; 64 is the UI's 50 %
 //! scaling = "fill"
 //! fullscreen-pause-ignore-appids = ["mpv"]
 //!
 //! [properties]
 //! bloom = true                    # booleans become "1"/"0"
+//!
+//! [wallpaper-audio."2317494988"]  # per wallpaper: Workshop ID or folder path
+//! volume = 40                     # percent of the global volume, 0..=100
+//! muted = false
 //!
 //! [[screen]]
 //! name = "HDMI-1"
@@ -67,6 +71,9 @@ pub struct Config {
     pub screenshot_delay: Option<i64>,
     /// User property overrides (`--set-property`), merged key by key with the command line.
     pub properties: BTreeMap<String, PropertyValue>,
+    /// Sound level per wallpaper, keyed by Workshop ID or folder path
+    /// (`lumenwall_ipc::wallpaper_key`), applied on top of `volume`.
+    pub wallpaper_audio: BTreeMap<String, WallpaperAudioConfig>,
     /// Explicit window mode (like `--window`).
     pub window: Option<WindowConfig>,
     /// Desktop outputs (like `-r`).
@@ -98,6 +105,15 @@ impl PropertyValue {
             Self::Text(s) => s.clone(),
         }
     }
+}
+
+/// `[wallpaper-audio."<id or path>"]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WallpaperAudioConfig {
+    /// Percent of the global volume, 0..=100 (clamped); 100 when absent.
+    pub volume: Option<i64>,
+    pub muted: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -197,6 +213,9 @@ impl Config {
         }
         if self.properties.keys().any(String::is_empty) {
             return Err("[properties]: keys cannot be empty".into());
+        }
+        if self.wallpaper_audio.keys().any(|k| k.trim().is_empty()) {
+            return Err("[wallpaper-audio]: keys cannot be empty".into());
         }
         let mut seen: Vec<&str> = Vec::new();
         for screen in &self.screens {
@@ -356,6 +375,11 @@ mod tests {
             ratio = 0.5
             color = "1 0 0"
 
+            [wallpaper-audio."2317494988"]
+            volume = 40
+            [wallpaper-audio."/home/me/my wallpaper"]
+            muted = true
+
             [[screen]]
             name = "HDMI-1"
             wallpaper = "./w"
@@ -385,6 +409,17 @@ mod tests {
         assert_eq!(config.properties["count"].to_text(), "3");
         assert_eq!(config.properties["ratio"].to_text(), "0.5");
         assert_eq!(config.properties["color"].to_text(), "1 0 0");
+        assert_eq!(
+            config.wallpaper_audio["2317494988"],
+            WallpaperAudioConfig {
+                volume: Some(40),
+                muted: None
+            }
+        );
+        assert_eq!(
+            config.wallpaper_audio["/home/me/my wallpaper"].muted,
+            Some(true)
+        );
         assert_eq!(config.screens.len(), 2);
         assert_eq!(config.screens[0].scaling, Some(Scaling::Fit));
         assert_eq!(config.spans[0].outputs(), ["DP-1", "DP-2"]);
@@ -418,6 +453,8 @@ mod tests {
                 "more than once",
             ),
             ("[[span]]\nscreens = [\"A\", \"\"]", "at least two"),
+            ("[wallpaper-audio.\" \"]\nvolume = 5", "cannot be empty"),
+            ("[wallpaper-audio.\"1\"]\nloud = 5", "unknown field"),
             ("[[span]]\nscreens = [\"A\", \"A\"]", "more than once"),
             (
                 "[[span]]\nscreens = [\"A\", \"B\"]\n[[span]]\nscreens = [\"B\", \"C\"]",

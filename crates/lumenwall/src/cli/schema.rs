@@ -118,8 +118,9 @@ pub(crate) struct CliSchema {
     #[arg(long = "fullscreen-pause-ignore-appid", value_name = "TEXT", help_heading = PERFORMANCE)]
     fullscreen_pause_ignore_appid: Vec<String>,
 
-    /// Global volume, clamped to 0..=128.
-    #[arg(short = 'v', long = "volume", value_name = "VOLUME", default_value_t = 15,
+    /// Global volume, clamped to 0..=128 (64 is the 50 % of the settings window: percent =
+    /// volume × 100 / 128).
+    #[arg(short = 'v', long = "volume", value_name = "VOLUME", default_value_t = 64,
           allow_negative_numbers = true, help_heading = SOUND)]
     volume: i64,
 
@@ -127,7 +128,9 @@ pub(crate) struct CliSchema {
     #[arg(short = 's', long = "silent", help_heading = SOUND)]
     silent: bool,
 
-    /// Keep wallpaper sounds playing while another application plays audio.
+    /// Keep wallpaper sounds playing while another application plays media (the default;
+    /// `automute = true` in the configuration file pauses them while music, video or a game
+    /// plays, calls and notifications excepted).
     #[arg(long = "noautomute", help_heading = SOUND)]
     noautomute: bool,
 

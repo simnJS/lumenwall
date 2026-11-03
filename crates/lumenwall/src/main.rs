@@ -121,7 +121,8 @@ fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
         fps: plan.fps.max(1),
         audio: lumenwall_engine::AudioPlan {
             silent: plan.audio.silent,
-            volume: plan.audio.volume,
+            // Global volume × the level of the wallpaper shown ([wallpaper-audio]).
+            volume: plan.engine_volume(),
             automute: plan.audio.automute,
             processing: plan.audio.processing,
         },

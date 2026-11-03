@@ -246,9 +246,10 @@ fn run_window(args: Args) -> ExitCode {
         min_size: Some(iced::Size::new(980.0, 620.0)),
         icon: icons::window_icon(),
         exit_on_close_request: false,
-        // Linux: the app draws its own title bar and rounded frame (chrome.rs).
+        // Linux: the app draws its own title bar and frame; see-through for rounded
+        // corners only where they come out clear (chrome.rs).
         decorations: !chrome::DRAWN,
-        transparent: chrome::DRAWN,
+        transparent: chrome::transparent(),
         // Wayland app id and X11 WM_CLASS: the desktop entry
         // `packaging/linux/lumenwall-ui.desktop` (name and icon in docks).
         #[cfg(target_os = "linux")]

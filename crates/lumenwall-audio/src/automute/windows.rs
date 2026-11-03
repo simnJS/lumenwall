@@ -3,7 +3,10 @@
 //! `IMMNotificationClient` to follow the default render device.
 //!
 //! "Another application plays" ⇔ a session of another process (not the system-sounds
-//! session) is active, not muted, with a non-zero volume.
+//! session) is media being played ([`classify`]): active, not muted, audible volume, not a
+//! call. Calls are recognised by the executable's name and by the system's ducking
+//! notifications (`IAudioVolumeDuckNotification`), which name the communications sessions
+//! (streams opened on the `eCommunications` endpoint role).
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -14,16 +17,20 @@ use windows::Win32::Media::Audio::{
     AudioSessionDisconnectReason, AudioSessionState, AudioSessionStateActive,
     AudioSessionStateExpired, DEVICE_STATE, EDataFlow, ERole, IAudioSessionControl,
     IAudioSessionControl2, IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
-    IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDeviceEnumerator,
-    IMMNotificationClient, IMMNotificationClient_Impl, ISimpleAudioVolume, MMDeviceEnumerator,
-    eConsole, eRender,
+    IAudioSessionNotification, IAudioSessionNotification_Impl, IAudioVolumeDuckNotification,
+    IAudioVolumeDuckNotification_Impl, IMMDeviceEnumerator, IMMNotificationClient,
+    IMMNotificationClient_Impl, ISimpleAudioVolume, MMDeviceEnumerator, eConsole, eRender,
 };
 use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    CoUninitialize,
 };
-use windows::core::{BOOL, GUID, Interface, PCWSTR, Ref, Result as WinResult, implement};
+use windows::core::{BOOL, GUID, Interface, PCWSTR, PWSTR, Ref, Result as WinResult, implement};
 
-use super::{ChangeCallback, PlaybackWatcher, PlayingFlag};
+use super::{
+    ChangeCallback, PlaybackWatcher, PlayingFlag, Stream, Verdict, classify, describe,
+    exe_from_session_id,
+};
 
 /// A COM pointer moved between MTA threads.
 struct Mta<T>(T);
@@ -37,56 +44,133 @@ enum Msg {
     Stop,
 }
 
-#[derive(Clone, Copy)]
 struct Info {
     key: u64,
     pid: u32,
     system: bool,
+    /// Executable file name, from the session identifier (`Discord.exe`).
+    exe: Option<String>,
+    display_name: Option<String>,
+    /// Session instance identifier, as ducking notifications name sessions.
+    instance: Option<String>,
     state: AudioSessionState,
     volume: f32,
     muted: bool,
 }
 
+#[derive(Default)]
+struct Sessions {
+    list: Vec<Info>,
+    /// Instance identifiers of the communications sessions the system reported.
+    calls: Vec<String>,
+}
+
 /// Session table shared with COM callbacks.
 struct Table {
-    sessions: Mutex<Vec<Info>>,
+    sessions: Mutex<Sessions>,
     flag: PlayingFlag,
     own_pid: u32,
 }
 
 impl Table {
     fn update(&self, key: u64, f: impl FnOnce(&mut Info)) {
-        let playing = match self.sessions.lock() {
+        let media = match self.sessions.lock() {
             Ok(mut s) => {
-                if let Some(i) = s.iter_mut().find(|i| i.key == key) {
+                if let Some(i) = s.list.iter_mut().find(|i| i.key == key) {
                     f(i);
                 }
-                s.retain(|i| i.state != AudioSessionStateExpired);
-                self.playing(&s)
+                s.list.retain(|i| i.state != AudioSessionStateExpired);
+                self.media(&s)
             }
             Err(_) => return,
         };
-        self.flag.set_playing(playing);
+        self.flag.set_media(media);
     }
 
-    fn playing(&self, sessions: &[Info]) -> bool {
-        sessions.iter().any(|i| {
-            !i.system
-                && i.pid != 0
-                && i.pid != self.own_pid
-                && i.state == AudioSessionStateActive
-                && !i.muted
-                && i.volume > 0.0
+    /// A communications session started (`call`) or ended.
+    fn set_call(&self, instance: String, call: bool) {
+        let media = match self.sessions.lock() {
+            Ok(mut s) => {
+                s.calls.retain(|c| *c != instance);
+                if call {
+                    s.calls.push(instance);
+                }
+                self.media(&s)
+            }
+            Err(_) => return,
+        };
+        self.flag.set_media(media);
+    }
+
+    /// The first session that is media being played, described for the logs.
+    fn media(&self, s: &Sessions) -> Option<String> {
+        s.list.iter().find_map(|i| {
+            let call = i
+                .instance
+                .as_ref()
+                .is_some_and(|id| s.calls.iter().any(|c| c == id));
+            let stream = Stream {
+                ours: i.pid == self.own_pid,
+                has_owner: i.pid != 0 && !i.system,
+                app_name: i.display_name.as_deref().filter(|n| !n.is_empty()),
+                binary: i.exe.as_deref(),
+                role: call.then_some("communication"),
+                paused: i.state != AudioSessionStateActive,
+                muted: i.muted,
+                volume: i.volume,
+            };
+            (classify(&stream) == Verdict::Media).then(|| describe(&stream))
         })
     }
 
     fn recompute(&self) {
-        let playing = self
-            .sessions
-            .lock()
-            .map(|s| self.playing(&s))
-            .unwrap_or(false);
-        self.flag.set_playing(playing);
+        let media = self.sessions.lock().ok().and_then(|s| self.media(&s));
+        self.flag.set_media(media);
+    }
+}
+
+/// Takes a string the audio service allocated (`CoTaskMemAlloc`) and frees it.
+///
+/// # Safety
+/// `p` is null or a valid string allocated with `CoTaskMemAlloc`, not used afterwards.
+unsafe fn take_string(p: PWSTR) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: valid, NUL-terminated per the caller's contract; freed once just after.
+    let text = unsafe { p.to_string() }.ok();
+    // SAFETY: allocated by the audio service with CoTaskMemAlloc.
+    unsafe { CoTaskMemFree(Some(p.0 as *const _)) };
+    text
+}
+
+#[implement(IAudioVolumeDuckNotification)]
+struct DuckEvents {
+    table: Arc<Table>,
+}
+
+impl DuckEvents_Impl {
+    fn session(id: &PCWSTR) -> Option<String> {
+        if id.is_null() {
+            return None;
+        }
+        // SAFETY: the system passes a valid NUL-terminated string for the call's duration.
+        unsafe { id.to_string() }.ok()
+    }
+}
+
+impl IAudioVolumeDuckNotification_Impl for DuckEvents_Impl {
+    fn OnVolumeDuckNotification(&self, sessionid: &PCWSTR, _count: u32) -> WinResult<()> {
+        if let Some(id) = Self::session(sessionid) {
+            self.table.set_call(id, true);
+        }
+        Ok(())
+    }
+    fn OnVolumeUnduckNotification(&self, sessionid: &PCWSTR) -> WinResult<()> {
+        if let Some(id) = Self::session(sessionid) {
+            self.table.set_call(id, false);
+        }
+        Ok(())
     }
 }
 
@@ -190,7 +274,7 @@ impl SessionWatcher {
         let flag = PlayingFlag::new(on_change);
         let (tx, rx) = channel();
         let table = Arc::new(Table {
-            sessions: Mutex::new(Vec::new()),
+            sessions: Mutex::new(Sessions::default()),
             flag: flag.clone(),
             own_pid: std::process::id(),
         });
@@ -227,6 +311,8 @@ impl Drop for SessionWatcher {
 struct Attached {
     manager: IAudioSessionManager2,
     notifier: IAudioSessionNotification,
+    /// Ducking notifications, when the system accepted the registration.
+    duck: Option<IAudioVolumeDuckNotification>,
     sessions: Vec<(IAudioSessionControl, IAudioSessionEvents)>,
     next_key: u64,
 }
@@ -236,12 +322,16 @@ impl Attached {
         // SAFETY: COM calls on objects owned by this MTA thread.
         unsafe {
             let _ = self.manager.UnregisterSessionNotification(&self.notifier);
+            if let Some(duck) = &self.duck {
+                let _ = self.manager.UnregisterDuckNotification(duck);
+            }
             for (control, events) in &self.sessions {
                 let _ = control.UnregisterAudioSessionNotification(events);
             }
         }
         if let Ok(mut s) = table.sessions.lock() {
-            s.clear();
+            // Calls in progress stay known: instance identifiers are system-wide.
+            s.list.clear();
         }
         table.recompute();
     }
@@ -253,9 +343,22 @@ impl Attached {
         let info = unsafe {
             let c2: Option<IAudioSessionControl2> = control.cast().ok();
             let volume: Option<ISimpleAudioVolume> = control.cast().ok();
+            let identifier = c2
+                .as_ref()
+                .and_then(|c| c.GetSessionIdentifier().ok())
+                .and_then(|p| take_string(p));
             Info {
                 key,
                 pid: c2.as_ref().and_then(|c| c.GetProcessId().ok()).unwrap_or(0),
+                exe: identifier
+                    .as_deref()
+                    .and_then(exe_from_session_id)
+                    .map(str::to_owned),
+                display_name: control.GetDisplayName().ok().and_then(|p| take_string(p)),
+                instance: c2
+                    .as_ref()
+                    .and_then(|c| c.GetSessionInstanceIdentifier().ok())
+                    .and_then(|p| take_string(p)),
                 // S_OK means "is the system sounds session", S_FALSE means not.
                 system: c2
                     .as_ref()
@@ -284,7 +387,7 @@ impl Attached {
             return;
         }
         if let Ok(mut s) = table.sessions.lock() {
-            s.push(info);
+            s.list.push(info);
         }
         self.sessions.push((control, events));
         table.recompute();
@@ -307,9 +410,19 @@ fn attach(
         // The session enumerator must be obtained for notifications to be delivered.
         let list = manager.GetSessionEnumerator()?;
         manager.RegisterSessionNotification(&notifier)?;
+        // NULL session: every ducking notification, without changing our own ducking.
+        let duck: IAudioVolumeDuckNotification = DuckEvents {
+            table: table.clone(),
+        }
+        .into();
+        let duck = manager
+            .RegisterDuckNotification(PCWSTR::null(), &duck)
+            .is_ok()
+            .then_some(duck);
         let mut attached = Attached {
             manager,
             notifier,
+            duck,
             sessions: Vec::new(),
             next_key: 0,
         };

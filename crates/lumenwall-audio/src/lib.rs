@@ -28,8 +28,12 @@ pub use automute::{AutomuteDetector, AutomuteSettings, PlaybackWatcher};
 pub use capture::{AudioCapture, CaptureSink, CaptureState};
 pub use spectrum::{Bands, SpectrumAnalyzer, SpectrumFeed};
 
-/// Default global volume (`--volume`, spec §2.4).
-pub const DEFAULT_VOLUME: i32 = 15;
+/// Default global volume: 64 of 128, shown as 50 % by the UI (percent = volume × 100 / 128).
+/// The reference's default is [`REFERENCE_DEFAULT_VOLUME`] (spec §2.4), about 12 % and barely
+/// audible (see README, Deviations).
+pub const DEFAULT_VOLUME: i32 = 64;
+/// The reference's default `--volume` (spec §2.4).
+pub const REFERENCE_DEFAULT_VOLUME: i32 = 15;
 /// Maximum global volume; gain is `volume / 128` (spec §11.1).
 pub const MAX_VOLUME: i32 = 128;
 

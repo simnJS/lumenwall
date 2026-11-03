@@ -13,7 +13,7 @@ use pulse::context::introspect::SinkInputInfo;
 use pulse::context::subscribe::{Facility, InterestMaskSet};
 use pulse::proplist::properties;
 
-use super::{ChangeCallback, PlaybackWatcher, PlayingFlag, is_own_pid};
+use super::{ChangeCallback, PlaybackWatcher, PlayingFlag, Stream, Verdict, classify, is_own_pid};
 use crate::pulse_util::{PulseClient, PulseThread};
 
 /// Watcher thread for the PulseAudio protocol.
@@ -52,22 +52,61 @@ impl PlaybackWatcher for PulseWatcher {
     }
 }
 
-/// Whether a sink input counts as "another application plays" (§12.1 rule 3).
-pub(crate) fn counts(pid: Option<&str>, volume_is_muted: bool, own_pid: u32) -> bool {
-    // parity: needs a PID property different from ours and a non-zero average volume; the
-    // corked state and the mute flag are not examined (QO-13).
-    match pid {
-        Some(pid) => !is_own_pid(pid, own_pid) && !volume_is_muted,
-        None => false,
+/// The properties of a sink input that [`classify`] reads.
+#[derive(Debug, Default)]
+pub(crate) struct SinkInput {
+    pub pid: Option<String>,
+    pub app_name: Option<String>,
+    pub binary: Option<String>,
+    pub role: Option<String>,
+    pub corked: bool,
+    pub muted: bool,
+    /// Linear gain of the average channel volume.
+    pub volume: f32,
+}
+
+impl SinkInput {
+    fn from_info(info: &SinkInputInfo<'_>) -> Self {
+        let p = &info.proplist;
+        Self {
+            pid: p.get_str(properties::APPLICATION_PROCESS_ID),
+            app_name: p.get_str(properties::APPLICATION_NAME),
+            binary: p.get_str(properties::APPLICATION_PROCESS_BINARY),
+            role: p.get_str(properties::MEDIA_ROLE),
+            // pipewire-pulse also reports a stream whose node is not running as corked.
+            corked: info.corked,
+            muted: info.mute,
+            volume: pulse_gain(info.volume.avg().0),
+        }
     }
+
+    pub(crate) fn stream(&self, own_pid: u32) -> Stream<'_> {
+        Stream {
+            ours: self.pid.as_deref().is_some_and(|p| is_own_pid(p, own_pid)),
+            has_owner: self.pid.is_some(),
+            app_name: self.app_name.as_deref(),
+            binary: self.binary.as_deref(),
+            role: self.role.as_deref(),
+            paused: self.corked,
+            muted: self.muted,
+            volume: self.volume,
+        }
+    }
+}
+
+/// PulseAudio software volumes are cubic: linear gain = (v / NORM)³.
+fn pulse_gain(v: u32) -> f32 {
+    let x = v as f32 / pulse::volume::Volume::NORMAL.0 as f32;
+    x * x * x
 }
 
 #[derive(Default)]
 struct Query {
     dirty: bool,
     in_flight: bool,
-    acc: bool,
-    result: Option<bool>,
+    /// First stream of the current listing that counts.
+    acc: Option<String>,
+    result: Option<Option<String>>,
 }
 
 struct WatchClient {
@@ -103,13 +142,13 @@ impl PulseClient for WatchClient {
         let start = {
             let mut q = self.query.borrow_mut();
             if let Some(r) = q.result.take() {
-                self.flag.set_playing(r);
+                self.flag.set_media(r);
             }
             let start = q.dirty && !q.in_flight;
             if start {
                 q.dirty = false;
                 q.in_flight = true;
-                q.acc = false;
+                q.acc = None;
             }
             start
         };
@@ -121,14 +160,25 @@ impl PulseClient for WatchClient {
                     let mut q = q.borrow_mut();
                     match res {
                         ListResult::Item(info) => {
-                            let pid = info.proplist.get_str(properties::APPLICATION_PROCESS_ID);
-                            if counts(pid.as_deref(), info.volume.avg().is_muted(), own) {
-                                q.acc = true;
+                            let input = SinkInput::from_info(info);
+                            let stream = input.stream(own);
+                            let verdict = classify(&stream);
+                            tracing::debug!(
+                                "automute: sink input {} {}: {verdict:?} (role {:?}, corked {}, muted {}, gain {:.3})",
+                                info.index,
+                                super::describe(&stream),
+                                input.role,
+                                input.corked,
+                                input.muted,
+                                input.volume
+                            );
+                            if verdict == Verdict::Media && q.acc.is_none() {
+                                q.acc = Some(super::describe(&stream));
                             }
                         }
                         ListResult::End | ListResult::Error => {
                             q.in_flight = false;
-                            q.result = Some(q.acc);
+                            q.result = Some(q.acc.take());
                         }
                     }
                 },
@@ -147,17 +197,94 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    fn input(pid: Option<&str>) -> SinkInput {
+        SinkInput {
+            pid: pid.map(str::to_owned),
+            app_name: Some("mpv".into()),
+            binary: Some("mpv".into()),
+            volume: 1.0,
+            ..SinkInput::default()
+        }
+    }
+
     #[test]
     fn counting_rule() {
-        assert!(counts(Some("4242"), false, 1));
-        assert!(!counts(Some("1"), false, 1), "own stream");
-        assert!(!counts(Some(" 1 "), false, 1), "own stream, padded");
-        assert!(!counts(None, false, 1), "no PID");
-        assert!(!counts(Some("4242"), true, 1), "zero volume");
+        let counts = |i: &SinkInput| classify(&i.stream(1)) == Verdict::Media;
+        assert!(counts(&input(Some("4242"))));
+        assert!(!counts(&input(Some("1"))), "own stream");
+        assert!(!counts(&input(Some(" 1 "))), "own stream, padded");
+        assert!(!counts(&input(None)), "no PID");
         assert!(
-            counts(Some("abc"), false, 1),
+            counts(&input(Some("abc"))),
             "unparsable PID differs from ours"
         );
+        let silent = SinkInput {
+            volume: pulse_gain(0),
+            ..input(Some("4242"))
+        };
+        assert!(!counts(&silent), "zero volume");
+        let corked = SinkInput {
+            corked: true,
+            ..input(Some("4242"))
+        };
+        assert!(!counts(&corked), "corked");
+        let muted = SinkInput {
+            muted: true,
+            ..input(Some("4242"))
+        };
+        assert!(!counts(&muted), "muted");
+        let call = SinkInput {
+            app_name: Some("WEBRTC VoiceEngine".into()),
+            binary: Some("Discord".into()),
+            ..input(Some("4242"))
+        };
+        assert!(!counts(&call), "Discord call");
+    }
+
+    #[test]
+    fn cubic_volume() {
+        assert_eq!(pulse_gain(pulse::volume::Volume::NORMAL.0), 1.0);
+        assert_eq!(pulse_gain(0), 0.0);
+        // 10 % on the cubic scale is −60 dB: inaudible.
+        assert!(pulse_gain(pulse::volume::Volume::NORMAL.0 / 10) < 1.01e-3);
+    }
+
+    /// Lists the session's sink inputs with their verdicts (run with `--nocapture`).
+    #[test]
+    #[ignore = "needs a running PulseAudio/pipewire-pulse server"]
+    fn live_list_streams() {
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        struct Dump(Arc<Mutex<Vec<String>>>, Rc<RefCell<bool>>);
+        impl PulseClient for Dump {
+            fn ready(&mut self, ctx: &mut Context) {
+                let out = self.0.clone();
+                let done = self.1.clone();
+                ctx.introspect().get_sink_input_info_list(
+                    move |res: ListResult<&SinkInputInfo<'_>>| match res {
+                        ListResult::Item(info) => {
+                            let i = SinkInput::from_info(info);
+                            let line = format!("{:?} -> {:?}", i, classify(&i.stream(0)));
+                            out.lock().unwrap().push(line);
+                        }
+                        _ => *done.borrow_mut() = true,
+                    },
+                );
+            }
+            fn dispatched(&mut self, _: &mut Context) {}
+            fn lost(&mut self) {}
+        }
+        let s = seen.clone();
+        let _t = PulseThread::spawn("lumenwall-automute-dump", None, move || {
+            Dump(s, Rc::default())
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let lines = seen.lock().unwrap();
+        for l in lines.iter() {
+            println!("{l}");
+        }
+        assert!(!lines.is_empty(), "no sink input listed");
     }
 
     fn assert_never_blocks(server: String, watch_for: Duration) {

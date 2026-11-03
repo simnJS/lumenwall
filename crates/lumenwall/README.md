@@ -66,9 +66,9 @@ marked *target* apply to the output or span group named by the last `-r`/`--scre
 | `--no-fullscreen-pause` | | | pause on | Keep rendering under fullscreen windows |
 | `--fullscreen-pause-only-active` | | | off | Wayland: only active fullscreen windows pause |
 | `--fullscreen-pause-ignore-appid` | | text | — | Ignore app_ids containing it; empty values ignored. Repeatable |
-| `--volume` | `-v` | integer | 15 | Clamped to 0..=128. Exclusive with `--silent` |
+| `--volume` | `-v` | integer | 64 | Clamped to 0..=128 (gain = volume / 128); see [Sound](#sound). Exclusive with `--silent` |
 | `--silent` | `-s` | | off | Mute wallpapers |
-| `--noautomute` | | | automute on | Keep sound while another application plays |
+| `--noautomute` | | | automute off | Keep sound while another application plays media (forces `automute = false`) |
 | `--no-audio-processing` | | | on | No spectrum capture |
 | `--screenshot` | | file | — | `.bmp`, `.png`, `.jpg`, `.jpeg` (case-sensitive) |
 | `--screenshot-delay` | | integer ≥ 0 | 5 | Frames before the capture, clamped to 5 |
@@ -105,9 +105,9 @@ on Windows), or `--config FILE`. Missing default file: ignored. Unknown keys are
 wallpaper = "2317494988"           # default wallpaper (like the positional)
 playlist = "evening"               # window playlist
 fps = 30
-volume = 15
+volume = 64                        # 0..=128 like --volume; 64 = 50 % in the window
 silent = false
-automute = true
+automute = false                   # true: pause sounds while music, video or a game plays
 audio-processing = true
 fullscreen-pause = true
 fullscreen-pause-only-active = false
@@ -125,6 +125,10 @@ screenshot-delay = 5
 
 [properties]                       # booleans become "1"/"0"
 bloom = true
+
+[wallpaper-audio."2317494988"]     # per wallpaper: Workshop ID or folder path
+volume = 40                        # percent of the global volume, 0..=100 (default 100)
+muted = false
 
 [window]                           # explicit window (exclusive with screen/span)
 x = 0
@@ -161,6 +165,33 @@ Merge with the command line (command line first):
   can only force their setting; `--volume` turns a configured `silent` off.
 - **Lists**: `--fullscreen-pause-ignore-appid` replaces the file's list.
 - **Properties**: merged by key, command line wins.
+- **Per-wallpaper sound**: file only (`[wallpaper-audio]`); a path to a Workshop item folder
+  is read as its ID.
+
+## Sound
+
+- **Volume units.** `--volume` and `volume` keep the reference's 0..=128 scale (gain =
+  volume / 128). The window, the tray and the IPC protocol use a fraction shown as a
+  percentage: percent = volume × 100 / 128, volume = round(percent × 128 / 100). 64 ↔ 50 %,
+  128 ↔ 100 %, the reference's default 15 ↔ 12 %. Every whole percent survives the round
+  trip (`settings::volume_fraction`, `volume_from_fraction`).
+- **Default 64 (50 %).** The reference's 15 is a gain of 0.12 (−18.6 dB) and was reported as
+  "no sound". 64 is −6 dB: audible, with headroom on loud wallpapers.
+- **Automute off by default.** When on (`automute = true`, or the window's setting), wallpaper
+  sounds pause while another program plays music, video or a game; calls, notifications,
+  speech, paused or muted streams and Lumenwall itself are ignored (rules in the
+  `lumenwall-audio` README). It stays off by default because a wrong "something is playing"
+  is silent and unexplained (the reported bug: a Discord call muted every wallpaper), while a
+  missed one is heard and fixed with one click; and because on Linux the PulseAudio protocol
+  that Lumenwall uses cannot tell an idle open stream from a playing one (Speech Dispatcher's
+  idle stream is reported as not paused). Fullscreen windows still pause the wallpapers
+  through the fullscreen pause.
+- **Per wallpaper.** `[wallpaper-audio."<id or path>"]` sets a wallpaper's level (percent of
+  the global volume) and mute; the engine mixes at global × level. Clients change it with
+  `set_wallpaper_audio`; the daemon writes the entry (removed when back to 100 %, unmuted)
+  and applies it live. The engine has one mixer for every output: when different wallpapers
+  are shown at once, the loudest of their levels applies to all of them until the engine
+  mixes each wallpaper separately (`ExecutionPlan::engine_volume`).
 
 **Hot reload**: the file's directory is watched with OS notifications (inotify,
 ReadDirectoryChangesW; no polling), so editor rename-replace and late creation are seen.
@@ -179,9 +210,10 @@ log file settings apply at next start. The directory must exist at startup to be
 - `lumenwall` with no argument and no configured wallpaper starts idle (no surface, no GPU device)
   and waits for a client (deviation: the reference exits with "no wallpaper").
 - Client choices (wallpaper per output or for all, scaling, saved properties, fps, fullscreen
-  pause, automute, mute, volume) go into the configuration file (`wallpaper`, `scaling`,
-  `[[screen]]`, `[properties]`, `fps`, `silent`, `volume`…), written atomically, and replace the
-  command-line values they concern for the rest of the session. Pause and property previews are
+  pause, automute, mute, volume, per-wallpaper sound) go into the configuration file
+  (`wallpaper`, `scaling`, `[[screen]]`, `[properties]`, `fps`, `silent`, `volume`,
+  `[wallpaper-audio]`…), written atomically, and replace the command-line values they concern
+  for the rest of the session. Pause and property previews are
   not saved. Property overrides stay keyed by name (shared by wallpapers with the same name).
 - Reads never wake the engine; statistics (fps, CPU ms/frame, GPU busy %, process CPU, RSS,
   GPU memory) are measured only while a client subscribes. `examples/lumenctl.rs` drives a daemon.
@@ -231,6 +263,9 @@ The engine is also expected to use `PlaylistRunner` (deadline-driven, `pause_end
 | Topic | Reference | Lumenwall | Reason |
 |---|---|---|---|
 | QO-1 `--fps` ≤ 0 | Accepted (hang / uncapped loop) | Fatal error | PARITY 1–2 |
+| Default volume | 15 (gain 0.12) | 64 (gain 0.5, 50 % in the window) | Reported as inaudible; see [Sound](#sound) |
+| Automute default | On (`--noautomute` turns it off) | Off (`automute = true` turns it on); `--noautomute` still accepted | A false detection silences every wallpaper; see [Sound](#sound) |
+| Per-wallpaper sound level | None | `[wallpaper-audio]` | Lumenwall extension |
 | QO-2 `--scaling`/`--clamp` order trap | Observable behaviour | Reproduced; `--clamping` accepted as alias | Parity; alias from the reference's user docs |
 | QO-25 playlist on a span | Ignored (synthetic key) | Works | PARITY 4/5 |
 | QO-28 two positionals | Undetermined | Fatal error | Avoid silently picking one |

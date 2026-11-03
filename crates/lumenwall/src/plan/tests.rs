@@ -110,15 +110,18 @@ fn defaults_of_spec_07_2_4() {
     assert_eq!(p.layer, Layer::Bottom);
     assert_eq!(p.fps, 30);
     assert_eq!(p.hwdec, HwDecode::Auto);
+    // Deviations: volume 64 (50 %) instead of 15, automute off (README, Deviations).
     assert_eq!(
         p.audio,
         AudioPlan {
             silent: false,
-            volume: 15,
-            automute: true,
-            processing: true
+            volume: 64,
+            automute: false,
+            processing: true,
+            wallpapers: BTreeMap::new(),
         }
     );
+    assert_eq!(p.engine_volume(), 64);
     assert_eq!(
         p.fullscreen_pause,
         FullscreenPausePlan {
@@ -382,7 +385,8 @@ fn command_line_settings() {
             silent: false,
             volume: 128,
             automute: false,
-            processing: false
+            processing: false,
+            wallpapers: BTreeMap::new(),
         }
     );
     assert_eq!(
@@ -457,7 +461,8 @@ fn config_scalars_apply_when_the_command_line_is_silent() {
             silent: false,
             volume: 128,
             automute: false,
-            processing: false
+            processing: false,
+            wallpapers: BTreeMap::new(),
         }
     );
     assert_eq!(
@@ -518,9 +523,16 @@ fn config_sound() {
         AudioPlan {
             silent: true,
             volume: 40,
-            automute: true,
-            processing: true
+            automute: false,
+            processing: true,
+            wallpapers: BTreeMap::new(),
         }
+    );
+    assert!(plan_cfg(&["X"], "automute = true").audio.automute);
+    assert!(
+        !plan_cfg(&["X", "--noautomute"], "automute = true")
+            .audio
+            .automute
     );
     let p = plan_cfg(&["X", "-v", "7"], config);
     assert_eq!((p.audio.silent, p.audio.volume), (false, 7));
@@ -786,10 +798,67 @@ fn display_summarises_the_plan() {
         text.contains("A: /playlists/day/first (fill, clamp, playlist day)"),
         "{text}"
     );
-    assert!(text.contains("fps 30, volume 15 (silent)"), "{text}");
+    assert!(text.contains("fps 30, volume 64 (silent)"), "{text}");
     assert!(
         plan(&["-w", "1x2x3x4", "X"])
             .to_string()
             .starts_with("mode: window 1x2x3x4")
     );
+}
+
+#[test]
+fn wallpaper_levels() {
+    let ws = "/steam/steamapps/workshop/content/431960";
+    let config = format!(
+        r#"
+        volume = 100
+        [wallpaper-audio."1"]
+        volume = 50
+        [wallpaper-audio."2"]
+        volume = 80
+        muted = true
+        [wallpaper-audio."{ws}/3"]
+        volume = 250
+        muted = true
+        [wallpaper-audio."4"]
+        volume = 100
+        muted = false
+        "#
+    );
+    let p = plan_cfg(&[&format!("{ws}/1")], &config);
+    // Default entries are dropped, volumes clamped, paths to Workshop items become ids.
+    assert_eq!(
+        p.audio.wallpapers.keys().collect::<Vec<_>>(),
+        ["1", "2", "3"]
+    );
+    assert_eq!(p.audio.wallpapers["3"].percent, 100);
+    assert_eq!(p.audio.level(Path::new(&format!("{ws}/3"))).gain(), 0.0);
+    assert_eq!(p.audio.level(Path::new(&format!("{ws}/1"))).percent, 50);
+    assert_eq!(p.audio.level(Path::new(&format!("{ws}/1/"))).percent, 50);
+    assert_eq!(
+        p.audio.level(Path::new("/elsewhere/1")),
+        WallpaperLevel::DEFAULT
+    );
+    assert_eq!(p.audio.level(Path::new(&format!("{ws}/2"))).gain(), 0.0);
+    // Global × wallpaper.
+    assert_eq!(p.engine_volume(), 50);
+    let p = plan_cfg(&[&format!("{ws}/2")], &config);
+    assert_eq!(p.engine_volume(), 0);
+    let p = plan_cfg(&[&format!("{ws}/9")], &config);
+    assert_eq!(p.engine_volume(), 100);
+    // Two wallpapers at once: the loudest level applies.
+    let p = plan_cfg(
+        &[
+            "-r",
+            "A",
+            "--bg",
+            &format!("{ws}/1"),
+            "-r",
+            "B",
+            "--bg",
+            &format!("{ws}/2"),
+        ],
+        &config,
+    );
+    assert_eq!(p.engine_volume(), 50);
 }

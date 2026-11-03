@@ -145,6 +145,10 @@ pub struct Tokens {
     pub raised: Color,
     pub overlay: Color,
     pub border: Color,
+    /// The window's 1 px outline on Linux, where the app draws its own frame (`chrome.rs`).
+    /// Opaque: a translucent outline over the transparent window lets the desktop show
+    /// through, and the compositor brightens it (see `chrome.rs`).
+    pub frame: Color,
     pub text: Color,
     pub muted: Color,
     /// Placeholders, hints, secondary labels: still AA (≥ 4.5:1) on every surface.
@@ -174,6 +178,8 @@ pub const DARK: Tokens = Tokens {
     raised: color!(0x20232c),
     overlay: color!(0x2a2e39),
     border: color!(0x2c303b),
+    // `border`: the panels' edge colour, 1.4:1 on the sidebar.
+    frame: color!(0x2c303b),
     text: color!(0xeeeff4),
     muted: color!(0xa3a7b7),
     faint: color!(0x878c9e),
@@ -202,6 +208,9 @@ pub const LIGHT: Tokens = Tokens {
     raised: color!(0xffffff),
     overlay: color!(0xf0f0f4),
     border: color!(0xdedfe6),
+    // A step darker than `border` (1.5:1 on the sidebar) so the window stays outlined
+    // over white windows behind it.
+    frame: color!(0xc6c8d2),
     text: color!(0x16171c),
     muted: color!(0x4d5060),
     faint: color!(0x676a7b),

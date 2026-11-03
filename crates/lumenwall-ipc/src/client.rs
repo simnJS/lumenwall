@@ -257,6 +257,20 @@ impl Client {
         self.call_done(Request::SetVolume { volume })
     }
 
+    /// Sound level of one wallpaper (see [`Request::SetWallpaperAudio`]).
+    pub fn set_wallpaper_audio(
+        &self,
+        wallpaper: impl Into<PathBuf>,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) -> Result<(), Error> {
+        self.call_done(Request::SetWallpaperAudio {
+            wallpaper: wallpaper.into(),
+            volume,
+            muted,
+        })
+    }
+
     pub fn settings(&self) -> Result<Settings, Error> {
         match self.call(Request::GetSettings)? {
             Response::Settings(settings) => Ok(settings),

@@ -226,6 +226,34 @@ impl Handler for FakeDaemon {
         Ok(())
     }
 
+    fn set_wallpaper_audio(
+        &self,
+        wallpaper: &Path,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) -> Result<(), RemoteError> {
+        {
+            let mut s = self.state.lock().unwrap();
+            let levels = s.wallpaper_audio.get_or_insert_default();
+            let key = wallpaper_key(wallpaper);
+            let mut level = levels.get(&key).copied().unwrap_or_default();
+            if let Some(v) = volume {
+                level.volume = v;
+            }
+            if let Some(m) = muted {
+                level.muted = m;
+            }
+            // Like the daemon: only levels that change something are kept.
+            if level.is_default() {
+                levels.remove(&key);
+            } else {
+                levels.insert(key, level);
+            }
+        }
+        self.publish_state();
+        Ok(())
+    }
+
     fn settings(&self) -> Result<Settings, RemoteError> {
         Ok(self.settings.lock().unwrap().clone())
     }
@@ -252,6 +280,7 @@ pub fn start(playing: &[std::path::PathBuf]) -> Result<(Server, Endpoint), Error
     let daemon = Arc::new(FakeDaemon {
         state: Mutex::new(State {
             volume: 0.5,
+            wallpaper_audio: Some(Default::default()),
             ..State::default()
         }),
         ..FakeDaemon::default()
@@ -291,6 +320,7 @@ impl Handler for SamplingHandler {
         set_paused(paused: bool) -> Result<(), RemoteError>;
         set_muted(muted: bool) -> Result<(), RemoteError>;
         set_volume(volume: f32) -> Result<(), RemoteError>;
+        set_wallpaper_audio(wallpaper: &Path, volume: Option<f32>, muted: Option<bool>) -> Result<(), RemoteError>;
         settings() -> Result<Settings, RemoteError>;
         set_settings(settings: Settings) -> Result<(), RemoteError>;
         stats() -> Result<Stats, RemoteError>;

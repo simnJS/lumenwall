@@ -125,6 +125,8 @@ pub struct App {
     pub drag: Option<Drag>,
     pub drop_target: Option<String>,
     pub volume_drag: Option<f32>,
+    /// A wallpaper's sound level being dragged in the details panel.
+    pub wallpaper_volume_drag: Option<(PathBuf, f32)>,
     /// Set by the root view when a frame is actually drawn (see `view::drawn`).
     pub drawn: std::cell::Cell<bool>,
     /// Animation ticks in a row that found no new frame drawn (window hidden).
@@ -197,6 +199,10 @@ pub enum Message {
     Mute,
     Volume(f32),
     VolumeRelease,
+    /// Sound level of one wallpaper (details panel), 0..1.
+    WallpaperVolume(PathBuf, f32),
+    WallpaperVolumeRelease,
+    WallpaperMute(PathBuf),
     StartEngine,
     EngineSettings(Settings),
     Autostart(bool),
@@ -286,6 +292,7 @@ impl App {
             drag: None,
             drop_target: None,
             volume_drag: None,
+            wallpaper_volume_drag: None,
             rss: std::cell::Cell::new((None, None)),
             drawn: std::cell::Cell::new(true),
             idle_ticks: 0,
@@ -343,12 +350,12 @@ impl App {
         crate::theme::theme(dark)
     }
 
-    /// What the window is cleared to: nothing on Linux, so the corners the
-    /// app's frame rounds are see-through (`chrome.rs`).
+    /// What the window is cleared to: nothing where the window is see-through, so
+    /// the corners the app's frame rounds are clear (`chrome.rs`).
     pub fn style(&self, theme: &Theme) -> iced::theme::Style {
         use iced::theme::Base;
         let mut style = theme.base();
-        if crate::chrome::DRAWN {
+        if crate::chrome::transparent() {
             style.background_color = iced::Color::TRANSPARENT;
         }
         style
@@ -768,12 +775,13 @@ impl App {
                         self.ws_refresh();
                     }
                 }
-                ScanEvent::Resolutions(found) => {
+                ScanEvent::Meta(found) => {
                     if let Some(lib) = &mut self.library {
                         let map: HashMap<_, _> = found.into_iter().collect();
                         for w in &mut lib.wallpapers {
-                            if let Some(r) = map.get(&w.dir) {
-                                w.resolution = Some(*r);
+                            if let Some(m) = map.get(&w.dir) {
+                                w.resolution = w.resolution.or(m.resolution);
+                                w.sound = Some(m.sound);
                             }
                         }
                         self.library_gen += 1;
@@ -1094,6 +1102,15 @@ impl App {
                 self.daemon.set_volume(v);
             }
             Message::VolumeRelease => self.volume_drag = None,
+            Message::WallpaperVolume(dir, v) => {
+                self.daemon.set_wallpaper_audio(dir.clone(), Some(v), None);
+                self.wallpaper_volume_drag = Some((dir, v));
+            }
+            Message::WallpaperVolumeRelease => self.wallpaper_volume_drag = None,
+            Message::WallpaperMute(dir) => {
+                let muted = self.daemon.wallpaper_audio(&dir).is_some_and(|l| l.muted);
+                self.daemon.set_wallpaper_audio(dir, None, Some(!muted));
+            }
             Message::StartEngine => self.daemon.launch(),
             Message::EngineSettings(s) => self.daemon.set_settings(s),
             Message::Autostart(on) => match crate::config::autostart::set(on) {

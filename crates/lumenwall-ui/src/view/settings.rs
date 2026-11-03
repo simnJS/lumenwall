@@ -191,7 +191,7 @@ impl App {
                 self.toggle_row(
                     t,
                     self.t(K::Automute),
-                    None,
+                    Some(self.t(K::AutomuteHint)),
                     s.automute,
                     Some(with(|s, b| s.automute = b))
                 ),

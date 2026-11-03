@@ -11,8 +11,21 @@
 //! - a press on the band moves the window, two within 400 ms maximise or
 //!   restore it, a right press opens the desktop's window menu;
 //! - 4 px edges and 12 px corners resize it;
-//! - rounded corners (12 px, as GNOME's own windows) and a hairline outline,
-//!   both dropped while the window is maximised or full screen.
+//! - a 1 px outline in the theme's `frame` colour and, where the window can be
+//!   see-through, rounded corners (12 px, as GNOME's own windows); both are
+//!   dropped while the window is maximised or full screen.
+//!
+//! The outline is opaque, painted under the content. A translucent one drawn over
+//! the transparent window let the desktop show through it, and came out as a
+//! light line on every desktop: iced blends in linear light and hands the
+//! compositor premultiplied sRGB values, so a 10 % white edge is composited as
+//! about 35 % (measured on GNOME 50: +80 levels instead of +16). Only the
+//! antialiased arc of the corners is left partly transparent.
+//!
+//! Transparency is only asked for where the corners really come out clear: on
+//! Wayland with the GPU renderer (premultiplied alpha). The CPU renderer
+//! presents opaque buffers (corners would be black), and X11 needs a running
+//! compositor: there the window keeps square corners.
 //!
 //! Windows and macOS keep their native title bar.
 
@@ -31,6 +44,32 @@ use crate::theme::{self, Tokens, layout, size, space as sp};
 
 /// Whether the app draws the window's title bar and frame.
 pub const DRAWN: bool = cfg!(target_os = "linux");
+
+/// Whether the window is created see-through, for rounded corners: Linux, a Wayland
+/// session, and the GPU renderer (read once; `main` settles `ICED_BACKEND` first).
+pub fn transparent() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let var = |k: &str| std::env::var(k).unwrap_or_default();
+        DRAWN
+            && wants_transparency(
+                std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()),
+                &var("WINIT_UNIX_BACKEND"),
+                &var("ICED_BACKEND"),
+            )
+    })
+}
+
+/// [`transparent`] from the environment it reads.
+fn wants_transparency(wayland_display: bool, winit_backend: &str, iced_backend: &str) -> bool {
+    let wayland = wayland_display && !winit_backend.eq_ignore_ascii_case("x11");
+    // `ICED_BACKEND` lists the renderers to try; the first one wins.
+    let cpu = iced_backend
+        .split(',')
+        .next()
+        .is_some_and(|b| b.trim().eq_ignore_ascii_case("tiny-skia"));
+    wayland && !cpu
+}
 
 /// Height of the band.
 pub const BAND_H: f32 = 46.0;
@@ -213,9 +252,14 @@ impl App {
         }
     }
 
+    /// Whether the window has its outline now (not maximised or full screen).
+    pub fn framed(&self) -> bool {
+        DRAWN && !self.chrome.maximized
+    }
+
     /// Whether the window's corners are rounded now.
     pub fn rounded(&self) -> bool {
-        DRAWN && !self.chrome.maximized
+        self.framed() && transparent()
     }
 
     /// Radius of a region's background at the window corners it touches.
@@ -330,29 +374,29 @@ impl App {
         Some(r.into())
     }
 
-    /// `frame` with the window's hairline outline and rounded corners, and the
-    /// resize edges over it, while the window is not maximised.
+    /// `frame` with the window's outline (and rounded corners where the window is
+    /// see-through), and the resize edges over it, while the window is not maximised.
     pub fn window_frame<'a>(
         &'a self,
         t: &'static Tokens,
         frame: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        if !self.rounded() {
+        if !self.framed() {
             return frame;
         }
+        let radius = if self.rounded() { RADIUS } else { 0.0 };
+        // An opaque plate in the outline colour, the content 1 px inside it (its
+        // corners `corner_radius`, concentric): the 1 px ring left visible is the
+        // outline, and nothing of the desktop shows through it.
         let outlined = container(frame)
             .padding(1)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_: &Theme| container::Style {
+                background: Some(t.frame.into()),
                 border: Border {
-                    color: if t.dark {
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.10)
-                    } else {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.16)
-                    },
-                    width: 1.0,
-                    radius: RADIUS.into(),
+                    radius: radius.into(),
+                    ..Border::default()
                 },
                 ..container::Style::default()
             });
@@ -472,5 +516,25 @@ mod tests {
         );
         // Without a colon, everything is on the left.
         assert_eq!(ButtonLayout::parse("close").start, vec![Control::Close]);
+    }
+
+    #[test]
+    fn transparency_only_where_corners_come_out_clear() {
+        assert!(wants_transparency(true, "", ""));
+        assert!(wants_transparency(true, "wayland", "wgpu"));
+        assert!(wants_transparency(true, "", "wgpu,tiny-skia"));
+        // X11 (no WAYLAND_DISPLAY, or forced): square corners.
+        assert!(!wants_transparency(false, "", ""));
+        assert!(!wants_transparency(true, "X11", ""));
+        // CPU renderer: opaque buffers.
+        assert!(!wants_transparency(true, "", "tiny-skia"));
+        assert!(!wants_transparency(true, "", " Tiny-Skia ,wgpu"));
+    }
+
+    #[test]
+    fn outline_is_opaque() {
+        for t in [&theme::DARK, &theme::LIGHT] {
+            assert_eq!(t.frame.a, 1.0);
+        }
     }
 }

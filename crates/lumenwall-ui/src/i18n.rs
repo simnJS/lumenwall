@@ -214,6 +214,9 @@ strings! {
     Fit => "Fit", "Ajuster";
     Stretch => "Stretch", "Étirer";
     Customize => "Customize", "Personnaliser";
+    WallpaperSound => "Wallpaper sound", "Son du fond d'écran";
+    WallpaperSoundHint => "Relative to the general volume in the status bar.",
+        "Relatif au volume général de la barre d'état.";
     Reset => "Reset", "Réinitialiser";
     NoProperties => "This wallpaper has no settings.", "Ce fond d'écran n'a pas de réglages.";
     LiveHint => "Changes show live on the screens playing this wallpaper.",
@@ -250,7 +253,9 @@ strings! {
     PauseLock => "Pause when the session is locked", "Mettre en pause quand la session est verrouillée";
     SecAudio => "Sound", "Son";
     Muted => "Muted", "Son coupé";
-    Automute => "Mute when another app plays sound", "Couper le son quand une autre application en joue";
+    Automute => "Mute while another app plays media", "Couper le son pendant la lecture d'un média";
+    AutomuteHint => "Music, videos and games. Calls, notifications and paused players are ignored.",
+        "Musique, vidéos et jeux. Les appels, les notifications et les lecteurs en pause sont ignorés.";
     SecStartup => "Startup", "Démarrage";
     Autostart => "Start Lumenwall with my session", "Lancer Lumenwall à l'ouverture de session";
     TrayHint => "The tray icon needs a system tray. On GNOME, install the AppIndicator extension; Lumenwall works without it.",

@@ -7,7 +7,7 @@
 //! - anything else (renaming, removing, changing a type) bumps [`PROTOCOL_VERSION`].
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +102,19 @@ pub enum Request {
     /// 0.0 to 1.0.
     SetVolume {
         volume: f32,
+    },
+    /// Sound level of one wallpaper (a wallpaper directory or its `project.json`), whether
+    /// it plays or not; combined with the global volume (global × wallpaper). Fields left
+    /// out keep their value. Saved by the daemon under [`wallpaper_key`]. Daemons before this
+    /// request answer [`ErrorCode::InvalidRequest`]; they also leave
+    /// [`State::wallpaper_audio`] out.
+    SetWallpaperAudio {
+        wallpaper: PathBuf,
+        /// 0.0 to 1.0.
+        #[serde(default)]
+        volume: Option<f32>,
+        #[serde(default)]
+        muted: Option<bool>,
     },
     GetSettings,
     SetSettings {
@@ -257,6 +270,70 @@ pub struct State {
     pub volume: f32,
     #[serde(default)]
     pub outputs: Vec<OutputState>,
+    /// Per-wallpaper sound levels that differ from the default, keyed by [`wallpaper_key`].
+    /// `None` from a daemon that has no per-wallpaper levels (then hide the controls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper_audio: Option<BTreeMap<String, WallpaperAudio>>,
+}
+
+/// Sound level of one wallpaper, applied on top of the global volume.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WallpaperAudio {
+    /// 0.0 to 1.0; the wallpaper plays at global volume × this.
+    pub volume: f32,
+    pub muted: bool,
+}
+
+impl Default for WallpaperAudio {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            muted: false,
+        }
+    }
+}
+
+impl WallpaperAudio {
+    /// Gain applied on top of the global volume: 0 when muted.
+    pub fn gain(&self) -> f32 {
+        if self.muted || !self.volume.is_finite() {
+            0.0
+        } else {
+            self.volume.clamp(0.0, 1.0)
+        }
+    }
+
+    /// Whether it changes nothing (such entries are not stored).
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Steam's application id of Wallpaper Engine: its Workshop items live in
+/// `steamapps/workshop/content/431960/<id>`.
+const WE_APP_ID: &str = "431960";
+
+/// How the daemon and its clients name a wallpaper in per-wallpaper settings: its Workshop id
+/// for a Workshop item folder (`…/workshop/content/431960/2317494988` → `2317494988`, the
+/// same on every Steam library and machine), else the path as given (`project.json` stripped).
+pub fn wallpaper_key(wallpaper: &Path) -> String {
+    let dir = if wallpaper.file_name().is_some_and(|n| n == "project.json") {
+        wallpaper.parent().unwrap_or(wallpaper)
+    } else {
+        wallpaper
+    };
+    let name = dir.file_name().and_then(|n| n.to_str());
+    let parent = dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+    match (name, parent) {
+        (Some(id), Some(WE_APP_ID)) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => {
+            id.to_owned()
+        }
+        _ => dir.to_string_lossy().into_owned(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,7 +408,8 @@ impl Default for Settings {
             pause_on_fullscreen: true,
             pause_on_battery: true,
             pause_on_lock: true,
-            automute: true,
+            // Off by default: see the `lumenwall` README (automute).
+            automute: false,
             muted: false,
             volume: 0.5,
             autostart: false,

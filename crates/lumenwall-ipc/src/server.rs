@@ -72,6 +72,15 @@ pub trait Handler: Send + Sync + 'static {
     fn set_volume(&self, volume: f32) -> Result<(), RemoteError> {
         Err(RemoteError::unsupported("set_volume"))
     }
+    /// `volume` is finite and within 0.0..=1.0 when present.
+    fn set_wallpaper_audio(
+        &self,
+        wallpaper: &Path,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) -> Result<(), RemoteError> {
+        Err(RemoteError::unsupported("set_wallpaper_audio"))
+    }
     fn settings(&self) -> Result<Settings, RemoteError> {
         Err(RemoteError::unsupported("get_settings"))
     }
@@ -388,6 +397,21 @@ impl Session {
                     ))
                 }
             }
+            Request::SetWallpaperAudio {
+                wallpaper,
+                volume,
+                muted,
+            } => match volume {
+                Some(v) if !v.is_finite() => Err(RemoteError::new(
+                    ErrorCode::InvalidRequest,
+                    "volume must be finite",
+                )),
+                _ => done(h.set_wallpaper_audio(
+                    &wallpaper,
+                    volume.map(|v| v.clamp(0.0, 1.0)),
+                    muted,
+                )),
+            },
             Request::GetSettings => h.settings().map(Response::Settings),
             Request::SetSettings { settings } => done(h.set_settings(settings)),
             Request::GetStats => h.stats().map(Response::Stats),

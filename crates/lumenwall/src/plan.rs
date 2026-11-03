@@ -15,16 +15,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cli::{CliArgs, CliMode, TargetSettings};
 use crate::config::Config;
 use crate::services::{PlaylistCatalog, WallpaperResolver};
 use crate::settings::{
-    Clamp, DEFAULT_FPS, DEFAULT_SCREENSHOT_DELAY, DEFAULT_VOLUME, HwDecode, Layer, RenderDebug,
-    Scaling, ScreenshotFormat, WallpaperRef, WallpaperSource, WindowGeometry, clamp_volume,
-    validate_fps, validate_screenshot_delay,
+    Clamp, DEFAULT_AUTOMUTE, DEFAULT_FPS, DEFAULT_SCREENSHOT_DELAY, DEFAULT_VOLUME, HwDecode,
+    Layer, RenderDebug, Scaling, ScreenshotFormat, WallpaperRef, WallpaperSource, WindowGeometry,
+    clamp_volume, validate_fps, validate_screenshot_delay,
 };
 
 /// Identifies a render target: the window (`default` viewport), an output, or a span group.
@@ -86,6 +86,50 @@ pub struct AudioPlan {
     pub automute: bool,
     /// Spectrum capture for audio-reactive wallpapers (§13).
     pub processing: bool,
+    /// Per-wallpaper levels that differ from the default, keyed by
+    /// [`lumenwall_ipc::wallpaper_key`] (Lumenwall extension, `[wallpaper-audio]`).
+    pub wallpapers: BTreeMap<String, WallpaperLevel>,
+}
+
+impl AudioPlan {
+    /// Level of the wallpaper in `dir` (its key, else the key of its canonical path).
+    pub fn level(&self, dir: &Path) -> WallpaperLevel {
+        if self.wallpapers.is_empty() {
+            return WallpaperLevel::DEFAULT;
+        }
+        let find = |p: &Path| {
+            self.wallpapers
+                .get(&lumenwall_ipc::wallpaper_key(p))
+                .copied()
+        };
+        find(dir)
+            .or_else(|| std::fs::canonicalize(dir).ok().and_then(|c| find(&c)))
+            .unwrap_or(WallpaperLevel::DEFAULT)
+    }
+}
+
+/// Sound level of one wallpaper, applied on top of the global volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WallpaperLevel {
+    /// Percent of the global volume, 0..=100.
+    pub percent: u8,
+    pub muted: bool,
+}
+
+impl WallpaperLevel {
+    pub const DEFAULT: Self = Self {
+        percent: 100,
+        muted: false,
+    };
+
+    /// Gain on top of the global volume, 0 when muted.
+    pub fn gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            f32::from(self.percent.min(100)) / 100.0
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +186,19 @@ impl ExecutionPlan {
 
     pub fn target(&self, key: &TargetKey) -> Option<&TargetPlan> {
         self.targets.iter().find(|t| &t.key == key)
+    }
+
+    /// Volume the engine mixes at (0..=128): the global volume times the level of the wallpaper
+    /// shown. The engine has one mixer for every output, so when different wallpapers with
+    /// different levels are shown at once, the loudest level applies to all of them.
+    pub fn engine_volume(&self) -> u8 {
+        let gain = self
+            .targets
+            .iter()
+            .map(|t| self.audio.level(&t.wallpaper.path).gain())
+            .reduce(f32::max)
+            .unwrap_or(1.0);
+        (f32::from(self.audio.volume) * gain).round() as u8
     }
 
     /// Every requested output name, span members included, for the "no requested output
@@ -417,6 +474,19 @@ pub fn build_with(
 
     let s = &cli.settings;
     let file_volume = file.volume.map(clamp_volume).unwrap_or(DEFAULT_VOLUME);
+    let wallpapers = file
+        .wallpaper_audio
+        .iter()
+        .map(|(key, c)| {
+            let level = WallpaperLevel {
+                percent: c.volume.map_or(100, |v| v.clamp(0, 100) as u8),
+                muted: c.muted.unwrap_or(false),
+            };
+            // A hand-written path to a Workshop item means its id, as clients store it.
+            (lumenwall_ipc::wallpaper_key(Path::new(key.trim())), level)
+        })
+        .filter(|(_, level)| *level != WallpaperLevel::DEFAULT)
+        .collect();
     let (silent, volume) = match s.volume {
         Some(volume) => (false, volume),
         None if s.silent => (true, file_volume),
@@ -476,8 +546,9 @@ pub fn build_with(
         audio: AudioPlan {
             silent,
             volume,
-            automute: !s.no_automute && file.automute.unwrap_or(true),
+            automute: !s.no_automute && file.automute.unwrap_or(DEFAULT_AUTOMUTE),
             processing: !s.no_audio_processing && file.audio_processing.unwrap_or(true),
+            wallpapers,
         },
         fullscreen_pause: FullscreenPausePlan {
             enabled: !s.no_fullscreen_pause && file.fullscreen_pause.unwrap_or(true),

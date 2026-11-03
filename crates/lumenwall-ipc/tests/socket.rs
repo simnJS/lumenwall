@@ -156,6 +156,27 @@ impl Handler for FakeDaemon {
         Ok(())
     }
 
+    fn set_wallpaper_audio(
+        &self,
+        wallpaper: &Path,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) -> Result<(), RemoteError> {
+        {
+            let mut s = self.state.lock().unwrap();
+            let map = s.wallpaper_audio.get_or_insert_default();
+            let level = map.entry(wallpaper_key(wallpaper)).or_default();
+            if let Some(v) = volume {
+                level.volume = v;
+            }
+            if let Some(m) = muted {
+                level.muted = m;
+            }
+        }
+        self.changed();
+        Ok(())
+    }
+
     fn settings(&self) -> Result<Settings, RemoteError> {
         Ok(self.settings.lock().unwrap().clone())
     }
@@ -241,6 +262,18 @@ fn handshake_and_every_call() {
     assert_eq!(state.pause_reason, Some(PauseReason::User));
     assert_eq!(state.volume, 1.0);
 
+    let ws = Path::new("/steam/steamapps/workshop/content/431960/3018340632");
+    client.set_wallpaper_audio(ws, Some(3.0), None).unwrap(); // clamped by the server
+    client.set_wallpaper_audio(ws, None, Some(true)).unwrap();
+    let levels = client.state().unwrap().wallpaper_audio.unwrap();
+    assert_eq!(
+        levels["3018340632"],
+        WallpaperAudio {
+            volume: 1.0,
+            muted: true
+        }
+    );
+
     let values = PropertyMap::from([("rain".to_owned(), PropertyValue::Bool(false))]);
     client.set_properties("DP-1", values.clone(), true).unwrap();
     assert_eq!(client.properties("DP-1").unwrap(), values);
@@ -284,6 +317,10 @@ fn remote_errors_keep_the_connection() {
         ),
         "{err}"
     );
+    // JSON has no infinity: a non-finite volume travels as `null`, "unchanged".
+    client
+        .set_wallpaper_audio("/w/1", Some(f32::INFINITY), None)
+        .unwrap();
     let err = client.set_volume(f32::NAN).unwrap_err();
     assert!(
         matches!(

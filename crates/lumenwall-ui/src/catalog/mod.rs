@@ -30,6 +30,8 @@ pub struct Wallpaper {
     /// When the folder appeared (Workshop download or copy), for "recently added".
     pub added: SystemTime,
     pub resolution: Option<(u32, u32)>,
+    /// Whether it can make sound ([`meta::Meta::sound`]); `None` until the headers are read.
+    pub sound: Option<bool>,
     /// Lower-case title, tags and id, for search.
     pub search_text: String,
 }
@@ -50,6 +52,14 @@ impl Wallpaper {
             Kind::Application | Kind::Unknown => Some(Blocker::Unsupported),
             _ => None,
         }
+    }
+
+    /// Whether to offer a sound level for it: what the headers say, else what its type allows.
+    pub fn may_have_sound(&self) -> bool {
+        self.sound.unwrap_or(matches!(
+            self.project.kind,
+            Kind::Scene | Kind::Video | Kind::Web
+        ))
     }
 
     pub fn title(&self) -> &str {
@@ -104,8 +114,8 @@ pub struct Library {
 #[derive(Debug, Clone)]
 pub enum ScanEvent {
     Done(Library),
-    /// Resolutions read after the first results, so the grid shows up at once.
-    Resolutions(Vec<(PathBuf, (u32, u32))>),
+    /// Headers read after the first results, so the grid shows up at once.
+    Meta(Vec<(PathBuf, meta::Meta)>),
 }
 
 /// Scans in a background thread and reports through `send` (false: receiver gone).
@@ -128,13 +138,13 @@ pub fn scan_in_background(
             }
             let found: Vec<_> = todo
                 .into_iter()
-                .filter_map(|(dir, kind, file)| {
-                    let res = meta::resolution(&dir, kind, file.as_deref())?;
-                    Some((dir, res))
+                .map(|(dir, kind, file)| {
+                    let m = meta::read(&dir, kind, file.as_deref());
+                    (dir, m)
                 })
                 .collect();
             if !found.is_empty() {
-                send(ScanEvent::Resolutions(found));
+                send(ScanEvent::Meta(found));
             }
         });
     if let Err(e) = spawned {
@@ -222,6 +232,7 @@ pub fn load(dir: &Path, origin: Origin) -> Result<Wallpaper, String> {
         origin,
         added,
         resolution: None,
+        sound: None,
         search_text,
     })
 }

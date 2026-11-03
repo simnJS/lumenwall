@@ -120,11 +120,17 @@ impl App {
             self.t(K::Apply),
             self.apply_block(t, w, inner_w - 2.0 * sp::L),
         ));
-        col = col.push(widgets::section(
-            t,
-            self.t(K::Customize),
-            self.properties_block(t, w),
-        ));
+        let mut customize = column![].spacing(sp::L);
+        let sound = self.sound_block(t, w);
+        let has_sound = sound.is_some();
+        if let Some(sound) = sound {
+            customize = customize.push(sound);
+        }
+        // "No settings" would contradict the sound level just above.
+        if !has_sound || !w.project.properties.is_empty() {
+            customize = customize.push(self.properties_block(t, w));
+        }
+        col = col.push(widgets::section(t, self.t(K::Customize), customize));
 
         let mut actions = row![widgets::ghost_button(
             t,
@@ -248,6 +254,66 @@ impl App {
             t.faint,
         ));
         col.into()
+    }
+
+    /// The wallpaper's own sound level and mute, on top of the global volume of the status
+    /// bar. Only for wallpapers that can make sound, with a daemon that keeps such levels.
+    fn sound_block(&self, t: &'static Tokens, w: &Wallpaper) -> Option<Element<'_, Message>> {
+        if !w.may_have_sound() {
+            return None;
+        }
+        let level = self.daemon.wallpaper_audio(&w.dir)?;
+        let volume = match &self.wallpaper_volume_drag {
+            Some((dir, v)) if *dir == w.dir => *v,
+            _ => level.volume,
+        };
+        let (icon, tip) = if level.muted {
+            (Icon::VolumeOff, K::Unmute)
+        } else {
+            (Icon::Volume, K::Mute)
+        };
+        let shown = if level.muted {
+            self.t(K::Muted).to_owned()
+        } else {
+            format!("{:.0} %", volume * 100.0)
+        };
+        let dir = w.dir.clone();
+        let header = row![
+            label(self.t(K::WallpaperSound), size::BODY, t.text).width(Length::Fill),
+            strong(
+                shown,
+                size::CAPTION,
+                if level.muted { t.faint } else { t.accent_text }
+            ),
+        ]
+        .align_y(Alignment::Center);
+        let controls = row![
+            widgets::icon_button(
+                t,
+                icon,
+                self.t(tip),
+                level.muted,
+                Some(Message::WallpaperMute(w.dir.clone()))
+            ),
+            slider(0.0..=1.0, volume, move |v| Message::WallpaperVolume(
+                dir.clone(),
+                v
+            ))
+            .step(0.01_f32)
+            .on_release(Message::WallpaperVolumeRelease)
+            .style(theme::slider_style),
+        ]
+        .spacing(sp::S)
+        .align_y(Alignment::Center);
+        Some(
+            column![
+                header,
+                controls,
+                label(self.t(K::WallpaperSoundHint), size::CAPTION, t.faint)
+            ]
+            .spacing(sp::XS)
+            .into(),
+        )
     }
 
     fn properties_block(&self, t: &'static Tokens, w: &Wallpaper) -> Element<'_, Message> {

@@ -28,6 +28,16 @@ fn sample_state() -> State {
             status: WallpaperStatus::Running,
             message: None,
         }],
+        wallpaper_audio: Some(
+            [(
+                "3018340632".to_owned(),
+                WallpaperAudio {
+                    volume: 0.4,
+                    muted: true,
+                },
+            )]
+            .into(),
+        ),
     }
 }
 
@@ -74,6 +84,16 @@ fn all_requests() -> Vec<Request> {
         Request::SetPaused { paused: true },
         Request::SetMuted { muted: true },
         Request::SetVolume { volume: 0.75 },
+        Request::SetWallpaperAudio {
+            wallpaper: "/w/3018340632".into(),
+            volume: Some(0.5),
+            muted: None,
+        },
+        Request::SetWallpaperAudio {
+            wallpaper: "/w/1".into(),
+            volume: None,
+            muted: Some(true),
+        },
         Request::GetSettings,
         Request::SetSettings {
             settings: Settings::default(),
@@ -253,6 +273,90 @@ fn newer_peers_are_tolerated() {
 
     let err: RemoteError = serde_json::from_str(r#"{"code":"quota_exceeded"}"#).unwrap();
     assert_eq!(err.code, ErrorCode::Unknown);
+
+    // A daemon without per-wallpaper levels leaves the field out: clients hide the controls.
+    assert_eq!(state.wallpaper_audio, None);
+    let text = serde_json::to_string(&State::default()).unwrap();
+    assert!(!text.contains("wallpaper_audio"), "{text}");
+    // Older clients read a newer state: the extra field is ignored by them, and partial
+    // entries get defaults here.
+    let state: State = serde_json::from_str(
+        r#"{"paused":false,"muted":false,"volume":0.5,
+            "wallpaper_audio":{"7":{"muted":true},"/w/x":{"volume":0.25}}}"#,
+    )
+    .unwrap();
+    let levels = state.wallpaper_audio.unwrap();
+    assert_eq!(
+        levels["7"],
+        WallpaperAudio {
+            volume: 1.0,
+            muted: true
+        }
+    );
+    assert_eq!(levels["/w/x"].gain(), 0.25);
+    let req: ClientFrame = serde_json::from_str(
+        r#"{"id":4,"method":"set_wallpaper_audio","params":{"wallpaper":"/w/x","volume":0.3}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        req.request,
+        Request::SetWallpaperAudio {
+            wallpaper: "/w/x".into(),
+            volume: Some(0.3),
+            muted: None
+        }
+    );
+}
+
+#[test]
+fn wallpaper_keys() {
+    use std::path::Path;
+    let ws = Path::new("/home/me/.local/share/Steam/steamapps/workshop/content/431960");
+    assert_eq!(wallpaper_key(&ws.join("3018340632")), "3018340632");
+    assert_eq!(
+        wallpaper_key(&ws.join("3018340632/project.json")),
+        "3018340632"
+    );
+    // Same id from another Steam library.
+    assert_eq!(
+        wallpaper_key(Path::new(
+            "/mnt/games/SteamLibrary/steamapps/workshop/content/431960/3018340632"
+        )),
+        "3018340632"
+    );
+    // Not a Workshop item: the path itself.
+    assert_eq!(
+        wallpaper_key(Path::new("/w/my wallpaper")),
+        "/w/my wallpaper"
+    );
+    assert_eq!(
+        wallpaper_key(Path::new("/other/content/12345/678")),
+        "/other/content/12345/678"
+    );
+    assert_eq!(
+        wallpaper_key(&ws.join("draft")),
+        ws.join("draft").to_string_lossy()
+    );
+
+    let level = WallpaperAudio::default();
+    assert!(level.is_default());
+    assert_eq!(level.gain(), 1.0);
+    assert_eq!(
+        WallpaperAudio {
+            volume: 0.8,
+            muted: true
+        }
+        .gain(),
+        0.0
+    );
+    assert_eq!(
+        WallpaperAudio {
+            volume: f32::NAN,
+            muted: false
+        }
+        .gain(),
+        0.0
+    );
 }
 
 #[test]

@@ -1,9 +1,9 @@
 //! PipeWire native automute (spec 07 §12.1) from registry and node events.
 //!
-//! Tracks `Stream/Output/Audio` nodes: "another application plays" ⇔ one of them carries an
-//! `application.process.id` different from ours and a non-zero average channel volume (the
-//! PipeWire view of the reference's sink-input rule). Volumes come from `Props` parameter
-//! events; nothing is polled. Not compiled on the development machine (see README).
+//! Tracks `Stream/Output/Audio` nodes: "another application plays" ⇔ one of them is media
+//! being played ([`classify`]): node running, not muted, audible average channel volume, not
+//! ours, not a call. States come from node `info` events, volumes and mute from `Props`
+//! parameter events; nothing is polled. Not compiled on the development machine (see README).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,8 +17,7 @@ use spa::param::ParamType;
 use spa::pod::deserialize::PodDeserializer;
 use spa::pod::{Pod, Value, ValueArray};
 
-use super::is_own_pid;
-use super::{ChangeCallback, PlaybackWatcher, PlayingFlag};
+use super::{ChangeCallback, PlaybackWatcher, PlayingFlag, Stream, Verdict, classify, is_own_pid};
 use crate::capture::pipewire::{CONNECT_TIMEOUT, PwThread, connect, retry_loop};
 
 /// PipeWire watcher thread.
@@ -57,9 +56,30 @@ impl PlaybackWatcher for PipeWireWatcher {
 
 struct Entry {
     pid: Option<String>,
-    audible: bool,
+    app_name: Option<String>,
+    binary: Option<String>,
+    role: Option<String>,
+    /// Node state is `running` (an idle or suspended stream plays nothing).
+    running: bool,
+    muted: bool,
+    volume: f32,
     _node: pw::node::Node,
     _listener: pw::node::NodeListener,
+}
+
+impl Entry {
+    fn stream(&self, own_pid: u32) -> Stream<'_> {
+        Stream {
+            ours: self.pid.as_deref().is_some_and(|p| is_own_pid(p, own_pid)),
+            has_owner: self.pid.is_some(),
+            app_name: self.app_name.as_deref(),
+            binary: self.binary.as_deref(),
+            role: self.role.as_deref(),
+            paused: !self.running,
+            muted: self.muted,
+            volume: self.volume,
+        }
+    }
 }
 
 struct Nodes {
@@ -70,33 +90,35 @@ struct Nodes {
 
 impl Nodes {
     fn recompute(&self) {
-        // parity: PID present and different from ours, non-zero average volume; paused or muted
-        // streams still count (QO-13).
-        let playing = self.map.values().any(|e| {
-            e.audible
-                && e.pid
-                    .as_deref()
-                    .is_some_and(|p| !is_own_pid(p, self.own_pid))
+        let media = self.map.values().find_map(|e| {
+            let s = e.stream(self.own_pid);
+            (classify(&s) == Verdict::Media).then(|| super::describe(&s))
         });
-        self.flag.set_playing(playing);
+        self.flag.set_media(media);
     }
 }
 
-/// Average of `channelVolumes` in a `Props` pod; `None` if absent.
-fn average_volume(pod: &Pod) -> Option<f32> {
-    let (_, value) = PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()?;
-    let Value::Object(obj) = value else {
-        return None;
+/// Average of `channelVolumes` and the `mute` flag of a `Props` pod, each `None` if absent.
+fn volume_and_mute(pod: &Pod) -> (Option<f32>, Option<bool>) {
+    let Ok((_, Value::Object(obj))) = PodDeserializer::deserialize_any_from(pod.as_bytes()) else {
+        return (None, None);
     };
-    obj.properties
-        .iter()
-        .find(|p| p.key == spa::sys::SPA_PROP_channelVolumes)
-        .and_then(|p| match &p.value {
-            Value::ValueArray(ValueArray::Float(v)) if !v.is_empty() => {
-                Some(v.iter().sum::<f32>() / v.len() as f32)
+    let mut volume = None;
+    let mut mute = None;
+    for p in &obj.properties {
+        if p.key == spa::sys::SPA_PROP_channelVolumes {
+            if let Value::ValueArray(ValueArray::Float(v)) = &p.value
+                && !v.is_empty()
+            {
+                volume = Some(v.iter().sum::<f32>() / v.len() as f32);
             }
-            _ => None,
-        })
+        } else if p.key == spa::sys::SPA_PROP_mute
+            && let Value::Bool(m) = &p.value
+        {
+            mute = Some(*m);
+        }
+    }
+    (volume, mute)
 }
 
 fn session(mainloop: &pw::main_loop::MainLoopRc, flag: &PlayingFlag) -> bool {
@@ -133,32 +155,62 @@ fn session(mainloop: &pw::main_loop::MainLoopRc, flag: &PlayingFlag) -> bool {
                 let id = global.id;
                 let listener = node
                     .add_listener_local()
+                    .info({
+                        let nodes: Weak<RefCell<Nodes>> = Rc::downgrade(&nodes);
+                        move |info| {
+                            let Some(nodes) = nodes.upgrade() else { return };
+                            let mut n = nodes.borrow_mut();
+                            if let Some(e) = n.map.get_mut(&id) {
+                                // Raw state: `NodeInfoRef::state` panics on unknown values.
+                                e.running = info.as_raw().state
+                                    == pw::sys::pw_node_state_PW_NODE_STATE_RUNNING;
+                                // Some clients set their role after the node is announced.
+                                if let Some(role) =
+                                    info.props().and_then(|p| p.get(*pw::keys::MEDIA_ROLE))
+                                {
+                                    e.role = Some(role.to_owned());
+                                }
+                            }
+                            n.recompute();
+                        }
+                    })
                     .param({
                         let nodes: Weak<RefCell<Nodes>> = Rc::downgrade(&nodes);
                         move |_seq, kind, _index, _next, param| {
                             if kind != ParamType::Props {
                                 return;
                             }
-                            let Some(avg) = param.and_then(average_volume) else {
+                            let Some((volume, mute)) = param.map(volume_and_mute) else {
                                 return;
                             };
                             let Some(nodes) = nodes.upgrade() else { return };
                             let mut n = nodes.borrow_mut();
                             if let Some(e) = n.map.get_mut(&id) {
-                                e.audible = avg > 0.0;
+                                if let Some(v) = volume {
+                                    e.volume = v;
+                                }
+                                if let Some(m) = mute {
+                                    e.muted = m;
+                                }
                             }
                             n.recompute();
                         }
                     })
                     .register();
                 node.subscribe_params(&[ParamType::Props]);
-                let pid = props.get(*pw::keys::APP_PROCESS_ID).map(str::to_owned);
+                let text = |key: &str| props.get(key).map(str::to_owned);
                 let mut n = nodes.borrow_mut();
                 n.map.insert(
                     id,
                     Entry {
-                        pid,
-                        audible: true,
+                        pid: text(*pw::keys::APP_PROCESS_ID),
+                        app_name: text(*pw::keys::APP_NAME),
+                        binary: text(*pw::keys::APP_PROCESS_BINARY),
+                        role: text(*pw::keys::MEDIA_ROLE),
+                        // Counted once the node reports that it runs.
+                        running: false,
+                        muted: false,
+                        volume: 1.0,
                         _node: node,
                         _listener: listener,
                     },

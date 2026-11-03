@@ -19,7 +19,7 @@ Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screensho
 | `view/` | Pages (library, details panel, screens, settings), status bar, reusable widgets, `drawn` (frame-drawn flag) |
 | `theme.rs` | Design system: colour tokens, spacing, radii, elevation, type scale, widget styles, UI font choice |
 | `icons.rs` | Lumenwall's own SVG icons, empty-state illustrations, and the embedded brand assets (symbol, logo, window icon, tray glyphs) |
-| `chrome.rs` | Linux: the title band, window buttons, move / resize / rounded frame the app draws itself |
+| `chrome.rs` | Linux: the title band, window buttons, move / resize and the opaque 1 px outline the app draws itself; rounded, see-through corners only on Wayland with the GPU renderer (square elsewhere) |
 | `build.rs` | Windows: icon and version resources (`assets/brand/icon/lumenwall.ico`) |
 | `catalog/` | Library scan, lenient `project.json` reading, Steam / Workshop / Wallpaper Engine discovery (`Discovery` trait, native, Flatpak, Snap, Windows registry), resolution from `scene.pkg` / MP4 headers |
 | `thumbs.rs`, `previews.rs` | Preview decoding (16:9 crop, LZ4 frames, disk cache) and animation |
@@ -40,6 +40,10 @@ The catalog lives here behind `catalog::Discovery` until `lumenwall-assets` / `l
 ## Network
 
 Only the Workshop page talks to the network, only while it is displayed, only to Steam's hosts, with a generic `Lumenwall/<version>` User-Agent and the user's own key (never bundled, never logged). Details in [`docs/UI.md`](../../docs/UI.md#workshop).
+
+## Sound
+
+The status bar holds the global volume. The details panel's Customize section adds a level and a mute button for the selected wallpaper (global × wallpaper, saved by the daemon in `[wallpaper-audio]`), shown only when the wallpaper can make sound (a scene with sound objects, a video with an audio track or that could not be read, any web wallpaper) and the daemon keeps such levels (`state.wallpaper_audio`). Slider steps queued while dragging are merged: only the latest position is sent.
 
 ## Deviations
 

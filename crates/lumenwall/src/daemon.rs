@@ -17,19 +17,21 @@ use std::time::{Duration, Instant};
 use lumenwall_ipc::{
     ErrorCode, Event, Handler, Output, OutputState, OutputStats, PauseReason, PropertyMap,
     PropertyValue, Publisher, RemoteError, Scaling as IpcScaling, Settings, State, Stats, Topic,
-    WallpaperStatus,
+    WallpaperAudio, WallpaperStatus, wallpaper_key,
 };
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::cli::{CliArgs, CliLayout, CliMode};
 use crate::config::{self, Config, LogConfig};
 use crate::logging::LogFilterHandle;
-use crate::plan::{self, ExecutionPlan, OutputMode, PlanServices, TargetPlan};
+use crate::plan::{self, ExecutionPlan, OutputMode, PlanServices, TargetPlan, WallpaperLevel};
 use crate::services::{
     Control, ControlSender, EngineSnapshot, Monitor, MonitorChange, PlaylistCatalog, StopReason,
     TargetStatus, WallpaperResolver,
 };
-use crate::settings::{Scaling, WallpaperRef, WallpaperSource};
+use crate::settings::{
+    Scaling, WallpaperRef, WallpaperSource, volume_fraction, volume_from_fraction,
+};
 use crate::watch::FileChange;
 
 /// How long a client request waits for the engine to apply a new plan.
@@ -287,8 +289,21 @@ impl Daemon {
                 platform_pause
             },
             muted: audio.silent,
-            volume: f32::from(audio.volume) / 128.0,
+            volume: volume_fraction(audio.volume),
             outputs,
+            wallpaper_audio: Some(
+                audio
+                    .wallpapers
+                    .iter()
+                    .map(|(key, level)| {
+                        let level = WallpaperAudio {
+                            volume: f32::from(level.percent) / 100.0,
+                            muted: level.muted,
+                        };
+                        (key.clone(), level)
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -301,7 +316,7 @@ impl Daemon {
             pause_on_lock: true,
             automute: plan.audio.automute,
             muted: plan.audio.silent,
-            volume: f32::from(plan.audio.volume) / 128.0,
+            volume: volume_fraction(plan.audio.volume),
             autostart: autostart_enabled(),
         }
     }
@@ -555,13 +570,34 @@ impl Daemon {
             // Materialize the effective values, then drop the command-line overrides.
             let t = d.doc.as_table_mut();
             t.insert("silent", value(muted.unwrap_or(plan.audio.silent)));
-            let v = volume.map_or(i64::from(plan.audio.volume), |v| {
-                (v.clamp(0.0, 1.0) * 128.0).round() as i64
-            });
-            t.insert("volume", value(v));
+            let v = volume.map_or(plan.audio.volume, volume_from_fraction);
+            t.insert("volume", value(i64::from(v)));
             d.cli.settings.silent = false;
             d.cli.settings.volume = None;
             Ok(())
+        })
+    }
+
+    /// Sound level of one wallpaper, saved as `[wallpaper-audio."<key>"]` (removed when back
+    /// to the default) and applied live through the engine volume.
+    fn set_wallpaper_audio(
+        &self,
+        wallpaper: &Path,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) -> Result<(), RemoteError> {
+        let dir = wallpaper_folder(wallpaper)?;
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let key = wallpaper_key(&dir);
+        self.transact(|d, plan, _| {
+            let current = plan.audio.level(&dir);
+            let level = WallpaperLevel {
+                percent: volume.map_or(current.percent, |v| {
+                    (v.clamp(0.0, 1.0) * 100.0).round() as u8
+                }),
+                muted: muted.unwrap_or(current.muted),
+            };
+            write_wallpaper_level(&mut d.doc, &key, level)
         })
     }
 
@@ -598,11 +634,11 @@ impl Daemon {
             if new.muted != current.muted || (new.volume - current.volume).abs() > 1e-3 {
                 t.insert("silent", value(new.muted));
                 let v = if (new.volume - current.volume).abs() > 1e-3 {
-                    (new.volume.clamp(0.0, 1.0) * 128.0).round() as i64
+                    volume_from_fraction(new.volume)
                 } else {
-                    i64::from(plan.audio.volume)
+                    plan.audio.volume
                 };
-                t.insert("volume", value(v));
+                t.insert("volume", value(i64::from(v)));
                 d.cli.settings.silent = false;
                 d.cli.settings.volume = None;
             }
@@ -891,6 +927,14 @@ impl Handler for DaemonHandler {
     fn set_volume(&self, volume: f32) -> Result<(), RemoteError> {
         self.0.set_audio(None, Some(volume))
     }
+    fn set_wallpaper_audio(
+        &self,
+        wallpaper: &Path,
+        volume: Option<f32>,
+        muted: Option<bool>,
+    ) -> Result<(), RemoteError> {
+        self.0.set_wallpaper_audio(wallpaper, volume, muted)
+    }
     fn settings(&self) -> Result<Settings, RemoteError> {
         Ok(self.0.settings())
     }
@@ -1045,6 +1089,37 @@ fn write_entries(doc: &mut DocumentMut, mut entries: Vec<Entry>) {
     }
 }
 
+/// `[wallpaper-audio."<key>"]`, removed when back to the default (and the table with its last
+/// entry).
+fn write_wallpaper_level(
+    doc: &mut DocumentMut,
+    key: &str,
+    level: WallpaperLevel,
+) -> Result<(), RemoteError> {
+    let root = doc.as_table_mut();
+    let levels = root.entry("wallpaper-audio").or_insert_with(|| {
+        let mut t = Table::new();
+        // `[wallpaper-audio."id"]` headers only, no empty `[wallpaper-audio]`.
+        t.set_implicit(true);
+        Item::Table(t)
+    });
+    let Some(levels) = levels.as_table_like_mut() else {
+        return Err(invalid("[wallpaper-audio] is not a table"));
+    };
+    if level == WallpaperLevel::DEFAULT {
+        levels.remove(key);
+    } else {
+        let mut entry = Table::new();
+        entry.insert("volume", value(i64::from(level.percent)));
+        entry.insert("muted", value(level.muted));
+        levels.insert(key, Item::Table(entry));
+    }
+    if levels.is_empty() {
+        root.remove("wallpaper-audio");
+    }
+    Ok(())
+}
+
 /// The configuration now decides the layout and the default wallpaper (an explicit `-w`
 /// window stays).
 fn take_layout(cli: &mut CliArgs) {
@@ -1099,6 +1174,27 @@ fn wallpaper_dir(path: &Path) -> Result<PathBuf, RemoteError> {
         ));
     }
     Ok(dir)
+}
+
+/// A wallpaper folder (or its `project.json`) that exists, of any type: levels can be set for
+/// wallpapers that are not shown.
+fn wallpaper_folder(path: &Path) -> Result<PathBuf, RemoteError> {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    let dir = match path.parent() {
+        Some(parent) if path.file_name().is_some_and(|n| n == "project.json") => parent.to_owned(),
+        _ => path,
+    };
+    if dir.join("project.json").is_file() {
+        Ok(dir)
+    } else {
+        Err(RemoteError::new(
+            ErrorCode::NotFound,
+            format!(
+                "{} is not a wallpaper folder (no project.json)",
+                dir.display()
+            ),
+        ))
+    }
 }
 
 fn strip_bom(b: &[u8]) -> &[u8] {
@@ -1274,6 +1370,27 @@ mod tests {
         assert_eq!(config.wallpaper.as_deref(), Some(Path::new("/w/3")));
         assert_eq!(config.scaling, Some(Scaling::Fill));
         assert_eq!(config.fps, Some(24));
+    }
+
+    #[test]
+    fn wallpaper_levels_are_written_per_key() {
+        let mut doc: DocumentMut = "volume = 64 # half\n".parse().unwrap();
+        let level = |percent, muted| WallpaperLevel { percent, muted };
+        write_wallpaper_level(&mut doc, "3018340632", level(40, false)).unwrap();
+        write_wallpaper_level(&mut doc, "/w/my wallpaper", level(100, true)).unwrap();
+        let text = doc.to_string();
+        assert!(text.contains("volume = 64 # half"), "{text}");
+        assert!(text.contains("[wallpaper-audio.3018340632]"), "{text}");
+        assert!(!text.contains("[wallpaper-audio]\n"), "{text}");
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.wallpaper_audio["3018340632"].volume, Some(40));
+        assert_eq!(config.wallpaper_audio["/w/my wallpaper"].muted, Some(true));
+        // Back to the default: the entry, then the table, go away.
+        write_wallpaper_level(&mut doc, "3018340632", WallpaperLevel::DEFAULT).unwrap();
+        write_wallpaper_level(&mut doc, "/w/my wallpaper", WallpaperLevel::DEFAULT).unwrap();
+        assert_eq!(doc.to_string(), "volume = 64 # half\n");
+        let mut doc: DocumentMut = "wallpaper-audio = 3\n".parse().unwrap();
+        assert!(write_wallpaper_level(&mut doc, "1", level(1, false)).is_err());
     }
 
     #[test]
