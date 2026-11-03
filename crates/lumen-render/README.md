@@ -1,0 +1,169 @@
+# lumen-render
+
+GPU foundation of the Lumen scene renderer (wgpu 30): device and outputs, texture uploads, named render targets, the pass graph, image chains, bloom, final composition, headless readback and debug counters.
+
+## Sources (clean room)
+
+- `specs/04-rendu-scene-effets.md` (main source: §0–§17, §21, §24, open questions Q1–Q25).
+- `specs/03-shaders.md` §11–§13 (render states, engine uniforms, matrices), §3.4 (vertex attributes), §2.4 (`commands/copy`).
+- `specs/05-particules.md` §12 (vertex formats, used for sizing only; particles are not wired yet).
+- `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`, `docs/TESTING.md` (reference wallpaper used only to size the benchmark: pass count and target scales).
+- Public documentation and API of `wgpu` 30.0.1 and `naga` 30.0.1.
+
+No upstream code, fork or snippet was consulted.
+
+## Coverage
+
+| Module | Content |
+|---|---|
+| `context` | `GpuInstance` (surfaces from raw-window-handle 0.6) → `GpuContext`: Vulkan on Linux, Vulkan then DX12 on Windows (adapter ranking `adapter_rank`), one device for every output, `MemoryHints::MemoryUsage`, optional features `TEXTURE_COMPRESSION_BC`, `ADDRESS_MODE_CLAMP_TO_BORDER`, `DEPTH_CLIP_CONTROL`, `PIPELINE_CACHE`, timestamps. On-disk `PipelineCache` (Vulkan), shared sampler cache, GPU memory and resource counters, uncaptured GPU errors logged instead of aborting. |
+| `surface` | `OutputSurface`: `PresentMode::Fifo`, opaque alpha, never sRGB (non-sRGB view of an sRGB-only swap chain), occlusion/timeout → skip the frame, lost/outdated → reconfigure. |
+| `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. |
+| `targets` | `RenderTargetPool`: RGBA8 UNORM targets, scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. |
+| `blend` | WE `blending` → `wgpu::BlendState` (§14), RGB-only write mask, culling, `FrontFace::Cw` (verified by test). |
+| `shader` | Pass binding contract, reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation, GPU module creation under an error scope. |
+| `dynbuf` | One buffer for frame globals + every pass uniform block (dynamic offsets) + image vertices; CPU shadow with change detection and one `write_buffer` per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. |
+| `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind groups per slot-0 variant (animated textures), automatic hazard copies, consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. |
+| `chain` | §9.8/§10/§11.6: destinations, inputs, `previous`, A/B ping-pong, geometry case, matrix kind, blend transfer, RGB-only last pass (pure, unit tested with the spec examples). |
+| `image` | `add_image` (chain plan → passes, geometry, static matrices) and `ImageHandle::update` (rect, alignment, rotation pivot, `M_ecran` with parallax, scene geometry) every frame. |
+| `math` | `ortho`, `lookAt`, camera `P = ortho · T(eye)`, auto projection, pointer, parallax, hierarchy, alignment, rect, rotation, `M_copie`, `uMax/vMax`, quads in the spec vertex order, text matrix. |
+| `compose` | `uv_range` (stretch/fill/fit/default with the exact truncations), span (`bounding_box`, `span_range`), vertical flip, `Compositor`/`OutputComposer` (one fullscreen triangle, blending off, alpha 1, clamp/border/repeat). |
+| `bloom` | §17 as five generic passes; `BloomShaders` takes the translated WE asset shaders, `BloomShaders::internal()` provides WGSL stand-ins. |
+| `headless` | `HeadlessOutput`, `read_texture_rgba8`, `write_png`. |
+| `stats` | `GpuTimer` (timestamps, 3-slot async readback, never stalls), `FrameStats`, `allocator_bytes`. |
+
+## Integration contract (render-ready input types)
+
+The integration layer converts the other crates' outputs into these types; `lumen-render` depends on none of them.
+
+### Device and outputs
+
+```rust
+let instance = GpuInstance::new(None);                        // Vulkan (+DX12 on Windows)
+let surface = unsafe { instance.create_surface(display, window)? }; // raw-window-handle 0.6
+let ctx = instance.into_context(&ContextOptions { pipeline_cache_dir: Some(dir), ..Default::default() }, &[&surface])?;
+let mut output = OutputSurface::new(&ctx, surface, (w, h))?;
+// after loading a wallpaper: ctx.save_pipeline_cache()?;
+```
+
+### Textures (`lumen-formats` → `TextureUpload`)
+
+| `.tex` format | `TexelFormat` |
+|---|---|
+| RGBA8888 / decoded PNG, JPEG… | `Rgba8` |
+| DXT1 / DXT3 / DXT5 | `Bc1` / `Bc2` / `Bc3` if `ctx.supports_bc()`, else decode to `Rgba8` |
+| RG88 / R8 | `Rg8` / `R8` |
+| RGB565, RGB888, float formats | expand to `Rgba8` on the CPU |
+
+`levels` = every mip of one image (level `i` = `max(1, size0 >> i)`, tightly packed rows), `content_size` = declared ("real") size, `flags` = TEX flags. BC level 0 must be a multiple of 4. An animated texture is one upload per atlas image, bound with `ImagePass::slot0_variants`; `RenderScene::set_variant` selects the frame (§16.3). The CPU copy can be dropped right after `SceneBuilder::add_texture`.
+
+### Shaders (`lumen-shader` → `ShaderDesc`)
+
+`ShaderDesc { label, module: naga::Module, vertex_entry, fragment_entry, upstream_clip_space: true }`. The module must follow this binding contract:
+
+- `@group(0) @binding(0)`: optional `var<uniform>` struct holding the pass uniforms. Member names are the WE names (`g_ModelViewProjectionMatrix`, `g_Time`, material constants…); offsets and types are read from the naga struct. Bound with a dynamic offset.
+- `@group(0) @binding(1)`: optional frame block, layout `dynbuf::FRAME_GLOBALS_WGSL` (`g_Time`, `g_Daytime`, pointers, texel sizes, audio spectra packed in `vec4` arrays). Using it instead of pass-block copies saves CPU work; both are supported.
+- `@group(1) @binding(2N)`: `texture_2d<f32>` of slot N (`g_TextureN`, N < 8); `@binding(2N+1)`: its filtering sampler.
+- Vertex inputs by argument/member name: `a_Position` (3 floats) and `a_TexCoord` (2 floats) are fed; any other `@location` receives (0, 0, 0, 1).
+- The vertex output is in the **GLSL/upstream clip convention**; lumen-render appends the wgpu correction. Do not apply it in the translator.
+- One fragment output at `@location(0)`.
+
+Reuse the same `ShaderId` for identical translated shaders (same source + combos): pipelines are deduplicated by `(shader, blend, write mask, cull)`.
+
+### Images (`lumen-scene` → `ImageSpec` + `ImagePass`)
+
+- `RenderTargetPool::create_scene_targets` before the objects, `create_composites(id, tronc(S), sampler)` per image, `new_scope` + `create(name, scaled_size(S, scale))` for effect `fbos`, `create_bloom_targets` / `create_bloom_composites` after the objects. Names are resolved with `resolve(scope, name)` at load time.
+- `ImageSpec`: `S`, parsed `Alignment`, main texture and its `(storage, content)` sizes, `animated`, `passthrough`, `fullscreen`, composites, scene target, `final_to_scene`.
+- `ImagePass` per pass, in order (material passes, effect passes, tint and `colorBlendMode` passes): shader, material blend, cull, resolved `target`, slot sources (`SlotSource::Texture` = highest-priority ready candidate, `SlotSource::Previous` = `bind previous`).
+- `add_image` writes static uniforms (`g_ModelMatrix`, copy/identity MVPs, identity engine matrices, texel sizes, ones for alpha/colour/brightness, `g_TextureNResolution` from the bound textures) and appends the draws in render order. Other uniforms: `SceneBuilder::uniform(pass, name)` once → `UniformSlot`, then `shadow_mut().write_floats / write_ints / write_mat4` (at load or any frame).
+
+### Frame loop
+
+```rust
+scene.update_frame(&FrameInputs { time, daytime, pointer, pointer_last, audio16, audio32, audio64 });
+image.update(&mut scene, &ImageFrame { view_projection, transform, parallax, scene_size }); // per image
+if scene.needs_redraw() || output_changed {
+    let Some(frame) = output.acquire(&ctx)? else { /* occluded */ };
+    let mut enc = ctx.device().create_command_encoder(&Default::default());
+    scene.encode(&ctx, &mut enc);                         // ≤ 1 write_buffer, prerecorded segments
+    let uv = composer.update(&ctx, frame.size(), logical); // also feeds next frame's pointer
+    compositor.encode(&mut enc, &composer, frame.view(), region, Some(clear));
+    ctx.queue().submit([enc.finish()]);
+    frame.present(&ctx);
+}
+```
+
+`examples/headless.rs` is a complete minimal integration (texture + base pass + effect + composition → PNG).
+
+## Performance
+
+- Load time only: every texture, target, buffer, sampler, bind group, pipeline and bundle. Steady state creates no GPU object (`ctx.resources_created()` is constant, tested) and the CPU update path performs **zero heap allocations** (`tests/alloc.rs`, counting allocator; wgpu itself allocates ~90 times to create an encoder and record a 6-pass frame).
+- One `write_buffer` per frame at most, covering the changed byte range; none when nothing changed.
+- Frozen passes are replayed from render bundles; consecutive draws to one target share one render pass.
+- `needs_redraw()` is false when no uniform, vertex, variant or external texture changed: the caller skips rendering and presenting. Graphs that accumulate across frames (translucent/additive passes into never-cleared targets, §15) keep rendering `ACCUMULATION_SETTLE_FRAMES` (120) frames after the last change; graphs with cross-frame reads keep 2.
+- `examples/chain_bench.rs` reproduces the shape of the reference wallpaper (3440×1440, one image with 19 passes: 8 single-pass effects, shine 5 passes at ½, localcontrast 4 passes at ¼, chromatic aberration; bloom 5 passes; composition) with synthetic shaders of similar tap counts:
+
+| Adapter | GPU / frame | CPU update + encode / frame |
+|---|---|---|
+| RTX 4080 SUPER (Vulkan) | **0.6 ms** | 0.1 ms |
+| Ryzen 7950X3D iGPU, 2 CU RDNA2 (RADV) | 22.9 ms (texture-rate bound) | 0.28 ms |
+| llvmpipe | 146 ms | 0.15 ms |
+
+  VRAM tracked: 108 MiB (146 MiB before the 1×1 shadow-atlas / bloom-B savings below), dominated by the 3440×1440 RGBA8 main texture and the full-size targets (scene, A/B, bloom A); BC textures shrink the texture share 4–8×. Pipelines + bundles build in 2–50 ms (driver cache warm/cold).
+
+  The 2-CU iGPU exceeds 16 ms because the synthetic shaders are texture-rate bound (≈ 50 full-resolution taps per pixel per frame); engine overhead is the CPU column. The real cost must be re-measured once `lumen-shader` translates the wallpaper's own effect shaders; BC main textures would also cut the base-pass bandwidth.
+
+## Decisions on the open questions of spec 04
+
+Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes fixed, 3 visible output reproduced, 4 WE gaps filled, 5 visible bugs follow WE when known, 6 frame-rate independence). Items owned by another crate are recorded here so the integration follows them.
+
+| Q | Decision | Rule |
+|---|---|---|
+| Q1 | Reproduce the reference where it changes the output and WE's behaviour is unknown (`// parity:` comments); follow WE where a visible defect contradicts its documented behaviour (Q5–Q8, Q12, Q20–Q22); never reproduce perf bugs or crashes. | 1–5 |
+| Q2 | Each scene clears its own RT with its own `clearcolor`, and each output clears its background with its scene's colour (identical to the reference with one scene; no leak between scenes). | 5 |
+| Q3 | Reference auto-projection formula kept (`math::auto_projection_size`, `// parity:`); to confirm against WE. | 3/5 |
+| Q4 | `nearz`/`farz` read where the reference reads them (scene crate), but pipelines use `unclipped_depth` when available: nothing is discarded for its depth (no depth buffer exists), so a scene with `nearz > 0` stays visible as in WE. | 5 |
+| Q5 | Default `ParallaxSmoothing::WallpaperEngine`: `delay` is a time constant in seconds (0 = follow instantly), `k = 1 − e^(−dt/delay)`; the reference law stays available (`Reference`). Exact WE curve unconfirmed. | 5, 6 |
+| Q6 | Mouse disabled → pointer at the centre of the visible window (neutral parallax, `pointer_disabled`). Lumen never reads the output back, so the same `g_PointerPosition` formula holds on X11, Wayland and Windows. | 5 |
+| Q7 | Alpha, colour, brightness are live: their `UniformSlot`s are written whenever the property/script value changes (no per-frame cost otherwise). | 5 |
+| Q8 | `ChainOptions::final_to_scene = true` for every image; visibility toggles with `RenderScene::set_enabled(image.passes)`. Effect visibility changes are handled by re-planning the image chain (integration rebuilds that image's passes; event-driven). | 5 |
+| Q9 | Magenta tint pass kept (it changes the output, WE behaviour unknown): the scene crate appends it as a normal `ImagePass`. | 3 |
+| Q10 | `colorBlendMode` is a normal appended pass; when it samples `_rt_FullFrameBuffer` while drawing into it, the graph inserts the copy automatically (§24.6, tested). Mode table comes from the WE shader. | 3 |
+| Q11 | Output always opaque: compositor writes alpha 1, surface alpha mode `Opaque` when offered. | 3 |
+| Q12 | Not reproduced: a thumbnail that becomes ready later is bound (integration updates the slot and calls `rebuild_bindings`). | 5 |
+| Q13 | `g_TextureNResolution` = resolution of the texture actually bound (filled from the bindings at build and on `set_variant`). | 5 |
+| Q14 | Missing main texture, parent, or zero-sized texture-less image: the object is dropped, the scene goes on. | 2 |
+| Q15 | Dependency cycles detected and the offending edge ignored (scene crate). | 2 |
+| Q16 | Texture cache keyed per wallpaper (assets/integration); `TextureId`s are per scene. | 5 |
+| Q17 | `TEX0FORMAT` derived from the main texture for every pass, as the reference (combo, shader crate). | 3 |
+| Q18 | Scene video textures follow the clock (video crate); render side: `GpuTexture::write_level0` + `RenderScene::mark_dirty`. | 6 |
+| Q19 | Windows: `systemfont_<name>` maps to that installed family, fallback Segoe UI, then Arial (text crate, not yet wired). | 5 |
+| Q20 | Text ordinate counted from the bottom like images (`math::text_matrix`). | 5 |
+| Q21 | Text always drawn into the scene RT. | 5 |
+| Q22 | Single-pass puppet: mesh converted to RC and drawn with `M_ecran` (`GeometryCase::PuppetScene`). | 5 |
+| Q23 | Perspective camera, zoom, shake, lights, HDR, `fbos.format`/`unique`, global `_rt_*CompoBuffer*`: not implemented yet (orthographic only, RGBA8 targets; effect-declared `_rt_HalfCompoBuffer*` work through effect scopes). Planned under rule 4. | 4 (later) |
+| Q24 | Clock kept in f64 on the CPU, converted to f32 only in `FrameInputs::time`; no wrap (a wrap would cause visible jumps). Shader-side f32 precision is the same as WE's. | 3 |
+| Q25 | No 250 µs polling: pause is event-driven (platform crate), zero wake-ups. | 1 |
+
+## Deviations
+
+- `blending: normal` disables the blend unit instead of computing `src·1 + dst·0`: identical bits on UNORM targets, cheaper.
+- `_rt_shadowAtlas` is allocated 1×1 (never filled, samples as transparent black; only its resolution vector differs). The bloom image's B composite is 1×1 (never written, unreachable by name).
+- Targets of `tronc(S/scale) = 0` are clamped to 1 pixel (zero-sized textures are invalid; crash fix).
+- `ClampToBorder` render targets need `ADDRESS_MODE_CLAMP_TO_BORDER`; without it they clamp to edge (warning). The output `border` clamp mode is emulated in the composition shader, identical result.
+- Bloom: the internal WGSL shaders are approximations of the WE asset materials (same passes, inputs, sizes and constants); parity requires the translated WE shaders through `BloomShaders`.
+- Accumulating graphs: when the caller skips static frames, rendering continues 120 frames after the last change instead of indefinitely (convergence of 8-bit accumulation).
+
+## Not done yet (wired later)
+
+- Text objects (R8 glyph texture, `text_matrix` is ready), particles (17/26-float vertex formats need a second vertex layout in the graph), puppet mesh parsing (indexed geometry and the puppet chain cases are ready), video and web wallpapers (`GpuTexture::write_level0` / `RenderTargetPool::resize` + `Compositor::rebind` are the hooks).
+- Real WE shaders: depends on `lumen-shader` emitting the binding contract above.
+- Lazy allocation of image B composites when the chain never writes B (memory).
+- Load-op `Clear` instead of `Load` for passes that fully overwrite their target (saves bandwidth on tiled/integrated GPUs; needs a coverage guarantee to stay parity-safe).
+
+## Tests
+
+- Unit (44): matrices, camera, pointer, parallax laws, hierarchy, alignment, rect, rotation sense, uv padding, quad order/winding, scaling modes with the spec examples and truncation effects, span, blend table, culling/masks, chain plans (spec examples), RT sizes and scopes, uniform layouts and patches, sampler flags, upload validation, surface formats, adapter ranking, naga reflection and clip fix.
+- GPU (`tests/gpu.rs`, 14, headless): orientation end to end, padding window, culling with `FrontFace::Cw`, translucent blend + RGB mask, A/B ping-pong, read/write hazard copy, unfed attributes, animated variants, bloom chain, composition modes, BC1 upload, visibility toggle, pipeline cache on disk, steady state (no new GPU objects, `needs_redraw`, `g_Time`, GPU timer). They pass on the RTX 4080, RADV and llvmpipe (`LUMEN_TEST_SOFTWARE=1`); without any adapter they print "skipped".
+- `tests/alloc.rs`: zero allocation in the per-frame update path.
+- Examples: `headless` (writes a PNG), `chain_bench` (reference-shaped chain timing).

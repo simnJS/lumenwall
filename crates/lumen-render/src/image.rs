@@ -1,0 +1,314 @@
+//! Image objects on top of the generic graph (spec 04 §8 to §11): chain
+//! planning, geometry, texture coordinates, matrices and the per-frame update.
+//!
+//! The caller (integration layer) resolves names, shaders and textures, then
+//! describes the image with render-ready structs: [`ImageSpec`] and one
+//! [`ImagePass`] per pass (material passes, effect passes, optional tint and
+//! `colorBlendMode` passes, in order).
+
+use glam::{Mat4, Vec2, Vec3};
+
+use crate::blend::{BlendMode, CullMode};
+use crate::chain::{
+    ChainBuffer, ChainOptions, ChainPassInput, GeometryCase, MatrixKind, PlannedPass,
+    plan_image_chain,
+};
+use crate::dynbuf::{UniformSlot, VertexRange};
+use crate::error::Result;
+use crate::graph::{
+    Geometry, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SlotBinding, TextureRef,
+};
+use crate::math::{
+    Alignment, NodeTransform, copy_matrix, copy_quad, copy_uv_max, image_rect, rect_quad,
+    screen_matrix, unit_quad,
+};
+use crate::shader::MAX_SLOTS;
+use crate::targets::{PingPong, RtId};
+use crate::texture::SamplerKey;
+
+/// Source of a texture slot (after name resolution, spec 04 §12.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotSource {
+    /// A resolved texture or render target (highest-priority ready candidate).
+    Texture(TextureRef),
+    /// The `previous` bind candidate.
+    Previous,
+}
+
+/// One pass of an image chain.
+#[derive(Clone, Debug)]
+pub struct ImagePass {
+    pub label: String,
+    pub shader: ShaderId,
+    /// The material's own blending (before the transfer of spec 04 §9.8).
+    pub blend: BlendMode,
+    pub cull: CullMode,
+    /// Resolved `target` of an effect pass.
+    pub target: Option<RtId>,
+    /// Slot candidates; slot 0 without source = the pass input.
+    pub slots: [Option<SlotSource>; MAX_SLOTS],
+    /// Frames of an animated main texture for slot 0 (see `RenderScene::set_variant`).
+    pub slot0_variants: Vec<TextureRef>,
+}
+
+impl ImagePass {
+    #[must_use]
+    pub fn new(label: impl Into<String>, shader: ShaderId) -> Self {
+        Self {
+            label: label.into(),
+            shader,
+            blend: BlendMode::Normal,
+            cull: CullMode::None,
+            target: None,
+            slots: [None; MAX_SLOTS],
+            slot0_variants: Vec::new(),
+        }
+    }
+}
+
+/// Image-level description.
+#[derive(Clone, Debug)]
+pub struct ImageSpec {
+    pub label: String,
+    /// `S`, frozen after construction (spec 04 §8.2).
+    pub size: Vec2,
+    pub alignment: Alignment,
+    /// Main texture (slot 0 input of the first pass).
+    pub main: TextureRef,
+    /// `(storage, content)` sizes of the main texture, for `uMax/vMax`.
+    pub main_sizes: ((u32, u32), (u32, u32)),
+    pub animated: bool,
+    pub passthrough: bool,
+    pub fullscreen: bool,
+    /// Composite pair A/B (created with `RenderTargetPool::create_composites`).
+    pub composites: PingPong,
+    /// The scene render target.
+    pub scene_target: RtId,
+    /// See [`ChainOptions::final_to_scene`].
+    pub final_to_scene: bool,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicPass {
+    mvp: Option<UniformSlot>,
+    mvp_inverse: Option<UniformSlot>,
+    effect_mvp: Option<UniformSlot>,
+}
+
+/// Per-frame inputs of an image.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageFrame {
+    /// Camera `P · V`.
+    pub view_projection: Mat4,
+    /// Resolved transform (spec 04 §8.1; origin replaced for `fullscreen`).
+    pub transform: NodeTransform,
+    /// `T(parallaxe)` translation, zero when parallax is off.
+    pub parallax: Vec3,
+    /// Projection size `(W, H)`.
+    pub scene_size: Vec2,
+}
+
+/// Handle returned by [`add_image`] to update the image every frame.
+#[derive(Clone, Debug)]
+pub struct ImageHandle {
+    pub passes: Vec<PassId>,
+    pub plan: Vec<PlannedPass<RtId>>,
+    size: Vec2,
+    alignment: Alignment,
+    uv_max: Vec2,
+    scene_geometry: Option<(VertexRange, bool)>,
+    passthrough_geometry: Option<(VertexRange, bool)>,
+    screen_passes: Vec<DynamicPass>,
+    passthrough_passes: Vec<DynamicPass>,
+}
+
+fn write_matrix(b: &mut SceneBuilder<'_>, pass: PassId, m: Mat4) {
+    for (name, value) in [
+        ("g_ModelViewProjectionMatrix", m),
+        ("g_EffectModelViewProjectionMatrix", m),
+        ("g_ModelViewProjectionMatrixInverse", m.inverse()),
+    ] {
+        if let Some(slot) = b.uniform(pass, name) {
+            b.shadow_mut().write_mat4(&slot, &value);
+        }
+    }
+}
+
+/// Build the passes of an image and append their draws to the frame ops.
+pub fn add_image(
+    b: &mut SceneBuilder<'_>,
+    spec: &ImageSpec,
+    passes: &[ImagePass],
+) -> Result<ImageHandle> {
+    let inputs: Vec<ChainPassInput<RtId>> = passes
+        .iter()
+        .map(|p| ChainPassInput {
+            target: p.target,
+            blend: p.blend,
+        })
+        .collect();
+    let plan = plan_image_chain(
+        &inputs,
+        ChainOptions {
+            final_to_scene: spec.final_to_scene,
+            passthrough: spec.passthrough,
+            fullscreen: spec.fullscreen,
+            puppet: false,
+        },
+    );
+    let uv_max = copy_uv_max(
+        spec.main_sizes.0,
+        spec.main_sizes.1,
+        spec.animated,
+        spec.passthrough,
+    );
+    let model = copy_matrix(spec.size);
+
+    let mut copy_geom = None;
+    let mut unit_geom = None;
+    let mut scene_geom = None;
+    let mut passthrough_geom = None;
+    let mut handle = ImageHandle {
+        passes: Vec::with_capacity(plan.len()),
+        plan: plan.clone(),
+        size: spec.size,
+        alignment: spec.alignment,
+        uv_max,
+        scene_geometry: None,
+        passthrough_geometry: None,
+        screen_passes: Vec::new(),
+        passthrough_passes: Vec::new(),
+    };
+
+    let buffer = |c: ChainBuffer<RtId>| -> TextureRef {
+        match c {
+            ChainBuffer::Main => spec.main,
+            ChainBuffer::A => TextureRef::Target(spec.composites.a),
+            ChainBuffer::B => TextureRef::Target(spec.composites.b),
+            ChainBuffer::Target(t) => TextureRef::Target(t),
+            ChainBuffer::Scene => TextureRef::Target(spec.scene_target),
+        }
+    };
+
+    for (p, q) in passes.iter().zip(plan.iter()) {
+        let target = match buffer(q.destination) {
+            TextureRef::Target(t) => t,
+            _ => spec.scene_target,
+        };
+        let geometry = match q.geometry {
+            GeometryCase::Copy | GeometryCase::PuppetLocal => {
+                *copy_geom.get_or_insert_with(|| b.add_vertices(&copy_quad(spec.size, uv_max)))
+            }
+            GeometryCase::Unit => *unit_geom.get_or_insert_with(|| b.add_vertices(&unit_quad())),
+            GeometryCase::SceneRect | GeometryCase::SceneRectCopyUv | GeometryCase::PuppetScene => {
+                let copy_uv = q.geometry != GeometryCase::SceneRect;
+                let r = *scene_geom.get_or_insert_with(|| (b.add_vertices(&unit_quad()), copy_uv));
+                handle.scene_geometry = Some(r);
+                r.0
+            }
+            GeometryCase::Passthrough { fullscreen } => {
+                let r = *passthrough_geom
+                    .get_or_insert_with(|| (b.add_vertices(&unit_quad()), fullscreen));
+                handle.passthrough_geometry = Some(r);
+                r.0
+            }
+        };
+
+        let mut desc = PassDesc::new(
+            p.label.clone(),
+            p.shader,
+            target,
+            Geometry::Vertices(geometry),
+        );
+        desc.blend = q.blend;
+        desc.write_mask = q.write_mask;
+        desc.cull = p.cull;
+        for (n, src) in p.slots.iter().enumerate() {
+            desc.slots[n] = src.map(|s| SlotBinding {
+                texture: match s {
+                    SlotSource::Texture(t) => t,
+                    SlotSource::Previous => buffer(q.previous.unwrap_or(q.input)),
+                },
+                sampler: None,
+            });
+        }
+        if desc.slots[0].is_none() {
+            desc.slots[0] = Some(SlotBinding {
+                texture: buffer(q.input),
+                sampler: None,
+            });
+        }
+        if q.input == ChainBuffer::Main && p.slots[0].is_none() {
+            desc.slot0_variants.clone_from(&p.slot0_variants);
+        }
+        let id = b.add_pass(desc)?;
+
+        for name in ["g_ModelMatrix", "g_EffectModelMatrix"] {
+            if let Some(slot) = b.uniform(id, name) {
+                b.shadow_mut().write_mat4(&slot, &model);
+            }
+        }
+        let dynamic = |b: &SceneBuilder<'_>| DynamicPass {
+            mvp: b.uniform(id, "g_ModelViewProjectionMatrix"),
+            mvp_inverse: b.uniform(id, "g_ModelViewProjectionMatrixInverse"),
+            effect_mvp: b.uniform(id, "g_EffectModelViewProjectionMatrix"),
+        };
+        match (q.geometry.matrix(), q.geometry) {
+            (MatrixKind::Copy, GeometryCase::Passthrough { .. }) => {
+                handle.passthrough_passes.push(dynamic(b))
+            }
+            (MatrixKind::Copy, _) => write_matrix(b, id, model),
+            (MatrixKind::Identity, _) => write_matrix(b, id, Mat4::IDENTITY),
+            (MatrixKind::Screen, _) => handle.screen_passes.push(dynamic(b)),
+        }
+        b.push(Op::Draw(id));
+        handle.passes.push(id);
+    }
+    Ok(handle)
+}
+
+impl ImageHandle {
+    /// Per-frame update (spec 04 §8.8): rectangle, rotation pivot, `M_ecran`
+    /// with parallax, scene geometry. No allocation; unchanged values do not
+    /// dirty the scene.
+    pub fn update(&self, scene: &mut RenderScene, f: &ImageFrame) {
+        let t = f.transform;
+        let rect = image_rect(t.origin, t.scale, self.size, self.alignment, f.scene_size);
+        let screen = screen_matrix(f.view_projection, &rect, t.angle, f.parallax);
+        if let Some((range, copy_uv)) = self.scene_geometry {
+            let uv = if copy_uv { self.uv_max } else { Vec2::ONE };
+            scene.set_vertices(range, &rect_quad(&rect, uv));
+        }
+        if let Some((range, fullscreen)) = self.passthrough_geometry {
+            let q = if fullscreen {
+                unit_quad()
+            } else {
+                rect_quad(&rect, Vec2::ONE)
+            };
+            scene.set_vertices(range, &q);
+        }
+        if self.screen_passes.is_empty() && self.passthrough_passes.is_empty() {
+            return;
+        }
+        let inverse = screen.inverse();
+        let shadow = scene.shadow_mut();
+        for d in self.screen_passes.iter().chain(&self.passthrough_passes) {
+            if let Some(s) = &d.mvp {
+                shadow.write_mat4(s, &screen);
+            }
+            if let Some(s) = &d.effect_mvp {
+                shadow.write_mat4(s, &screen);
+            }
+            if let Some(s) = &d.mvp_inverse {
+                shadow.write_mat4(s, &inverse);
+            }
+        }
+    }
+}
+
+/// Sampling of the composites and effect targets of an image: the flags of
+/// its main texture interpreted as render-target flags (spec 04 §8.9, §16.1).
+#[must_use]
+pub fn composite_sampler(main_flags: crate::texture::TexFlags) -> SamplerKey {
+    SamplerKey::for_render_target(main_flags)
+}

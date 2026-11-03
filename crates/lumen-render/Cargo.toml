@@ -8,6 +8,20 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Vulkan everywhere, DX12 as the Windows fallback. No GL, no Metal, no WebGPU:
+# fewer backends = smaller binary and fewer adapters to probe at start-up.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "naga-ir"] }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+raw-window-handle = "0.6.2"
+glam.workspace = true
+bytemuck = { version = "1.25", features = ["derive"] }
+thiserror.workspace = true
+tracing.workspace = true
+pollster = "0.4"
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 
 [lints]
 workspace = true
