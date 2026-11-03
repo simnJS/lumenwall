@@ -31,8 +31,9 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | `plan` | `EnginePlan` (what to run), `EngineControl`, `Stopped`. Independent of the `lumen` crate, which depends on this one and converts its `ExecutionPlan` (in `crates/lumen/src/main.rs`). |
 | `assets` | `WallpaperResolver` (Workshop id or path through `lumen-assets` Steam discovery, Snap install included; installation and `assets` folders), `SceneSource` (VFS → `lumen-scene::AssetSource`, borrowed `.pkg` entries), `VfsBytes` (zero-copy sound data from the mapped `.pkg`), `ShaderSource` (VFS → `lumen-shader::ShaderFs`). |
 | `wallpaper` | `Wallpaper`: VFS + `Project` with `--set-property` overrides applied before the scene is read. |
-| `texture` | `.tex` → `TextureUpload`: BC1/2/3 uploaded as is when `supports_bc()`, decoded otherwise; RG8/R8/RGBA8; every image of an animated texture; `TEX0FORMAT` forcing; per-scene cache by name. CPU copies are dropped right after the upload. |
+| `texture` | `.tex` → `TextureUpload`: BC1/2/3 uploaded as is when `supports_bc()`, decoded otherwise; RG8/R8/RGBA8; every image of an animated texture; volume textures (flag 0x40, colour LUTs) → `VolumeUpload`; `TEX0FORMAT` forcing; per-scene cache by name. CPU copies are dropped right after the upload. |
 | `shaders` | `ShaderProvider` trait. `WeShaders` (feature `we-shaders`, default): `lumen-shader` → one naga module per pass, deduplicated by `PassShader::key`, on-disk cache in `~/.cache/lumen/shaders`, material constants and sampler defaults from the annotations. `FallbackShaders`: WGSL stand-ins following the binding contract, used per shader when a translation fails (logged once per shader) and for `commands/copy`. |
+| `bloom` | Spec 04 §17 with the WE materials: the five shaders of `lumen-scene`'s synthetic bloom image (`genericimage2`, `downsample_quarter_bloom`, `downsample_eighth_blur_v`, `blur_h_bloom`, `combine`) translated through the `ShaderProvider`, every material constant written once (`bloomstrength` → `g_BloomStrength`, `bloomthreshold` → `g_BloomThreshold`, `g_BloomTint` annotation default), drawn by `lumen_render::bloom::add_bloom`. If one shader is a stand-in, the whole chain uses lumen-render's WGSL approximation. |
 | `scene` | `build_scene`: `Project::build` → render graph in two phases (creation order: textures, composites, effect `fbos` scopes, slot candidates, targets, shaders, constants; render order: `add_image`, particle passes, bloom). `SceneRuntime::update`: frame globals, parallax, image geometry, visibility, animated textures, particles. |
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
 | `audio` | Scene sounds (`lumen-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
@@ -59,14 +60,18 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
   (`ShaderInterface::vertex_input_names`), 32-bit indices, stream passes never bundled.
 - `add_image_with_puppet`: indexed rest-pose mesh for the first pass (`M_copie`), destination
   cleared first, single-pass chains mapped to the image rectangle (spec 04 Q22).
-- Integration note: `ImagePass::blend` must be the material's **own** blending; the chain planner
-  applies the §9.8 transfer, which `lumen_scene::ImagePasses` has already applied to its
-  `blending` field (feeding that one makes every multi-pass image `normal`, i.e. opaque).
+- Blending contract (spec 04 §9.8): `lumen_scene::PassDesc::blending` is the material pass's own
+  mode and goes unchanged into `ImagePass::blend`; only `lumen-render`'s chain planner applies
+  the first/last transfer (both crate READMEs, "Blending contract"). `tests/blend_contract.rs`
+  fails if it is applied zero or two times.
+- Volume textures: `SceneBuilder::add_volume_texture`; a `sampler3D` slot (`texture_3d`) binds
+  them like any `TextureId`.
 
 ## What is wired
 
 - Scene wallpapers: images with every effect chain, effect `fbos`, `copy` commands, compatibility
-  tint/colour-blend passes, composites, render-target name scopes, bloom, camera, parallax,
+  tint/colour-blend passes, composites, render-target name scopes, bloom with the WE materials,
+  colour LUTs (volume textures in `sampler3D` slots, e.g. `ccsimple` with `LUT`), camera, parallax,
   hierarchy transforms, animated textures, live visibility, user properties (`--set-property`,
   configuration reload of properties and fps), material constants bound to properties.
 - Real Wallpaper Engine shaders for images, effects and particles (0 stand-in on the 7 installed
@@ -90,11 +95,9 @@ lumen (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wallpape
 | Video wallpapers and video textures | Load error / texture skipped (`lumen-video` not integrated). |
 | Web wallpapers | Load error (`lumen-web` not integrated). |
 | SceneScript | Scripts are ignored; values keep their initial setting (`lumen-script` not integrated). |
-| Bloom shaders | The five bloom passes use `lumen-render`'s WGSL stand-ins, not the translated WE materials. |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
 | Playlists | Only the first item is shown (no `PlaylistRunner` timer). |
 | Configuration reload | `fps` and properties apply live; other changes are logged for the next start. |
-| Volume textures (LUT) | Not uploaded (renderer has 2D textures only). |
 | Screenshot formats | PNG data whatever the extension. |
 
 ## Deviations
@@ -153,7 +156,9 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 ## Tests
 
 - `cargo test -p lumen-engine`: stand-in shaders against the binding contract (every variant
-  parses, validates and reflects), particle material parsing, property bindings, uniform views.
+  parses, validates and reflects), particle material parsing, property bindings, uniform views,
+  the blending contract between `lumen-scene` and `lumen-render` (`tests/blend_contract.rs`).
 - `cargo test -p lumen-engine -- --ignored` (GPU + content of `docs/TESTING.md`): the reference
-  wallpaper renders with real shaders (0 stand-in), 1 image, 4 particle systems, live rain.
+  wallpaper renders with real shaders (0 stand-in, bloom included), 1 image, 4 particle systems,
+  live rain; the colour LUTs of `materials/lut` load as 32³ volume textures (`tests/volume_lut.rs`).
 - `cargo run -p lumen-engine --example render_png -- <ids>`: visual checks.

@@ -14,7 +14,6 @@ use std::rc::Rc;
 use glam::{Mat4, Vec2, Vec3};
 use lumen_assets::Vfs;
 use lumen_particles::ParallaxInput;
-use lumen_render::bloom::{BloomParams, BloomShaders, add_bloom};
 use lumen_render::dynbuf::{FrameInputs, UniformSlot};
 use lumen_render::image::composite_sampler;
 use lumen_render::math::{
@@ -214,7 +213,7 @@ fn node(t: lumen_scene::Transform) -> NodeTransform {
 }
 
 /// Float view of a value with `n` components (0 = integer, written as float bits by caller).
-fn value_floats(v: &Value, n: u8) -> [f32; 4] {
+pub(crate) fn value_floats(v: &Value, n: u8) -> [f32; 4] {
     match n {
         0 | 1 => [v.float(), 0.0, 0.0, 0.0],
         2 => {
@@ -475,19 +474,18 @@ pub fn build_scene(
         if let Some((bl, targets, composites)) = &bloom
             && bl.object == idx
         {
-            let shaders = BloomShaders::internal(&mut b).map_err(|e| e.to_string())?;
-            add_bloom(
+            // The WE bloom materials, through lumen-render's five-pass chain (spec 04 §17).
+            crate::bloom::add_scene_bloom(
                 &mut b,
-                &shaders,
+                project,
+                &build,
+                vfs,
+                shaders,
                 &st,
                 targets,
                 *composites,
-                BloomParams {
-                    strength: bl.strength,
-                    threshold: bl.threshold,
-                },
-            )
-            .map_err(|e| e.to_string())?;
+                *bl,
+            )?;
             stats.passes += 5;
             continue;
         }
@@ -682,7 +680,7 @@ type ComboList = Vec<(String, i32)>;
 
 /// Material combos (with the `TEX0FORMAT` forcing of spec 04 §13.2) and override combos of a
 /// pass, upper-case names (spec 02 §12.4).
-fn split_combos(
+pub(crate) fn split_combos(
     project: &Project,
     idx: ObjectIndex,
     passes: &ImagePasses,
@@ -927,9 +925,7 @@ fn prepare_image(
             None => image_scope,
         };
         let scene = project.scene.as_ref().ok_or("not a scene project")?;
-        // The material's own blending: lumen-render applies the transfer of §9.8 itself
-        // (`ImagePasses::blending` already carries it and must not be applied twice).
-        let (shader_name, cull, kind, own_blend) = match desc.kind {
+        let (shader_name, cull, kind) = match desc.kind {
             ScenePassKind::Material { material, pass } => {
                 let mp = scene
                     .material(material)
@@ -947,15 +943,11 @@ fn prepare_image(
                     } else {
                         PassKind::ImageEffect
                     },
-                    mp.blending,
                 )
             }
-            ScenePassKind::Copy { .. } => (
-                "commands/copy".to_owned(),
-                CullMode::None,
-                PassKind::Copy,
-                lumen_scene::Blending::Normal,
-            ),
+            ScenePassKind::Copy { .. } => {
+                ("commands/copy".to_owned(), CullMode::None, PassKind::Copy)
+            }
         };
         let (material_combos, override_combos) =
             split_combos(project, idx, &passes, k, main_format);
@@ -987,7 +979,9 @@ fn prepare_image(
             textures.exists(vfs, name)
         });
         let mut pass = ImagePass::new(format!("object {id} pass {k} ({shader_name})"), shader.id);
-        pass.blend = blend(own_blend);
+        // Blending contract: lumen-scene gives the material's own mode, lumen-render applies
+        // the first/last transfer of spec 04 §9.8 to the final chain (tests/blend_contract.rs).
+        pass.blend = blend(desc.blending);
         pass.cull = cull;
         for (slot, r) in slots_ref {
             let slot = slot as usize;

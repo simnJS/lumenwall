@@ -279,3 +279,34 @@ fn assets_shaders() {
     let (ok2, f2) = run(&fs, &jobs);
     report("assets material passes", ok2, &f2);
 }
+
+/// The only `sampler3D` of the assets: `ccsimple.frag` reads a colour LUT (volume texture) in
+/// slot 1 when `LUT` is set. Its plain `#if` combos are not `[COMBO]`-annotated, so the
+/// variations above never enable them.
+#[test]
+#[ignore = "needs LUMEN_WE_ASSETS (docs/TESTING.md)"]
+fn assets_volume_lut_shader() {
+    let Some(assets) = env_dir("LUMEN_WE_ASSETS") else {
+        println!("LUMEN_WE_ASSETS is missing; skipped");
+        return;
+    };
+    let fs = DirFs(assets);
+    let compiler = ShaderCompiler::new(CompileOptions::default(), None);
+    for combos in [&[("LUT", 1)][..], &[("LUT", 1), ("HDR", 1)], &[("LUT", 1), ("COL", 1)]] {
+        let combos = PassCombos {
+            material: combos.iter().map(|(k, v)| ((*k).to_string(), *v)).collect(),
+            ..Default::default()
+        };
+        let s = compiler
+            .load_pass(&fs, &PassRequest { shader: "ccsimple", combos: &combos })
+            .unwrap_or_else(|e| panic!("ccsimple {:?}: {e}", combos.material));
+        backends(&s, "ccsimple").unwrap();
+        let m = &s.program.module;
+        let volume = m.global_variables.iter().any(|(_, g)| {
+            g.binding.as_ref().is_some_and(|b| b.group == 1 && b.binding == 2)
+                && matches!(m.types[g.ty].inner, naga::TypeInner::Image { dim: naga::ImageDimension::D3, .. })
+        });
+        assert!(volume, "slot 1 is a texture_3d");
+        assert_eq!(s.reflection().texture("g_Texture1").map(|t| t.unit), Some(1));
+    }
+}

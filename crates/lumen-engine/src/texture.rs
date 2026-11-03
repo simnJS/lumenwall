@@ -11,7 +11,9 @@ use lumen_assets::Vfs;
 use lumen_formats::tex::{
     Animation, GpuContent, GpuFormat, Spritesheet, TextureDimension, UploadOptions,
 };
-use lumen_render::texture::{MipLevel, TexFlags, TexelFormat, TextureUpload};
+use lumen_render::texture::{
+    MipLevel, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload,
+};
 use lumen_render::{SceneBuilder, TextureId};
 use lumen_scene::MainTextureFormat;
 
@@ -154,13 +156,32 @@ fn load_texture(
     else {
         return Err("video textures are not supported yet (lumen-video is not integrated)".into());
     };
-    if *dimension == TextureDimension::D3 {
-        return Err("volume (3D) textures are not supported by the renderer yet".into());
-    }
     let format = texel_format(*format)?;
     let mut ids = Vec::with_capacity(images.len());
     let mut levels = Vec::new();
+    let mut volume_levels = Vec::new();
     for (i, image) in images.iter().enumerate() {
+        if *dimension == TextureDimension::D3 {
+            // Volume texture (flag 0x40, e.g. a 32³ colour LUT): bound to `sampler3D` slots.
+            volume_levels.clear();
+            volume_levels.extend(image.mips.iter().map(|m| VolumeLevel {
+                width: m.width,
+                height: m.height,
+                depth: m.depth,
+                data: &m.data,
+            }));
+            *uploaded += image.mips.iter().map(|m| m.data.len() as u64).sum::<u64>();
+            let id = b
+                .add_volume_texture(&VolumeUpload {
+                    label: name,
+                    format,
+                    levels: &volume_levels,
+                    flags,
+                })
+                .map_err(|e| e.to_string())?;
+            ids.push(id);
+            continue;
+        }
         levels.clear();
         levels.extend(image.mips.iter().map(|m| MipLevel {
             width: m.width,

@@ -10,6 +10,7 @@
 
 mod assets;
 mod audio;
+mod bloom;
 mod engine;
 mod headless;
 mod particles;

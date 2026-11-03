@@ -1163,12 +1163,11 @@ fn override_matching_12_2() {
             ("copy".into(), OverrideRef::None, Some((1, 2))),
         ]
     );
-    // First pass blending moves to the last pass (§12.6).
-    assert_eq!(passes.passes[0].blending, Blending::Normal);
-    assert_eq!(
-        passes.passes.last().unwrap().blending,
-        Blending::Translucent
-    );
+    // Every pass keeps its material's own blending: the first/last swap of §12.6 is the
+    // renderer's (spec 04 §9.8), applied exactly once to the final chain.
+    assert_eq!(passes.passes[0].blending, Blending::Translucent);
+    assert_eq!(passes.passes[1].blending, Blending::Additive);
+    assert_eq!(passes.passes.last().unwrap().blending, Blending::Normal);
     assert!(passes.draws);
     assert_eq!(
         p.pass_target(ObjectIndex::new(0), passes, 1)

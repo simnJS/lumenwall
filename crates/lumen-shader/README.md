@@ -5,6 +5,7 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 ## Specs used (clean room)
 
 - `specs/03-shaders.md` (whole document), `specs/02-modele-scene.md` §9–§12 (material passes, overrides, combos, constants, texture maps).
+- `specs/01-formats-binaires.md` amendment A.1 (volume textures, for `sampler3D` slots).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`.
 - Binding contract of `crates/lumen-render/README.md` ("Integration contract" > "Shaders").
 - Public documentation only: Khronos GLSL 4.50 / Vulkan GLSL, naga and wgpu API docs. No upstream code was read.
@@ -25,7 +26,7 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 - One `naga::Module` with entry points `vs_main` and `fs_main` (`CompiledProgram::module`, for `lumen_render::ShaderDesc { upstream_clip_space: true }`). The position stays in the GLSL convention.
 - `@group(0) @binding(0)`: pass block (std140) whose members are the WE uniforms that are actually used (unreachable code is pruned), ordered to reduce padding. `bool` is stored as `uint`, `matCx2` as `vec4[C]` (naga rejects two-row matrices in std140), `float[N]`/`int[N]` read only through indices are packed as `vec4[N/4]` (array stride 4 in the reflection).
 - `@group(0) @binding(1)`: the renderer's frame block (`dynbuf::FRAME_GLOBALS_WGSL` layout) for `g_Time`, `g_Daytime`, pointer, texel sizes and audio spectra, when `CompileOptions::frame_globals` (default) and the declared type matches. Updated once per frame for all passes.
-- `@group(1) @binding(2N)` / `2N + 1`: `texture2D` / filtering `sampler` of slot N. `g_Texture0`…`g_Texture7` read slot N; any other sampler name (including `g_Texture8/9`) reads slot 0 (spec 03 §8.1). Every `sampler2D` is split, also when passed to user functions (texture + sampler parameters).
+- `@group(1) @binding(2N)` / `2N + 1`: `texture2D` / filtering `sampler` of slot N (`texture3D` for a `sampler3D`, the colour LUT of `ccsimple`). `g_Texture0`…`g_Texture7` read slot N; any other sampler name (including `g_Texture8/9`) reads slot 0 (spec 03 §8.1). Every `sampler2D`/`sampler3D` is split, also when passed to user functions (texture + sampler parameters). Two samplers of different dimensions on one slot are a link error.
 - Vertex inputs keep their names (`a_Position`, `a_TexCoord`…); one fragment output at location 0.
 - `PassShader::key` (blake3 of final sources + options + versions) is the program identity for the renderer's `ShaderId`.
 
@@ -50,7 +51,7 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 | R7 | out-of-range swizzle components wrap modulo the size (warning); scalar swizzles | `r7_swizzle_wraps` |
 | R8 | varyings and uniforms of different sizes widened; the narrower stage reads a truncated copy, the vertex pads with 0 and w = 1 | `r8_*`, `section_9_*` |
 
-Dialect macros (§3.3) are textual macros with C semantics in the assembled header: `mul`, swapped `max`, `lerp`, `frac`, `saturate`, `CAST2/3/4/3X3`, `float2…4`, `int2…4`, `texSample2D(Lod)`, `log10`, `atan2`, `fmod`, `ddx`, `ddy`, `GLSL` (`compat_macros`). Includes, `#require LightingV1`, combos, annotations, workshop/zcompat substitution and the virtual `commands/copy` shader have unit tests.
+Dialect macros (§3.3) are textual macros with C semantics in the assembled header: `mul`, swapped `max`, `lerp`, `frac`, `saturate`, `CAST2/3/4/3X3`, `float2…4`, `int2…4`, `texSample2D(Lod)`, `log10`, `atan2`, `fmod`, `ddx`, `ddy`, `GLSL` (`compat_macros`). Not in §3.3: `texSample3D(Lod)`, the volume lookup of `ccsimple.frag` (superset). Includes, `#require LightingV1`, combos, annotations, workshop/zcompat substitution and the virtual `commands/copy` shader have unit tests.
 
 ## Decisions on the open questions (spec 03 §17)
 
@@ -74,6 +75,7 @@ Dialect macros (§3.3) are textual macros with C semantics in the assembled head
 
 - Objects the reference abandons are kept when the cause is data, not code (policy 2): `[COMBO]` without `combo` (ignored) or with a non-integer default (truncated), malformed vector defaults (missing components 0, a number is broadcast), missing defaults (0), non-numeric `float`/`int` string defaults (0). Each case is a warning in `PassShader::warnings`.
 - Supersets of the reference language (never change a shader the reference accepts): `int → uint` in assignments, GLSL 4.00 tie-break when two strict candidates exist, `texture2D`/`texture2DLod`, integer `in` redeclarations of `gl_InstanceID`/`gl_VertexID`, global initialisers that are not constant (run at the start of `main`).
+- `sampler3D` slots are bound as `texture3D` + sampler (spec 03 §8.1 binds 2D textures only, and the reference cannot load the volume textures they read, spec 01 A.1): the colour LUT of `ccsimple` works instead of failing (policy 4).
 - `mul`, `log10` and `fmod` expansions are fully parenthesised (function-call semantics).
 - Uniforms with initialisers: the initialiser is ignored (warning).
 - Implicit-LOD lookups in vertex shaders use level 0 (as GL does).
@@ -83,11 +85,11 @@ Dialect macros (§3.3) are textual macros with C semantics in the assembled head
 `LUMEN_WE_ASSETS=… cargo test -p lumen-shader -- --ignored --nocapture` (add `--features render-contract` to also run lumen-render's own reflection, clip fix, validation and wgpu module creation on a GPU). Each pass also goes through naga's SPIR-V and HLSL back-ends.
 
 - Reference wallpaper 3018340632: **23/23** passes (image, 11 effects with the scene overrides, 4 particle systems).
-- WE `assets`: **93/95** material passes, **53/56** GLSL shader pairs with default combos, **74/95** single-combo variations. Failure classes, all outside spec 03: macros/types not in §3.3 (`CASTF`, `DECLARE_SAMPLER2D_PARAMETER`, `sampler2DBackBuffer`), engine-provided defines (`BLENDROWCOUNT` for puppets, `BONECOUNT` for skinning, which is 0 by default). The `HLSL/` folder (D3D sources) is skipped.
+- WE `assets`: **93/95** material passes, **53/56** GLSL shader pairs with default combos, **74/95** single-combo variations. The only `sampler3D` of the assets, `ccsimple` with `LUT` (alone, with `HDR`, with `COL`), translates with a `texture_3d` in slot 1 (`assets_volume_lut_shader`). Failure classes, all outside spec 03: macros/types not in §3.3 (`CASTF`, `DECLARE_SAMPLER2D_PARAMETER`, `sampler2DBackBuffer`), engine-provided defines (`BLENDROWCOUNT` for puppets, `BONECOUNT` for skinning, which is 0 by default). The `HLSL/` folder (D3D sources) is skipped.
 
 Timings (release, 32 threads): the 23 reference passes in 1.9 ms (12 ms on one thread), 95 asset materials in 2.7 ms.
 
 ## Limits
 
-- Not supported: interface blocks, arrays of arrays, initializer lists, `double`, struct-typed uniforms, sampler arrays, non-2D samplers (the contract binds 2D textures only), more than one fragment output, arrays inside a struct constructor argument (naga GLSL front-end).
+- Not supported: interface blocks, arrays of arrays, initializer lists, `double`, struct-typed uniforms, sampler arrays, samplers other than `sampler2D`/`sampler3D` (cube, array, shadow: the contract binds 2D and 3D textures only), more than one fragment output, arrays inside a struct constructor argument (naga GLSL front-end).
 - Spans are not stored in the cache (errors from wgpu on a cached module have no source location).

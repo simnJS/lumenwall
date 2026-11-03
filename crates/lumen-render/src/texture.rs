@@ -168,6 +168,27 @@ pub struct TextureUpload<'a> {
     pub flags: TexFlags,
 }
 
+/// One mip level of a volume upload: `depth` slices of `width × height`, tightly packed
+/// (x fastest, then y, then z).
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeLevel<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub data: &'a [u8],
+}
+
+/// Render-ready volume (3D) texture: a `.tex` with the `VOLUME` flag (spec 01 A.1), e.g. a
+/// 32×32×32 colour LUT. Uncompressed formats only (`lumen-formats` decodes BC volumes).
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeUpload<'a> {
+    pub label: &'a str,
+    pub format: TexelFormat,
+    /// Level 0 first. Level `i` must be `max(1, size0 >> i)` on every axis.
+    pub levels: &'a [VolumeLevel<'a>],
+    pub flags: TexFlags,
+}
+
 /// A texture resident on the GPU.
 #[derive(Debug)]
 pub struct GpuTexture {
@@ -176,6 +197,9 @@ pub struct GpuTexture {
     format: TexelFormat,
     storage: (u32, u32),
     content: (u32, u32),
+    /// Slices of a volume texture; 1 for 2D textures.
+    depth: u32,
+    volume: bool,
     mip_levels: u32,
     sampler: SamplerKey,
     _memory: MemoryToken,
@@ -214,6 +238,18 @@ impl GpuTexture {
         self.mip_levels
     }
 
+    /// True for a volume (3D) texture, bound only to `texture_3d` slots.
+    #[must_use]
+    pub fn is_volume(&self) -> bool {
+        self.volume
+    }
+
+    /// Level-0 depth (1 for 2D textures).
+    #[must_use]
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
     #[must_use]
     pub fn sampler_key(&self) -> SamplerKey {
         self.sampler
@@ -231,8 +267,12 @@ impl GpuTexture {
     }
 
     /// Replace level 0 in place (video frames, thumbnails of the same size).
-    /// No allocation on the GPU side.
+    /// No allocation on the GPU side. Ignored for volume textures.
     pub fn write_level0(&self, ctx: &GpuContext, data: &[u8]) {
+        if self.volume {
+            tracing::warn!(target: "lumen_render", "write_level0 on a volume texture ignored");
+            return;
+        }
         let (row, rows) = self.format.level_layout(self.storage.0, self.storage.1);
         if data.len() < (row as usize) * (rows as usize) {
             tracing::warn!(target: "lumen_render", "write_level0: short buffer ignored");
@@ -259,6 +299,18 @@ fn write_level(
     h: u32,
     data: &[u8],
 ) {
+    write_slices(ctx, texture, format, mip, (w, h, 1), data);
+}
+
+/// Write `depth` slices of one level (1 for 2D textures).
+fn write_slices(
+    ctx: &GpuContext,
+    texture: &wgpu::Texture,
+    format: TexelFormat,
+    mip: u32,
+    (w, h, depth): (u32, u32, u32),
+    data: &[u8],
+) {
     let (row, rows) = format.level_layout(w, h);
     // Physical size of a compressed level is rounded up to whole blocks.
     let (b, _) = format.block();
@@ -278,7 +330,7 @@ fn write_level(
         wgpu::Extent3d {
             width: w.div_ceil(b) * b,
             height: h.div_ceil(b) * b,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: depth,
         },
     );
 }
@@ -368,6 +420,99 @@ pub fn upload_texture(ctx: &GpuContext, up: &TextureUpload<'_>) -> Result<GpuTex
         format: up.format,
         storage: (l0.width, l0.height),
         content: up.content_size.unwrap_or((l0.width, l0.height)),
+        depth: 1,
+        volume: false,
+        mip_levels,
+        sampler: SamplerKey::for_texture(up.flags, mip_levels),
+        _memory: ctx.memory().track(bytes),
+    })
+}
+
+/// Check a volume upload description without touching the GPU.
+pub fn validate_volume_upload(up: &VolumeUpload<'_>) -> Result<()> {
+    let bad = |reason: String| RenderError::InvalidTexture {
+        label: up.label.to_owned(),
+        reason,
+    };
+    let Some(l0) = up.levels.first() else {
+        return Err(bad("no mip level".into()));
+    };
+    if l0.width == 0 || l0.height == 0 || l0.depth == 0 {
+        return Err(bad("zero-sized volume".into()));
+    }
+    if up.format.is_compressed() {
+        return Err(bad(
+            "compressed volume textures must be decoded to RGBA".into()
+        ));
+    }
+    let max_levels = 32 - l0.width.max(l0.height).max(l0.depth).leading_zeros();
+    if up.levels.len() as u32 > max_levels {
+        return Err(bad(format!("{} mip levels", up.levels.len())));
+    }
+    for (i, l) in up.levels.iter().enumerate() {
+        let e = (
+            (l0.width >> i).max(1),
+            (l0.height >> i).max(1),
+            (l0.depth >> i).max(1),
+        );
+        if (l.width, l.height, l.depth) != e {
+            return Err(bad(format!(
+                "level {i} is {}x{}x{}, expected {}x{}x{}",
+                l.width, l.height, l.depth, e.0, e.1, e.2
+            )));
+        }
+        let need = up.format.level_bytes(l.width, l.height) * u64::from(l.depth);
+        if (l.data.len() as u64) < need {
+            return Err(bad(format!(
+                "level {i}: {} bytes, expected {need}",
+                l.data.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Upload a volume (3D) texture with all its mip levels.
+pub fn upload_volume(ctx: &GpuContext, up: &VolumeUpload<'_>) -> Result<GpuTexture> {
+    validate_volume_upload(up)?;
+    let l0 = up.levels[0];
+    let mip_levels = up.levels.len() as u32;
+    let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some(up.label),
+        size: wgpu::Extent3d {
+            width: l0.width,
+            height: l0.height,
+            depth_or_array_layers: l0.depth,
+        },
+        mip_level_count: mip_levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: up.format.wgpu(),
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut bytes = 0;
+    for (i, l) in up.levels.iter().enumerate() {
+        write_slices(
+            ctx,
+            &texture,
+            up.format,
+            i as u32,
+            (l.width, l.height, l.depth),
+            l.data,
+        );
+        bytes += up.format.level_bytes(l.width, l.height) * u64::from(l.depth);
+    }
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    ctx.note_resources(2);
+    Ok(GpuTexture {
+        texture,
+        view,
+        format: up.format,
+        storage: (l0.width, l0.height),
+        content: (l0.width, l0.height),
+        depth: l0.depth,
+        volume: true,
         mip_levels,
         sampler: SamplerKey::for_texture(up.flags, mip_levels),
         _memory: ctx.memory().track(bytes),
@@ -393,6 +538,27 @@ pub fn default_texture(ctx: &GpuContext) -> GpuTexture {
         },
     )
     .expect("1x1 RGBA8 upload is always valid")
+}
+
+/// 1×1×1 volume `(0, 0, 0, 1)` bound to `texture_3d` slots without a volume texture.
+pub fn default_volume(ctx: &GpuContext) -> GpuTexture {
+    let data = [0u8, 0, 0, 255];
+    let level = [VolumeLevel {
+        width: 1,
+        height: 1,
+        depth: 1,
+        data: &data,
+    }];
+    upload_volume(
+        ctx,
+        &VolumeUpload {
+            label: "lumen.default-volume",
+            format: TexelFormat::Rgba8,
+            levels: &level,
+            flags: TexFlags(TexFlags::CLAMP_UVS),
+        },
+    )
+    .expect("1x1x1 RGBA8 volume upload is always valid")
 }
 
 #[cfg(test)]
@@ -494,5 +660,41 @@ mod tests {
         }];
         up.levels = &short;
         assert!(validate_upload(&up, true).is_err());
+    }
+
+    #[test]
+    fn volume_upload_validation() {
+        let d = vec![0u8; 32 * 32 * 32 * 4];
+        let lvl = |w: u32, h: u32, depth: u32| VolumeLevel {
+            width: w,
+            height: h,
+            depth,
+            data: &d,
+        };
+        let levels = [lvl(32, 32, 32), lvl(16, 16, 16)];
+        let mut up = VolumeUpload {
+            label: "lut",
+            format: TexelFormat::Rgba8,
+            levels: &levels,
+            flags: TexFlags::default(),
+        };
+        assert!(validate_volume_upload(&up).is_ok());
+        let wrong = [lvl(32, 32, 32), lvl(16, 16, 32)];
+        up.levels = &wrong;
+        assert!(validate_volume_upload(&up).is_err(), "depth halves too");
+        let short = [VolumeLevel {
+            width: 32,
+            height: 32,
+            depth: 32,
+            data: &d[..32 * 32 * 4],
+        }];
+        up.levels = &short;
+        assert!(validate_volume_upload(&up).is_err());
+        up.levels = &levels[..1];
+        up.format = TexelFormat::Bc1;
+        assert!(
+            validate_volume_upload(&up).is_err(),
+            "BC volumes are decoded first"
+        );
     }
 }

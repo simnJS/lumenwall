@@ -20,6 +20,8 @@ fn header(stage: Stage, negate_ddy: bool) -> String {
     h.push_str("#define float2 vec2\n#define float3 vec3\n#define float4 vec4\n");
     h.push_str("#define int2 ivec2\n#define int3 ivec3\n#define int4 ivec4\n");
     h.push_str("#define texSample2D texture\n#define texSample2DLod textureLod\n");
+    // Not in §3.3: volume lookups of `sampler3D` slots (colour LUTs, `ccsimple.frag` with `LUT`).
+    h.push_str("#define texSample3D texture\n#define texSample3DLod textureLod\n");
     // log10(2) = 0.301029995663981
     h.push_str("#define log10(x) (log2(x) * 0.301029995663981)\n");
     h.push_str("#define atan2 atan\n");

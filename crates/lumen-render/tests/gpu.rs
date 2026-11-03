@@ -16,7 +16,9 @@ use lumen_render::math::{Alignment, NodeTransform, OrthoCamera, unit_quad};
 use lumen_render::shader::ShaderDesc;
 use lumen_render::stats::GpuTimer;
 use lumen_render::targets::SceneTargets;
-use lumen_render::texture::{MipLevel, SamplerKey, TexFlags, TexelFormat, TextureUpload};
+use lumen_render::texture::{
+    MipLevel, SamplerKey, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload,
+};
 use lumen_render::{ContextOptions, GpuContext, RenderScene, TextureId};
 
 const SRC: &str = r"
@@ -520,6 +522,114 @@ fn bloom_chain() {
     assert!(glow[0] > 10, "bloom spreads outside the image: {glow:?}");
     assert_eq!(glow[3], 255, "combine writes RGB only");
     assert!(near(px(&d, 64, 32, 32), [255, 255, 255, 255], 0));
+}
+
+/// A colour LUT (volume texture) in a `texture_3d` slot grades the image; a 2D-only pass
+/// given the same volume reads the default texture instead.
+#[test]
+fn volume_lut_slot() {
+    const LUT_SRC: &str = r"
+struct Pass { g_ModelViewProjectionMatrix: mat4x4<f32> }
+@group(0) @binding(0) var<uniform> u: Pass;
+@group(1) @binding(0) var g_Texture0: texture_2d<f32>;
+@group(1) @binding(1) var g_Texture0_s: sampler;
+@group(1) @binding(2) var g_Texture1: texture_3d<f32>;
+@group(1) @binding(3) var g_Texture1_s: sampler;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+@vertex fn vs(@location(0) a_Position: vec3<f32>, @location(1) a_TexCoord: vec2<f32>) -> VOut {
+    var o: VOut;
+    o.pos = u.g_ModelViewProjectionMatrix * vec4<f32>(a_Position, 1.0);
+    o.uv = a_TexCoord;
+    return o;
+}
+@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+    let c = textureSample(g_Texture0, g_Texture0_s, i.uv);
+    return vec4<f32>(textureSample(g_Texture1, g_Texture1_s, c.rgb).rgb, 1.0);
+}
+";
+    let ctx = gpu!();
+    let mut s = setup(ctx, 8, 8, [0.0, 0.0, 0.0, 1.0]);
+    // Left half (r, g, b) = (1, 0, 0), right half (0, 0, 1).
+    let tex = texture(&mut s.b, 8, 8, None, |x, _| {
+        if x < 4 {
+            [255, 0, 0, 255]
+        } else {
+            [0, 0, 255, 255]
+        }
+    });
+    // 2×2×2 LUT that swaps red and blue (texel centres sit at 1/4 and 3/4: use the
+    // corner colours, which linear filtering reproduces exactly at 0 and 1).
+    let mut lut = Vec::new();
+    for b in 0..2u8 {
+        for g in 0..2u8 {
+            for r in 0..2u8 {
+                lut.extend_from_slice(&[b * 255, g * 255, r * 255, 255]);
+            }
+        }
+    }
+    let levels = [VolumeLevel {
+        width: 2,
+        height: 2,
+        depth: 2,
+        data: &lut,
+    }];
+    let vol =
+        s.b.add_volume_texture(&VolumeUpload {
+            label: "lut",
+            format: TexelFormat::Rgba8,
+            levels: &levels,
+            flags: TexFlags(TexFlags::CLAMP_UVS),
+        })
+        .unwrap();
+    assert!(s.b.texture(vol).unwrap().is_volume());
+    let lut_shader =
+        s.b.add_shader(ShaderDesc::from_wgsl("lut", LUT_SRC, "vs", "fs").unwrap())
+            .unwrap();
+    let v = s.b.add_vertices(&unit_quad());
+    let mut desc = PassDesc::new("lut", lut_shader, s.st.full, Geometry::Vertices(v))
+        .with_slot(0, SlotBinding::texture(tex))
+        .with_slot(1, SlotBinding::texture(vol));
+    desc.blend = BlendMode::Normal;
+    let id = s.b.add_pass(desc).unwrap();
+    s.b.push(Op::Draw(id));
+    let mut scene = s.b.build().unwrap();
+    scene.render(ctx);
+    let d = read(ctx, &scene, &s.st);
+    assert!(
+        near(px(&d, 8, 1, 4), [0, 0, 255, 255], 2),
+        "{:?}",
+        px(&d, 8, 1, 4)
+    );
+    assert!(
+        near(px(&d, 8, 6, 4), [255, 0, 0, 255], 2),
+        "{:?}",
+        px(&d, 8, 6, 4)
+    );
+
+    // A volume bound to a 2D slot reads the 2D default (0, 0, 0, 1).
+    let mut s = setup(ctx, 4, 4, [1.0, 1.0, 1.0, 1.0]);
+    let vol =
+        s.b.add_volume_texture(&VolumeUpload {
+            label: "lut",
+            format: TexelFormat::Rgba8,
+            levels: &levels,
+            flags: TexFlags::default(),
+        })
+        .unwrap();
+    let sh = shader(&mut s.b, "fs_copy");
+    let v = s.b.add_vertices(&unit_quad());
+    let mut desc = PassDesc::new("2d", sh, s.st.full, Geometry::Vertices(v))
+        .with_slot(0, SlotBinding::texture(vol));
+    desc.blend = BlendMode::Normal;
+    let id = s.b.add_pass(desc).unwrap();
+    s.b.push(Op::Draw(id));
+    let mut scene = s.b.build().unwrap();
+    scene.render(ctx);
+    assert!(near(
+        px(&read(ctx, &scene, &s.st), 4, 2, 2),
+        [0, 0, 0, 255],
+        0
+    ));
 }
 
 /// Fit + border gives black bands; clamp repeats the edge (spec 04 §21).
