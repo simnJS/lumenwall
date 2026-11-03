@@ -59,6 +59,30 @@ fn exercise_pkg(data: Vec<u8>) {
     }
 }
 
+/// Static model reader (spec 09 §1.10): never panics, and what it returns is consistent.
+fn exercise_static(data: &[u8]) {
+    let Ok(m) = mdl::parse_static_model(data) else {
+        return;
+    };
+    assert!(m.skins > 0);
+    for mesh in &m.meshes {
+        let n = mesh.vertex_count();
+        assert_eq!(mesh.vertices.len(), n * mesh.layout.stride as usize);
+        assert!(mesh.indices.iter().all(|&i| (i as usize) < n));
+        assert_eq!(mesh.indices.len() % 3, 0);
+        assert_eq!(mesh.materials.len(), m.skins as usize);
+        for i in 0..n {
+            let _ = (
+                mesh.position(i),
+                mesh.normal(i),
+                mesh.uv4(i),
+                mesh.tangent(i),
+            );
+        }
+    }
+    let _ = m.material(0, 7);
+}
+
 /// Structured puppet reader: never panics, and what it returns is consistent.
 fn exercise_model(data: &[u8]) {
     let Ok(m) = mdl::parse_model(data) else {
@@ -147,6 +171,12 @@ proptest! {
         exercise_pkg(data.clone());
         let _ = mdl::parse_puppet(&data);
         exercise_model(&data);
+        exercise_static(&data);
+        for magic in [b"MDLV0004\0", b"MDLV0014\0", b"MDLV0023\0"] {
+            let mut prefixed = magic.to_vec();
+            prefixed.extend_from_slice(&data);
+            exercise_static(&prefixed);
+        }
         let mut prefixed = b"TEXV0005\0TEXI0001\0".to_vec();
         prefixed.extend_from_slice(&data);
         exercise_tex(&prefixed, false);
@@ -208,7 +238,9 @@ proptest! {
             1 => fp1_with_mode("mirror"),
             _ => fp1_with_mode("single"),
         };
-        exercise_model(&mutate(base, &edits, cut));
+        let data = mutate(base, &edits, cut);
+        exercise_model(&data);
+        exercise_static(&data);
     }
 
     #[test]
