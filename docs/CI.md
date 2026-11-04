@@ -11,12 +11,13 @@ Runs on every push to `main`, every pull request, on demand, and every Monday (n
 | cargo-deny | Linux | `cargo deny --locked check advisories`, then `bans licenses sources` (policy in `deny.toml`) |
 | clippy | Linux, Windows | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | test | Linux, Windows | `cargo test --workspace --locked`, then GPU tests on a software adapter |
-| video (Windows, FFmpeg) | Windows | With `--features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg`: workspace clippy, `cargo test -p lumenwall-video -p lumenwall-engine`, `lumenwall.exe --version` with only the Windows folders on `PATH` (no import of the FFmpeg DLLs), and an H.264 clip made by `ffmpeg.exe` decoded by the `video_png` example on WARP |
+| FFmpeg (Windows DLLs) | Linux (`ubuntu-24.04`) | `packaging/ffmpeg/build.sh`: Lumenwall's minimal LGPL FFmpeg for Windows, cross-compiled with mingw-w64, restored from the cache when `build.sh` and the runner image are unchanged; uploaded as the `ffmpeg-win64` artifact; `packaging/ffmpeg/test-clips.sh` makes short H.264, HEVC (8- and 10-bit), VP9 and VP8 clips with Ubuntu's `ffmpeg` (`ffmpeg-test-clips` artifact) |
+| video (Windows, FFmpeg) | Windows | After the FFmpeg job, with its build and `--features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg`: workspace clippy, `cargo test -p lumenwall-video -p lumenwall-engine`, `lumenwall.exe --version` with only the Windows folders on `PATH` (no import of the FFmpeg DLLs), and each generated clip decoded by the `video_png` example on WARP (software decoding) |
 | release build | Linux, Windows | `cargo build --workspace --release --locked`; the binary is kept 7 days as a private artifact |
 
 Toolchain: `rust-toolchain.toml` (stable, rustfmt, clippy, Linux and MSVC targets). Builds use `--locked`: commit `Cargo.lock` with every dependency change.
-FFmpeg on Windows: the setup action's `ffmpeg: "true"` input downloads BtbN's FFmpeg 8.1 `lgpl-shared` build (URL and SHA-256 pinned in `.github/actions/setup-rust/action.yml`, same build as `crates/lumenwall-video/README.md`), sets `FFMPEG_DIR` and `LIBCLANG_PATH`, and puts the DLLs on `PATH`. The default jobs build without it, like a Windows machine without the FFmpeg SDK.
-The cache is written only from `main`; pull requests restore it.
+FFmpeg on Windows: the setup action's `ffmpeg: "true"` input takes the `ffmpeg-win64` artifact of the same run (the job must `needs: ffmpeg`), checks each DLL against the build's `BUILD-INFO.txt`, sets `FFMPEG_DIR` and `LIBCLANG_PATH`, and puts the DLLs on `PATH`. It is the build the release ships and developers use ([`packaging/ffmpeg/README.md`](../packaging/ffmpeg/README.md)). The default jobs build without it, like a Windows machine without the FFmpeg SDK.
+The cargo cache is written only from `main`; pull requests restore it. The FFmpeg cache (key: runner image + SHA-256 of `packaging/ffmpeg/build.sh`; the build folder is 13.7 MB, about 4.5 MB compressed) is written by any run that misses it.
 
 ## Same checks locally
 
@@ -27,7 +28,8 @@ cargo test --workspace --locked
 LUMENWALL_GPU_TESTS=1 cargo test --workspace --locked -- --ignored gpu
 cargo deny --locked check            # cargo install cargo-deny --locked
 cargo build --workspace --release --locked
-# Windows video feature: FFMPEG_DIR set, its bin\ on PATH (crates/lumenwall-video/README.md)
+# Windows video feature: FFMPEG_DIR = a build of packaging/ffmpeg/build.sh, its bin\ on PATH
+# (packaging/ffmpeg/README.md, crates/lumenwall-video/README.md)
 cargo clippy --workspace --all-targets --locked --features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg -- -D warnings
 cargo test -p lumenwall-video -p lumenwall-engine --locked --features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg
 ```

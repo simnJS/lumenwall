@@ -54,8 +54,8 @@ wallpaper), for the majors of the headers the bindings come from, never closed:
   their own dependencies (`swresample-6.dll`, system DLLs) come from the same folder, then
   System32. The import libraries are linked but no function is referenced, so `lumenwall.exe`
   has no import entry on FFmpeg (`llvm-readobj --coff-imports`; CI starts it with only the
-  Windows folders on `PATH`). Loading takes 6–8 ms at the first video (BtbN's build, 128 MiB
-  of DLLs, warm file cache).
+  Windows folders on `PATH`). Loading takes 1.5–2 ms at the first video with Lumenwall's
+  build (10.4 MiB of DLLs, warm file cache; 6–8 ms with BtbN's 128 MiB).
 
 The executable therefore starts and plays scenes where FFmpeg is missing; video wallpapers then
 fail with the loader's message (Windows: `the FFmpeg 8 DLLs (avutil-60.dll, swscale-9.dll,
@@ -87,7 +87,7 @@ turn, then hands the decoder to its thread. Candidates for `--hwdec auto`:
    e.g. 10-bit P010, use the download path of the same decoder). Also works on Windows 11
    when wgpu renders through Vulkan (lumenwall-render prefers it to DX12): NVIDIA driver
    621.01 and AMD's driver for a Radeon iGPU, with BtbN's FFmpeg 8.1 build (built with
-   `--enable-vulkan`).
+   `--enable-vulkan`); NVIDIA again with Lumenwall's own build (below).
 2. **Hardware decoder of the rendering GPU, frames copied** (`ffmpeg::hw`): NVIDIA → CUDA
    (NVDEC), then FFmpeg's own Vulkan device; AMD/Intel → VA-API on the render node of the
    rendering GPU (PCI bus id, then vendor), then Vulkan; Windows → D3D11VA on the DXGI
@@ -191,6 +191,34 @@ extra D3D11VA cost is in FFmpeg's D3D11 download (staging copy + `Map`), hence C
 NVIDIA. Every hardware path gives the software frame (GPU test, mean difference < 0.5/255),
 on Vulkan and on DX12 (`WGPU_BACKEND=dx12`).
 
+#### With Lumenwall's FFmpeg build
+
+Checked on the same PC (RTX 4080 SUPER, driver 621.01) with the five DLLs of
+`packaging/ffmpeg/build.sh` (built in MSYS2 with gcc 16.2; releases use Ubuntu's gcc 13)
+next to release builds of `lumenwall.exe` and `video_png`, headless (`video_png --times
+0,1.5`, `LUMENWALL_VIDEO_DECODERS` to force each path; the loader's debug log names the
+folder the DLLs came from):
+
+| Video | Zero copy | D3D11VA | CUDA | FFmpeg Vulkan + copy | Software |
+|---|---|---|---|---|---|
+| 3655057993 (H.264 Main 4K 60 fps + AAC) | ✓ | ✓ (wgpu on Vulkan and DX12) | ✓ | ✓ | ✓ |
+| H.264 + AAC, `.mp4` | ✓ | ✓ | ✓ | — | ✓ |
+| HEVC Main + AAC, `.mp4` | ✓ | ✓ | ✓ | — | ✓ |
+| HEVC Main 10, `.mkv` | P010: same decoder, copy | ✓ | ✓ | — | ✓ |
+| VP9 + Opus, `.webm` | no VP9 in the zero-copy device: CUDA | ✓ | ✓ | — | ✓ |
+| VP8 + Vorbis, `.webm` | CUDA | none in FFmpeg: software | ✓ | — | ✓ |
+| AV1 (SVT-AV1), `.mp4` | ✓ | ✓ | ✓ | — | ✗ no software AV1 decoder in this build |
+
+— not run. The clips are 2 s of `testsrc2` (FFmpeg encoders of the developer's tools;
+CI makes the same ones but AV1 with Ubuntu's, `packaging/ffmpeg/test-clips.sh`, and
+decodes them in software on WARP). For 3655057993,
+the frame at 1.5 s is byte-identical on all six paths; the GPU tests pass
+on Vulkan and on DX12 (`gpu_decode_paths_agree`, `gpu_loop_continues_the_timeline`), and
+the unit tests of lumenwall-video and lumenwall-engine with the feature on. Through the
+engine (`render_png 3655057993`, headless): zero copy, D3D11VA and software. On the AMD
+Radeon integrated GPU (`video_png --low-power`): zero copy and D3D11VA. `lumenwall.exe
+--version` starts with only the Windows folders on `PATH`.
+
 ## Build and test
 
 | Feature | Default | Notes |
@@ -213,19 +241,23 @@ on Vulkan and on DX12 (`WGPU_BACKEND=dx12`).
 
 `ffmpeg-sys-next` generates its bindings from FFmpeg's headers (bindgen, libclang) and links
 the import libraries, so the feature needs an FFmpeg 8 SDK at build time; the workspace check
-without it builds and tests everything else. Development and CI use the same official LGPL
-build (never a GPL or static one), unpacked outside the repository:
+without it builds and tests everything else. Development, CI and releases use the same
+build, Lumenwall's minimal LGPL FFmpeg 8.1.3 (never a GPL or static one), kept outside the
+repository: [`packaging/ffmpeg/build.sh`](../../packaging/ffmpeg/README.md) on Linux or in
+MSYS2's MINGW64 shell, or the `ffmpeg-win64` artifact of a CI run.
 
-- URL: <https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1.zip>
-  (BtbN's FFmpeg-Builds, release branch 8.1, `lgpl-shared`; month-end autobuilds are kept
-  two years)
-- SHA-256: `5cef7bc48e513f3cee7c881e8b2999d835541edb1846c3e89443a67f8f8556ab`
-- Contents: `bin/` (DLLs, `ffmpeg.exe`), `include/`, `lib/` (`avcodec.lib`… MSVC import
-  libraries), `LICENSE.txt` (LGPL-3.0: the build uses `--enable-version3`).
+- Source: <https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz>, SHA-256
+  `7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3`, unmodified.
+- Contents: `bin/` (the five DLLs, nothing else: no `ffmpeg.exe`), `include/`, `lib/`
+  (`avcodec.lib`… MSVC import libraries), `licenses/`, `BUILD-INFO.txt`.
+- Inside: demuxers `mov` and `matroska`, decoders H.264, HEVC, VP8, VP9 (software and
+  hardware) and AV1 (hardware only: no software AV1 decoder), D3D11VA, CUDA/NVDEC and
+  Vulkan Video hardware decoding, the usual sound decoders (the full list and why:
+  `packaging/ffmpeg/README.md`).
 
 ```powershell
-# Unpacked in %LOCALAPPDATA%\lumenwall-dev\ffmpeg\extract\ffmpeg-n8.1.3-…-lgpl-shared-8.1
-$env:FFMPEG_DIR = "$env:LOCALAPPDATA\lumenwall-dev\ffmpeg\extract\ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1"
+# Built in %LOCALAPPDATA%\lumenwall-dev\ffmpeg\lumenwall-8.1.3 (packaging/ffmpeg/README.md)
+$env:FFMPEG_DIR = "$env:LOCALAPPDATA\lumenwall-dev\ffmpeg\lumenwall-8.1.3"
 $env:PATH = "$env:FFMPEG_DIR\bin;$env:PATH"          # DLLs for tests and examples
 $env:CARGO_TARGET_DIR = "target/agent-<name>"
 cargo test -p lumenwall-video --features ffmpeg
@@ -241,30 +273,31 @@ cargo build -p lumenwall --release --features lumenwall-engine/video-ffmpeg
   `--cfg` flags; sccache re-spawns rustc with a 40 000-character command line, over
   Windows' 32 767-character limit: os error 206): build the feature with `RUSTC_WRAPPER=`
   (empty).
-- CI: job `video (Windows, FFmpeg)` (`docs/CI.md`).
+- CI: job `FFmpeg (Windows DLLs)` builds it, job `video (Windows, FFmpeg)` uses it
+  (`docs/CI.md`).
 
 ### Windows distribution (for the release workflow and the installer)
 
-- Build: the setup action with `ffmpeg: "true"`, then
+- Build: the `ffmpeg` job (`packaging/ffmpeg/build.sh`), then the setup action with
+  `ffmpeg: "true"` and
   `cargo build --workspace --release --locked --target x86_64-pc-windows-msvc --features lumenwall-engine/video-ffmpeg`
   (no sccache; `FFMPEG_STATIC`/`PKG_CONFIG_ALL_STATIC` are rejected by `build.rs`). The
   third-party notices must be generated with the same feature, so that `ffmpeg-sys-next`
   (WTFPL) is listed.
-- Ship next to `lumenwall.exe`, from the same archive's `bin/`: `avutil-60.dll`,
+- Ship next to `lumenwall.exe`, from the build's `bin/`: `avutil-60.dll`,
   `swresample-6.dll` (needed by avcodec), `swscale-9.dll`, `avcodec-62.dll`,
-  `avformat-62.dll` (128 MiB, 51 MiB gzip-compressed). Not `avfilter`/`avdevice` nor the
-  `.exe` tools.
-- Licence: LGPL-3.0-or-later (the build uses `--enable-version3`): the archive's
-  `LICENSE.txt` (LGPLv3 text) plus the GPLv3 text it incorporates, a notice that Lumenwall
-  uses FFmpeg under the LGPL, and the corresponding source of that exact build (FFmpeg
-  `n8.1.3-27-g8dca1586f4` and BtbN's build scripts at the `autobuild-2026-10-31-12-59` tag).
-  BtbN's DLLs also contain statically linked libraries (dav1d, libvpx, libaom, OpenH264,
-  libass, HarfBuzz, FreeType… see `ffmpeg -buildconf`) whose notices are not in the archive.
-  The legal check of `deny.toml` is still pending; a minimal LGPL build of our own (only the
-  demuxers, decoders and hwaccels a wallpaper needs) would be much smaller and carry far
-  fewer notices.
+  `avformat-62.dll` (10.9 MB, measured on a local build: `packaging/ffmpeg/README.md`). BtbN's `lgpl-shared` build, shipped until 0.1.0, was
+  128.2 MB; `Lumenwall-Setup.exe` goes from about 182 MB to about 145 MB (estimate), the zip from 251 MB to about 202 MB.
+- Licence: LGPL-3.0-or-later (`--enable-version3`, for the Apache-2.0 Vulkan headers
+  compiled in). `package.py` ships the LGPLv3 text and the GPLv3 text it incorporates, the
+  licences of the rest of what the DLLs contain (nv-codec-headers, Vulkan-Headers, the
+  MinGW-w64 runtime) and the build's `BUILD-INFO.txt` under `licenses\`, and FFmpeg's
+  section of `THIRD-PARTY-NOTICES.html`: the corresponding source is FFmpeg's release
+  tarball (URL, SHA-256), unmodified, and `packaging/ffmpeg/build.sh` at the release's tag
+  (`packaging/ffmpeg/README.md`, "Licences of what ships").
 - The DLLs stay replaceable by the user (loaded by name at run time, never statically
-  linked), which is what the LGPL asks of a combined work.
+  linked), which is what the LGPL asks of a combined work: any FFmpeg 8 shared build with
+  the same names works (BtbN's included).
 
 ## Deviations and decisions
 
