@@ -1,4 +1,4 @@
-//! Presentation surfaces (one per output): FIFO, opaque, never sRGB.
+//! Presentation surfaces (one per output): Mailbox on Windows, FIFO elsewhere, opaque, never sRGB.
 
 use crate::context::GpuContext;
 use crate::error::{RenderError, Result};
