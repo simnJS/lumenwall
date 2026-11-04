@@ -3,6 +3,13 @@
 Measured on 4 November 2026 on the maintainer's Windows desktop, with `tools/bench-vs-we/bench-vs-we.ps1`
 (see its [README](../../tools/bench-vs-we/README.md)). Raw data: [`lumenwall-vs-wallpaper-engine/`](lumenwall-vs-wallpaper-engine/).
 
+**Scope.** The owner of the desktop chose a small benchmark, about 6 minutes of measurement,
+instead of the full method first planned (10 wallpapers, 2 repetitions of 20 s warm-up and 60 s
+of measurement). Hence 4 wallpapers, one short run each, on the main monitor, with the
+two-monitor run as an appendix. The full method stays available through the script's parameters:
+`-Wallpapers` (the 10 IDs), `-Repetitions 2 -WarmupSeconds 20 -MeasureSeconds 60 -IdleSeconds 60`,
+`-WeMonitors` and `-LumenwallOutputs` (see [Reproduce](#reproduce) and the README).
+
 > **This is a short run.** 4 wallpapers, **1 repetition**, 10 s warm-up and **30 s** of one-second
 > samples per wallpaper and engine. A "±" is the standard deviation of the 30 samples of that single
 > run: it shows the noise inside the run, not how far a second run would land. With one run per
@@ -238,6 +245,22 @@ Scenes and video: one process for both engines. WE's web wallpaper: `wallpaper64
 
 The two-monitor run gave the same picture: 4.3 % / 2.8 % / 48.5 % whole-machine CPU and 27–31 W.
 Resident and empty, WE took 0.11 % CPU and 3 MiB private and Lumenwall 0.00 % and 72 MiB.
+
+## State restored
+
+Checked by the script at the end of each of the two bench runs, then again by hand after the last
+one (15:41). Hashes are SHA-256.
+
+| State | After the bench |
+|---|---|
+| WE `wallpaper_engine\config.json` (the active one) | `0A7B13DF826810F0D3418890FB75D8490F0F3EA28EE9CF2CB1E0C59CF7C73ED7`: identical to the copy taken right after the welcome wizard. WE rewrites its monitor map whenever it starts, so the copy was put back once WE was closed. |
+| WE `wallpaper_engine\distribution\config.json` | `E5E10CD61F8850F402D19A6F16BB3C0F9A901E2F598836D0FAEE8543C16DAAA5`: unchanged. |
+| Lumenwall `%APPDATA%\Lumenwall\config.toml` | `CA9496B48903AC079935C7F5E23FB103CE4202B87F8D354BB29AA3F9AD4E845F`: unchanged (the bench daemon ran with `--no-config`). |
+| Lumenwall `%APPDATA%\Lumenwall\ui.json` | `C30CA8A2F57DB5358AC4107478B7817C531C0F7963016179E43FEB2A93FFBAFE`: unchanged. |
+| Lumenwall daemon | Running again: `lumenwall.exe` with no arguments, started through Explorer (parent `explorer.exe`), on its usual configuration. |
+| Wallpaper Engine | Closed, through the Windows Restart Manager every time; never force-killed. |
+| Sound | Highest audio peak of both engines' sessions over the whole bench: 0. |
+| Installed software | None. |
 
 ## Performance problems found (not fixed here)
 
