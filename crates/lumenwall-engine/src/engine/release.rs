@@ -335,7 +335,7 @@ impl Engine {
             screenshot,
             rendered,
             idle_since: None,
-            restored_at: Some(t0),
+            first_frame_due: Some((t0, "the GPU restore began")),
         };
         let mut first_surface = Some((first, first_surface));
         let ids: Vec<OutputId> = r.surfaces.outputs().iter().map(|o| o.id).collect();

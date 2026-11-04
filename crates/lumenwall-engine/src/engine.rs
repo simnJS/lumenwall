@@ -191,8 +191,9 @@ struct Running {
     rendered: u64,
     /// Since when no output needed the GPU ([`release::gpu_unused`]).
     idle_since: Option<Instant>,
-    /// Start of a GPU restore, until its first frame is presented.
-    restored_at: Option<Instant>,
+    /// Start of a GPU restore or of a plan that brought wallpapers, until the first frame is
+    /// presented (logged: IPC apply → first present).
+    first_frame_due: Option<(Instant, &'static str)>,
 }
 
 /// An output the platform reported, kept across layout changes.
@@ -384,9 +385,14 @@ impl Engine {
     }
 
     fn open_running(&mut self) -> Result<Running, String> {
+        let t0 = Instant::now();
         let config = Self::platform_config(&self.plan);
         let mut surfaces = self.open_platform(&config)?;
-        tracing::info!("platform backend: {:?}", surfaces.backend());
+        tracing::info!(
+            "platform backend: {:?} ({:.1} ms)",
+            surfaces.backend(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
         self.waker.attach(surfaces.waker());
         for k in &mut self.known {
             k.live = false;
@@ -446,12 +452,18 @@ impl Engine {
         } else {
             None
         };
+        let t_compositor = Instant::now();
+        let compositor = Compositor::new(&ctx);
+        tracing::debug!(
+            "compositor {:.1} ms",
+            t_compositor.elapsed().as_secs_f64() * 1000.0
+        );
         let mut running = Running {
             outputs: Vec::new(),
             scenes: (0..self.wallpapers.len()).map(|_| None).collect(),
             videos: (0..self.wallpapers.len()).map(|_| None).collect(),
             webs: (0..self.wallpapers.len()).map(|_| None).collect(),
-            compositor: Compositor::new(&ctx),
+            compositor,
             timer,
             timer_tried: stats_enabled,
             ctx,
@@ -469,7 +481,7 @@ impl Engine {
             screenshot: self.plan.screenshot.clone(),
             rendered: 0,
             idle_since: None,
-            restored_at: None,
+            first_frame_due: None,
         };
         let mut first_surface = Some((first, first_surface));
         for ev in early {
@@ -508,9 +520,9 @@ impl Engine {
                     .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
             ..ContextOptions::default()
         };
-        let open = |instance: Option<GpuInstance>| {
+        let open = |instance: Option<GpuInstance>, backends: wgpu::Backends| {
             let t0 = Instant::now();
-            let instance = instance.unwrap_or_else(|| GpuInstance::new(None));
+            let instance = instance.unwrap_or_else(|| GpuInstance::new(Some(backends)));
             let t1 = Instant::now();
             let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
             let t2 = Instant::now();
@@ -519,7 +531,7 @@ impl Engine {
                 .map_err(|e| e.to_string())?;
             let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
             tracing::debug!(
-                "GPU opened (Vulkan drivers: {}): instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
+                "GPU opened ({backends:?}, Vulkan drivers: {}): instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
                 vulkan_driver::describe(),
                 ms(t0, t1),
                 ms(t1, t2),
@@ -527,21 +539,36 @@ impl Engine {
             );
             Ok::<_, String>((first_surface, ctx))
         };
-        let opened = match open(instance) {
-            Ok((_, ctx)) if vulkan_driver::wrong_adapter(&ctx) => {
-                Err("the remembered GPU is not there".to_owned())
+        let order = gpu_backends();
+        let mut instance = instance;
+        let mut last_error = String::from("no GPU backend");
+        for (i, &backends) in order.iter().enumerate() {
+            let opened = match open(instance.take(), backends) {
+                Ok((_, ctx)) if vulkan_driver::wrong_adapter(&ctx) => {
+                    Err("the remembered GPU is not there".to_owned())
+                }
+                other => other,
+            };
+            let opened = match opened {
+                Err(e) if backends.contains(wgpu::Backends::VULKAN) && vulkan_driver::lift() => {
+                    tracing::info!("remembered Vulkan driver: {e}; trying every driver");
+                    open(None, backends)
+                }
+                other => other,
+            };
+            match opened {
+                Ok((first_surface, ctx)) => {
+                    vulkan_driver::remember(&ctx);
+                    return Ok((first_surface, ctx));
+                }
+                Err(e) if i + 1 < order.len() => {
+                    tracing::warn!("no {backends:?} adapter for the outputs ({e}); trying the next backend");
+                    last_error = e;
+                }
+                Err(e) => last_error = e,
             }
-            other => other,
-        };
-        let (first_surface, ctx) = match opened {
-            Err(e) if vulkan_driver::lift() => {
-                tracing::info!("remembered Vulkan driver: {e}; trying every driver");
-                open(None)?
-            }
-            other => other?,
-        };
-        vulkan_driver::remember(&ctx);
-        Ok((first_surface, ctx))
+        }
+        Err(last_error)
     }
 
     /// Ends scripts and releases the surfaces and the GPU device.
@@ -1038,6 +1065,11 @@ impl Engine {
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
+        if added > 0
+            && let Some(r) = running.as_mut()
+        {
+            r.first_frame_due = Some((t0, "the new plan arrived"));
+        }
         if released > 0 {
             trim_heap();
         }
@@ -1332,7 +1364,9 @@ impl Engine {
             }
         };
         let size = info.physical_size;
+        let t0 = Instant::now();
         let surface = OutputSurface::new(&r.ctx, surface, size).map_err(|e| e.to_string())?;
+        let swap_chain = t0.elapsed();
         if r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none() {
             match build_renderer(
                 r,
@@ -1377,6 +1411,12 @@ impl Engine {
             size.1,
             info.scale,
             self.wallpapers[target].project.title
+        );
+        tracing::debug!(
+            "output {}: swap chain {:.1} ms, renderer and composer {:.1} ms",
+            info.name,
+            swap_chain.as_secs_f64() * 1000.0,
+            (t0.elapsed() - swap_chain).as_secs_f64() * 1000.0
         );
         let reasons = r.surfaces.pause_reasons(id);
         if !reasons.is_empty() {
@@ -1435,10 +1475,10 @@ impl Engine {
         let rendered = r.rendered;
         self.render_output(r, id);
         if r.rendered != rendered
-            && let Some(t) = r.restored_at.take()
+            && let Some((t, since)) = r.first_frame_due.take()
         {
             tracing::info!(
-                "first frame {:.0} ms after the GPU restore began",
+                "first frame {:.0} ms after {since}",
                 t.elapsed().as_secs_f64() * 1000.0
             );
         }
@@ -2082,6 +2122,31 @@ fn request(s: &mut dyn WallpaperSurface, o: &mut Output) {
     }
 }
 
+/// The GPU backends the engine tries, in order: the single switch of the Windows backend.
+///
+/// One backend per instance: an instance holding Vulkan and DX12 enumerates both, and the DX12
+/// enumeration creates a device on every adapter (measured on Windows 11, RTX 4080 SUPER + AMD
+/// iGPU: 167–349 ms more per GPU opening, d3d12, D3D12Core and both vendors' D3D12 drivers
+/// loaded). Vulkan first; DX12 only when Vulkan has no adapter for the outputs.
+/// `LUMENWALL_GPU_BACKEND=vulkan` or `dx12` forces one (comparisons, driver bugs).
+fn gpu_backends() -> Vec<wgpu::Backends> {
+    backend_order(
+        cfg!(windows),
+        std::env::var("LUMENWALL_GPU_BACKEND").ok().as_deref(),
+    )
+}
+
+/// [`gpu_backends`] for a platform and a `LUMENWALL_GPU_BACKEND` value. Pure, for testing.
+fn backend_order(windows: bool, choice: Option<&str>) -> Vec<wgpu::Backends> {
+    let choice = choice.map(str::trim).map(str::to_ascii_lowercase);
+    match choice.as_deref() {
+        Some("dx12") if windows => vec![wgpu::Backends::DX12],
+        Some("vulkan") => vec![wgpu::Backends::VULKAN],
+        _ if windows => vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12],
+        _ => vec![wgpu::Backends::VULKAN],
+    }
+}
+
 fn create_wgpu_surface(
     instance: &GpuInstance,
     surfaces: &dyn WallpaperSurface,
@@ -2287,6 +2352,18 @@ mod tests {
         assert!(!scene_present_due(false, false, serial, serial));
         // A surface that needs an image (resize, resume) gets one without a new frame.
         assert!(scene_present_due(false, true, serial, serial));
+    }
+
+    #[test]
+    fn one_backend_per_instance_vulkan_first() {
+        use wgpu::Backends as B;
+        assert_eq!(backend_order(true, None), vec![B::VULKAN, B::DX12]);
+        assert_eq!(backend_order(true, Some(" DX12 ")), vec![B::DX12]);
+        assert_eq!(backend_order(true, Some("vulkan")), vec![B::VULKAN]);
+        assert_eq!(backend_order(true, Some("metal")), vec![B::VULKAN, B::DX12]);
+        // Linux: Vulkan only, whatever the variable says.
+        assert_eq!(backend_order(false, None), vec![B::VULKAN]);
+        assert_eq!(backend_order(false, Some("dx12")), vec![B::VULKAN]);
     }
 
     #[test]
