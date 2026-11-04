@@ -623,8 +623,20 @@ impl D3d11 {
                 }
                 (None, Some(big), Some(c1)) => {
                     let (first, count) = (d.big_first, d.big_count);
-                    c1.VSSetConstantBuffers1(0, 1, Some(&Some(big.clone())), Some(&first), Some(&count));
-                    c1.PSSetConstantBuffers1(0, 1, Some(&Some(big.clone())), Some(&first), Some(&count));
+                    c1.VSSetConstantBuffers1(
+                        0,
+                        1,
+                        Some(&Some(big.clone())),
+                        Some(&first),
+                        Some(&count),
+                    );
+                    c1.PSSetConstantBuffers1(
+                        0,
+                        1,
+                        Some(&Some(big.clone())),
+                        Some(&first),
+                        Some(&count),
+                    );
                     let f = [Some(frame_cb.clone())];
                     ctx.VSSetConstantBuffers(1, Some(&f));
                     ctx.PSSetConstantBuffers(1, Some(&f));
@@ -664,17 +676,17 @@ impl D3d11 {
         if vb.is_none() {
             unsafe {
                 self.device.CreateBuffer(
-                &D3D11_BUFFER_DESC {
-                    ByteWidth: vdata.len() as u32,
-                    Usage: D3D11_USAGE_IMMUTABLE,
-                    BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
-                    CPUAccessFlags: 0,
-                    MiscFlags: 0,
-                    StructureByteStride: 0,
-                },
-                Some(&init),
-                Some(&mut vb),
-            )?;
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: vdata.len() as u32,
+                        Usage: D3D11_USAGE_IMMUTABLE,
+                        BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                        StructureByteStride: 0,
+                    },
+                    Some(&init),
+                    Some(&mut vb),
+                )?;
             }
             if let Some(b) = &vb {
                 self.vb_cache.borrow_mut().insert(vkey, b.clone());
