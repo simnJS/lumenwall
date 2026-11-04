@@ -42,6 +42,9 @@ pub enum Icon {
     Heart,
     Eye,
     Store,
+    /// Playlist controls.
+    Previous,
+    Next,
     /// Window buttons (the title bar the app draws on Linux).
     Minimize,
     Maximize,
@@ -131,6 +134,10 @@ fn path(icon: Icon) -> &'static str {
             r#"<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>"#
         }
         Icon::Sparkle => r#"<path d="M12 3l2 6.5L20.5 12 14 14l-2 7-2-7-6.5-2L10 9.5z"/>"#,
+        Icon::Previous => {
+            r#"<path d="M17 5.5L8.5 12l8.5 6.5z" fill="black"/><path d="M6.5 5.5v13"/>"#
+        }
+        Icon::Next => r#"<path d="M7 5.5l8.5 6.5L7 18.5z" fill="black"/><path d="M17.5 5.5v13"/>"#,
         Icon::Minimize => r#"<path d="M6 12h12"/>"#,
         Icon::Maximize => r#"<rect x="6" y="6" width="12" height="12" rx="2"/>"#,
         Icon::Restore => {
@@ -416,6 +423,8 @@ mod tests {
             Icon::Heart,
             Icon::Eye,
             Icon::Store,
+            Icon::Previous,
+            Icon::Next,
             Icon::Minimize,
             Icon::Maximize,
             Icon::Restore,

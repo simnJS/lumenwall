@@ -61,6 +61,15 @@ impl MemoryFiles {
     }
 }
 
+/// Whole file at a canonical path; `query` names it in errors.
+fn read_file(path: &Path, query: &str) -> Result<Vec<u8>, AssetError> {
+    // Rust always opens files in binary mode (QO-21).
+    fs::read(path).map_err(|source| AssetError::Io {
+        path: query.to_owned(),
+        source,
+    })
+}
+
 /// Adapter over a real folder (§4.2).
 #[derive(Debug, Clone)]
 pub struct DirectoryAdapter {
@@ -92,8 +101,13 @@ impl DirectoryAdapter {
         canonical.starts_with(&self.root).then_some(canonical)
     }
 
+    /// Canonical path of the file `rel`, if it is one inside the root.
+    fn file(&self, rel: &str) -> Option<PathBuf> {
+        self.contained(rel).filter(|p| p.is_file())
+    }
+
     fn exists(&self, rel: &str) -> bool {
-        self.contained(rel).is_some_and(|p| p.is_file())
+        self.file(rel).is_some()
     }
 
     fn open(&self, rel: &str, query: &str) -> Result<Vec<u8>, AssetError> {
@@ -103,11 +117,7 @@ impl DirectoryAdapter {
         if !path.is_file() {
             return Err(AssetError::not_found(query, "directory instead of a file"));
         }
-        // Rust always opens files in binary mode (QO-21).
-        fs::read(&path).map_err(|source| AssetError::Io {
-            path: query.to_owned(),
-            source,
-        })
+        read_file(&path, query)
     }
 
     fn physical_path(&self, rel: &str, query: &str) -> Result<PathBuf, AssetError> {
@@ -313,11 +323,29 @@ impl fmt::Debug for WallpaperVfsOptions {
 }
 
 /// Ordered list of mount points of one wallpaper (§4.1).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Vfs {
     mounts: Vec<Mount>,
     media: MediaThumbnailAdapter,
     pkg_open_mode: OpenMode,
+    generation: u64,
+}
+
+/// A value no other VFS of the process has had.
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Default for Vfs {
+    fn default() -> Self {
+        Self {
+            mounts: Vec::new(),
+            media: MediaThumbnailAdapter::default(),
+            pkg_open_mode: OpenMode::default(),
+            generation: next_generation(),
+        }
+    }
 }
 
 impl Vfs {
@@ -326,9 +354,18 @@ impl Vfs {
         Self::default()
     }
 
+    /// Identity of what this VFS serves: unique in the process, and renewed by every
+    /// change of its mounts. Readers may keep what they read under one generation
+    /// (shader units and includes during a scene load) instead of reading it again;
+    /// files of folder mounts are assumed not to change meanwhile.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Sets the artwork source used when `$mediaThumbnail` is mounted.
     pub fn set_media_source(&mut self, source: Option<Arc<dyn MediaArtSource>>) {
         self.media = MediaThumbnailAdapter::new(source);
+        self.generation = next_generation();
     }
 
     /// Sets how `.pkg` archives mounted afterwards are loaded.
@@ -356,6 +393,7 @@ impl Vfs {
             root: root.to_owned(),
             adapter,
         });
+        self.generation = next_generation();
     }
 
     fn create_adapter(&self, source: &Path) -> Result<Adapter, AssetError> {
@@ -437,16 +475,29 @@ impl Vfs {
                 pkg.release_mapping();
             }
         }
+        self.generation = next_generation();
     }
 
     /// Lookup of §4.7 on a normalized query; returns the mount and the path relative
     /// to its root. Allocation-free.
     fn locate<'q>(&self, normalized: &'q str) -> Option<(&Mount, &'q str)> {
+        self.locate_with(normalized, |mount, rel| {
+            mount.adapter.exists(rel).then_some((mount, rel))
+        })
+    }
+
+    /// The §4.7 lookup order: `found` is asked about each candidate (mount, relative
+    /// path) in turn, and the first answer wins.
+    fn locate_with<'s, 'q, T>(
+        &'s self,
+        normalized: &'q str,
+        mut found: impl FnMut(&'s Mount, &'q str) -> Option<T>,
+    ) -> Option<T> {
         for mount in &self.mounts {
             if let Some(rel) = normalized.strip_prefix(mount.root.as_str())
-                && mount.adapter.exists(rel)
+                && let Some(hit) = found(mount, rel)
             {
-                return Some((mount, rel));
+                return Some(hit);
             }
         }
         // Step 3: one retry with "/" + n, whose normalization drops leading `..`.
@@ -455,9 +506,9 @@ impl Vfs {
             for mount in &self.mounts {
                 if let Some(root) = mount.root.strip_prefix('/')
                     && let Some(rel) = rooted.strip_prefix(root)
-                    && mount.adapter.exists(rel)
+                    && let Some(hit) = found(mount, rel)
                 {
-                    return Some((mount, rel));
+                    return Some(hit);
                 }
             }
         }
@@ -485,10 +536,20 @@ impl Vfs {
     /// fail after a successful lookup (QO-26); Lumenwall does not reproduce that.
     pub fn read(&self, path: &str) -> Result<Cow<'_, [u8]>, AssetError> {
         let normalized = normalize(path);
-        let (mount, rel) = self
-            .locate(&normalized)
-            .ok_or_else(|| AssetError::not_found(path, "file absent from every mount point"))?;
-        mount.adapter.open(rel, path)
+        // A folder hit is read from the canonical path its lookup found (one
+        // canonicalization and one metadata call per read, not two).
+        let hit = self.locate_with(&normalized, |mount, rel| match &mount.adapter {
+            Adapter::Directory(dir) => dir.file(rel).map(|p| (mount, rel, Some(p))),
+            other => other.exists(rel).then_some((mount, rel, None)),
+        });
+        match hit {
+            None => Err(AssetError::not_found(
+                path,
+                "file absent from every mount point",
+            )),
+            Some((_, _, Some(file))) => read_file(&file, path).map(Cow::Owned),
+            Some((mount, rel, None)) => mount.adapter.open(rel, path),
+        }
     }
 
     /// Path on disk of `path` (§4.9); only folder mounts have one.

@@ -11,7 +11,7 @@ use super::{RawAnnotation, ScanItem};
 pub type Combos = BTreeMap<String, i64>;
 
 /// Combos of a pass as provided by the material/scene layer.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PassCombos {
     /// `combos` of the scene pass override, plus engine-imposed ones (§5.4).
     pub overrides: Combos,

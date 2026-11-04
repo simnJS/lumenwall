@@ -21,13 +21,32 @@ fn sample_state() -> State {
         pause_reason: Some(PauseReason::Fullscreen),
         muted: false,
         volume: 0.25,
-        outputs: vec![OutputState {
-            output: "DP-1".into(),
-            wallpaper: Some("/w/3018340632".into()),
-            scaling: Scaling::Fit,
-            status: WallpaperStatus::Running,
-            message: None,
-        }],
+        outputs: vec![
+            OutputState {
+                output: "DP-1".into(),
+                wallpaper: Some("/w/3018340632".into()),
+                scaling: Scaling::Fit,
+                status: WallpaperStatus::Running,
+                message: None,
+                playlist: Some(PlaylistPosition {
+                    name: "day".into(),
+                    item: Some(2),
+                    count: 5,
+                }),
+            },
+            OutputState {
+                output: "HDMI-A-1".into(),
+                wallpaper: Some("/w/x".into()),
+                scaling: Scaling::Fill,
+                status: WallpaperStatus::Paused,
+                message: None,
+                playlist: Some(PlaylistPosition {
+                    name: "night".into(),
+                    item: None,
+                    count: 2,
+                }),
+            },
+        ],
         wallpaper_audio: Some(
             [(
                 "3018340632".to_owned(),
@@ -48,6 +67,30 @@ fn sample_props() -> PropertyMap {
         ("schemecolor".into(), PropertyValue::Color([0.1, 0.2, 0.3])),
         ("mode".into(), PropertyValue::Text("night".into())),
     ])
+}
+
+fn sample_playlists() -> Vec<Playlist> {
+    vec![
+        Playlist {
+            name: "day".into(),
+            items: vec!["/w/1".into(), "/w/2".into()],
+            settings: PlaylistSettings {
+                mode: PlaylistMode::Timer,
+                delay_minutes: 15,
+                order: PlaylistOrder::Random,
+                update_on_pause: true,
+                transition: true,
+            },
+        },
+        Playlist {
+            name: "frozen".into(),
+            items: vec!["/w/3".into()],
+            settings: PlaylistSettings {
+                mode: PlaylistMode::Manual,
+                ..PlaylistSettings::default()
+            },
+        },
+    ]
 }
 
 fn all_requests() -> Vec<Request> {
@@ -99,6 +142,24 @@ fn all_requests() -> Vec<Request> {
             settings: Settings::default(),
         },
         Request::GetStats,
+        Request::ListPlaylists,
+        Request::ApplyPlaylist {
+            output: Some("DP-1".into()),
+            name: "day".into(),
+            scaling: Scaling::Fit,
+        },
+        Request::ApplyPlaylist {
+            output: None,
+            name: "Monitor0".into(),
+            scaling: Scaling::Fill,
+        },
+        Request::PlaylistNext {
+            output: Some("DP-1".into()),
+        },
+        Request::PlaylistNext { output: None },
+        Request::PlaylistPrevious {
+            output: Some("HDMI-A-1".into()),
+        },
         Request::Subscribe {
             topics: Topic::ALL.to_vec(),
         },
@@ -161,6 +222,10 @@ fn every_reply_and_event_round_trips() {
                 rendering: true,
             }],
         }),
+        Response::Playlists {
+            playlists: sample_playlists(),
+        },
+        Response::Playlists { playlists: vec![] },
     ];
     for (id, response) in responses.into_iter().enumerate() {
         roundtrip(&ServerFrame::Reply(Reply {
@@ -311,6 +376,99 @@ fn newer_peers_are_tolerated() {
             wallpaper: "/w/x".into(),
             volume: Some(0.3),
             muted: None
+        }
+    );
+}
+
+#[test]
+fn playlist_shapes_and_tolerance() {
+    // What scripts send and read.
+    let frame = ClientFrame {
+        id: 7,
+        request: Request::ApplyPlaylist {
+            output: Some("DP-1".into()),
+            name: "day".into(),
+            scaling: Scaling::Fill,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&frame).unwrap(),
+        json!({"id": 7, "method": "apply_playlist",
+               "params": {"output": "DP-1", "name": "day", "scaling": "fill"}})
+    );
+    let frame: ClientFrame =
+        serde_json::from_str(r#"{"id":8,"method":"apply_playlist","params":{"name":"day"}}"#)
+            .unwrap();
+    assert_eq!(
+        frame.request,
+        Request::ApplyPlaylist {
+            output: None,
+            name: "day".into(),
+            scaling: Scaling::Fill
+        }
+    );
+    let frame: ClientFrame =
+        serde_json::from_str(r#"{"id":9,"method":"playlist_next","params":{}}"#).unwrap();
+    assert_eq!(frame.request, Request::PlaylistNext { output: None });
+    let frame: ClientFrame = serde_json::from_str(
+        r#"{"id":10,"method":"playlist_previous","params":{"output":"HDMI-A-1"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        frame.request,
+        Request::PlaylistPrevious {
+            output: Some("HDMI-A-1".into())
+        }
+    );
+    let frame = ClientFrame {
+        id: 11,
+        request: Request::ListPlaylists,
+    };
+    assert_eq!(
+        serde_json::to_value(&frame).unwrap(),
+        json!({"id": 11, "method": "list_playlists"})
+    );
+    let reply = ServerFrame::Reply(Reply {
+        id: 11,
+        outcome: Outcome::Ok(Response::Playlists {
+            playlists: vec![Playlist {
+                name: "day".into(),
+                items: vec!["/w/1".into()],
+                settings: PlaylistSettings::default(),
+            }],
+        }),
+    });
+    assert_eq!(
+        serde_json::to_value(&reply).unwrap(),
+        json!({"reply": {"id": 11, "ok": {"type": "playlists", "playlists": [{
+            "name": "day", "items": ["/w/1"],
+            "settings": {"mode": "timer", "delay_minutes": 60, "order": "sequential",
+                         "update_on_pause": false, "transition": false}}]}}})
+    );
+
+    // A newer daemon's modes and orders, and missing fields from a partial writer.
+    let playlist: Playlist = serde_json::from_str(
+        r#"{"name":"x","settings":{"mode":"time_of_day","order":"weighted","future":1}}"#,
+    )
+    .unwrap();
+    assert_eq!(playlist.settings.mode, PlaylistMode::Unknown);
+    assert_eq!(playlist.settings.order, PlaylistOrder::Unknown);
+    assert_eq!(playlist.settings.delay_minutes, 60);
+    assert!(playlist.items.is_empty());
+
+    // An output without a playlist, or from an older daemon: the field is left out.
+    let text = r#"{"output":"DP-1","status":"running"}"#;
+    let output: OutputState = serde_json::from_str(text).unwrap();
+    assert_eq!(output.playlist, None);
+    let text = serde_json::to_string(&output).unwrap();
+    assert!(!text.contains("playlist"), "{text}");
+    let position: PlaylistPosition = serde_json::from_str(r#"{"name":"day"}"#).unwrap();
+    assert_eq!(
+        position,
+        PlaylistPosition {
+            name: "day".into(),
+            item: None,
+            count: 0
         }
     );
 }

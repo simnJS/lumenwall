@@ -40,6 +40,10 @@ pub(crate) struct Loader<'s, 'p> {
     /// Materials loaded now belong to 3D models or sprites: their passes default to depth test
     /// and write enabled and back-face culling (spec 09 §1.11.2).
     pub model_states: bool,
+    /// Files already read during this load, by path: each reference still builds a fresh copy
+    /// (§8–§10), but the bytes come from here (an effect applied to 64 layers is read once).
+    /// `Err(None)`: not found; `Err(Some(message))`: unreadable.
+    pub files: HashMap<String, Result<Cow<'s, [u8]>, Option<String>>>,
 }
 
 fn require_object(kind: JsonKind) -> Result<(), DataErr> {
@@ -62,14 +66,26 @@ impl<'s> Loader<'s, '_> {
     /// Reads a referenced file; a missing or unreadable file is a warning (Q31: fatal error
     /// fixed, the referencing object degrades instead of failing the wallpaper).
     fn read_optional(&mut self, from: &str, path: &str) -> Option<Cow<'s, [u8]>> {
-        let src = self.src;
-        match src.read(path) {
+        let read = match self.files.get(path) {
+            Some(r) => r.clone(),
+            None => {
+                let src = self.src;
+                let r = match src.read(path) {
+                    Ok(b) => Ok(b),
+                    Err(AssetError::NotFound) => Err(None),
+                    Err(e) => Err(Some(e.to_string())),
+                };
+                self.files.insert(path.to_owned(), r.clone());
+                r
+            }
+        };
+        match read {
             Ok(b) => Some(b),
-            Err(AssetError::NotFound) => {
+            Err(None) => {
                 self.warn(from, format!("referenced file `{path}` not found"));
                 None
             }
-            Err(e) => {
+            Err(Some(e)) => {
                 self.warn(from, format!("referenced file `{path}` unreadable: {e}"));
                 None
             }

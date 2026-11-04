@@ -132,8 +132,78 @@ impl Handler for FakeDaemon {
                     scaling,
                     status: WallpaperStatus::Running,
                     message: None,
+                    playlist: None,
                 });
             }
+        }
+        self.changed();
+        Ok(())
+    }
+
+    fn playlists(&self) -> Result<Vec<Playlist>, RemoteError> {
+        Ok(vec![Playlist {
+            name: "day".into(),
+            items: vec![abs("/w/1"), abs("/w/2"), abs("/w/3")],
+            settings: PlaylistSettings::default(),
+        }])
+    }
+
+    fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        scaling: Scaling,
+    ) -> Result<(), RemoteError> {
+        let playlist = self
+            .playlists()?
+            .into_iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| RemoteError::new(ErrorCode::NotFound, name))?;
+        self.apply(output, &playlist.items[0], scaling)?;
+        let mut state = self.state.lock().unwrap();
+        for o in &mut state.outputs {
+            if output.is_none_or(|id| id == o.output) {
+                o.playlist = Some(PlaylistPosition {
+                    name: name.to_owned(),
+                    item: Some(0),
+                    count: playlist.items.len() as u32,
+                });
+            }
+        }
+        drop(state);
+        self.changed();
+        Ok(())
+    }
+
+    fn step_playlist(&self, output: Option<&str>, forward: bool) -> Result<(), RemoteError> {
+        let items = self.playlists()?.remove(0).items;
+        let mut state = self.state.lock().unwrap();
+        let mut stepped = false;
+        for o in &mut state.outputs {
+            let Some(position) = o
+                .playlist
+                .as_mut()
+                .filter(|_| output.is_none_or(|id| id == o.output))
+            else {
+                continue;
+            };
+            let n = position.count;
+            let i = position.item.unwrap_or(0);
+            let next = if forward {
+                (i + 1) % n
+            } else {
+                (i + n - 1) % n
+            };
+            position.item = Some(next);
+            o.wallpaper = Some(items[next as usize].clone());
+            stepped = true;
+        }
+        drop(state);
+        if !stepped {
+            return Err(RemoteError::new(
+                ErrorCode::InvalidRequest,
+                "no playlist plays there",
+            ));
         }
         self.changed();
         Ok(())
@@ -305,12 +375,88 @@ fn handshake_and_every_call() {
 
     let settings = Settings {
         fps_limit: 60,
-        pause_on_battery: false,
+        pause_on_battery: true,
         ..Settings::default()
     };
     client.set_settings(settings.clone()).unwrap();
     assert_eq!(client.settings().unwrap(), settings);
     assert_eq!(client.stats().unwrap().fps, 30.0);
+
+    let playlists = client.playlists().unwrap();
+    assert_eq!(playlists[0].name, "day");
+    assert_eq!(playlists[0].items.len(), 3);
+    client
+        .apply_playlist(Some("DP-1"), "day", Scaling::Fill)
+        .unwrap();
+    let shown = |client: &Client| {
+        let state = client.state().unwrap();
+        let o = state.outputs.iter().find(|o| o.output == "DP-1").unwrap();
+        (
+            o.wallpaper.clone().unwrap(),
+            o.playlist.clone().unwrap().item,
+        )
+    };
+    assert_eq!(shown(&client), (abs("/w/1"), Some(0)));
+    client.playlist_next(Some("DP-1")).unwrap();
+    assert_eq!(shown(&client), (abs("/w/2"), Some(1)));
+    client.playlist_previous(None).unwrap();
+    client.playlist_previous(None).unwrap();
+    assert_eq!(shown(&client), (abs("/w/3"), Some(2)));
+    // The other output shows no playlist.
+    let err = client.playlist_next(Some("HDMI-A-1")).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Remote(RemoteError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ),
+        "{err}"
+    );
+    let err = client
+        .apply_playlist(None, "nope", Scaling::Fill)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Remote(RemoteError {
+                code: ErrorCode::NotFound,
+                ..
+            })
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn daemons_without_playlists_answer_unsupported() {
+    // `Handler`'s defaults, as a daemon that predates playlists in this protocol version.
+    struct Bare;
+    impl Handler for Bare {}
+    let endpoint = test_endpoint();
+    let _server = Server::bind(&endpoint, Arc::new(Bare), "bare", "0.0.1").unwrap();
+    let client = Client::connect(&endpoint, "test").unwrap();
+    for err in [
+        client.playlists().unwrap_err(),
+        client
+            .apply_playlist(None, "day", Scaling::Fill)
+            .unwrap_err(),
+        client.playlist_next(None).unwrap_err(),
+        client.playlist_previous(Some("DP-1")).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                err,
+                Error::Remote(RemoteError {
+                    code: ErrorCode::Unsupported,
+                    ..
+                })
+            ),
+            "{err}"
+        );
+    }
+    assert!(client.is_connected());
 }
 
 #[test]

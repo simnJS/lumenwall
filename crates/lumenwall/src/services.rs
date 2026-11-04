@@ -9,6 +9,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use crate::plan::{ExecutionPlan, PlanChange};
+use crate::playlist::Playlist;
 use crate::settings::WallpaperSource;
 
 /// Error reported by a subsystem; its message is shown to the user as is.
@@ -27,6 +28,31 @@ pub trait PlaylistCatalog: Send + Sync {
     /// Folder of the first usable item of the playlist; an unknown name is an error that
     /// lists the available names.
     fn first_wallpaper(&self, name: &str) -> Result<PathBuf, ServiceError>;
+
+    /// The whole playlist (items and settings), to run it; same errors as
+    /// [`first_wallpaper`](Self::first_wallpaper). Without it, a playlist only shows its first
+    /// item.
+    fn playlist(&self, name: &str) -> Result<Playlist, ServiceError> {
+        Err(format!("playlist '{name}' cannot be played by this build").into())
+    }
+
+    /// Every playlist, sorted by name, read again from the source (a client lists them).
+    fn list(&self) -> Result<Vec<Playlist>, ServiceError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Receives `true` on battery, `false` on mains (see [`PowerSource::watch`]).
+pub type PowerCallback = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// Whether the computer runs on battery, for "pause on battery" (`lumenwall-audio`'s
+/// `PowerWatch`: Windows power notifications, UPower on Linux). Only watched while the setting
+/// is on.
+pub trait PowerSource: Send + Sync {
+    /// Starts following the power source: `on_change` gets the current state as soon as it is
+    /// known, then each change (possibly the same value twice), from any thread, maybe before
+    /// this returns; it must not block. Dropping the returned value stops the notifications.
+    fn watch(&self, on_change: PowerCallback) -> Box<dyn Send>;
 }
 
 /// Wakes the engine's blocking event loop from another thread (calloop ping, Win32 event...)

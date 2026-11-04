@@ -104,6 +104,25 @@ pub trait Handler: Send + Sync + 'static {
     fn stats(&self) -> Result<Stats, RemoteError> {
         Err(RemoteError::unsupported("get_stats"))
     }
+    fn playlists(&self) -> Result<Vec<Playlist>, RemoteError> {
+        Err(RemoteError::unsupported("list_playlists"))
+    }
+    fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        scaling: Scaling,
+    ) -> Result<(), RemoteError> {
+        Err(RemoteError::unsupported("apply_playlist"))
+    }
+    /// Next item (`forward`) or previous one, on `output` or on every playing playlist.
+    fn step_playlist(&self, output: Option<&str>, forward: bool) -> Result<(), RemoteError> {
+        Err(RemoteError::unsupported(if forward {
+            "playlist_next"
+        } else {
+            "playlist_previous"
+        }))
+    }
     fn shutdown(&self) -> Result<(), RemoteError> {
         Err(RemoteError::unsupported("shutdown"))
     }
@@ -442,6 +461,16 @@ impl Session {
             Request::GetSettings => h.settings().map(Response::Settings),
             Request::SetSettings { settings } => done(h.set_settings(settings)),
             Request::GetStats => h.stats().map(Response::Stats),
+            Request::ListPlaylists => h
+                .playlists()
+                .map(|playlists| Response::Playlists { playlists }),
+            Request::ApplyPlaylist {
+                output,
+                name,
+                scaling,
+            } => done(h.apply_playlist(output.as_deref(), &name, scaling)),
+            Request::PlaylistNext { output } => done(h.step_playlist(output.as_deref(), true)),
+            Request::PlaylistPrevious { output } => done(h.step_playlist(output.as_deref(), false)),
             Request::Subscribe { topics } => {
                 self.update_topics(&topics, true);
                 Ok(Response::Done)

@@ -10,29 +10,38 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use lumenwall_ipc::{
-    ErrorCode, Event, Handler, Output, OutputState, OutputStats, PauseReason, PropertyMap,
-    PropertyValue, Publisher, RemoteError, Scaling as IpcScaling, Settings, State, Stats, Topic,
-    WallpaperAudio, WallpaperStatus, wallpaper_key,
+    ErrorCode, Event, Handler, Output, OutputState, OutputStats, PauseReason, PlaylistPosition,
+    PropertyMap, PropertyValue, Publisher, RemoteError, Scaling as IpcScaling, Settings, State,
+    Stats, Topic, WallpaperAudio, WallpaperStatus, wallpaper_key,
 };
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::cli::{CliArgs, CliLayout, CliMode};
 use crate::config::{self, Config, LogConfig};
 use crate::logging::LogFilterHandle;
-use crate::plan::{self, ExecutionPlan, OutputMode, PlanServices, TargetPlan, WallpaperLevel};
-use crate::services::{
-    Control, ControlSender, EngineSnapshot, Monitor, MonitorChange, PlaylistCatalog, StopReason,
-    TargetStatus, WallpaperResolver,
+use crate::plan::{
+    self, ExecutionPlan, OutputMode, PlanServices, TargetKey, TargetPlan, WallpaperLevel,
 };
+use crate::playlist::project_is_usable;
+use crate::services::{
+    Control, ControlSender, EngineSnapshot, Monitor, MonitorChange, PlaylistCatalog, PowerSource,
+    StopReason, TargetStatus, WallpaperResolver,
+};
+
+#[cfg(test)]
+mod battery_tests;
+mod playlists;
 use crate::settings::{
     Scaling, WallpaperRef, WallpaperSource, volume_fraction, volume_from_fraction,
 };
 use crate::watch::FileChange;
+use playlists::Playlists;
 
 /// How long a client request waits for the engine to apply a new plan.
 const APPLY_TIMEOUT: Duration = Duration::from_millis(4500);
@@ -50,6 +59,8 @@ pub struct DaemonInit {
     pub playlists: Arc<dyn PlaylistCatalog>,
     pub control: ControlSender,
     pub monitor: Option<Arc<dyn Monitor>>,
+    /// Followed while "pause on battery" is on; `None`: that setting never pauses.
+    pub power: Option<Arc<dyn PowerSource>>,
     pub log_filter: Option<LogFilterHandle>,
     pub log_config: LogConfig,
 }
@@ -65,6 +76,9 @@ struct Core {
     /// Unsaved property values (slider being dragged).
     preview: BTreeMap<String, String>,
     log_config: LogConfig,
+    /// Where each playlist target is, by engine target key (copied from the runners after
+    /// each change, so that state reads never wait for the change lock).
+    playlists: BTreeMap<String, PlaylistPosition>,
 }
 
 /// A configuration being changed by a request.
@@ -80,16 +94,69 @@ pub struct Daemon {
     control: ControlSender,
     monitor: Option<Arc<dyn Monitor>>,
     log_filter: Option<LogFilterHandle>,
-    /// Serializes changes (requests and file reloads); held while waiting for the engine.
-    ops: Mutex<()>,
+    /// Serializes changes (requests, file reloads, playlist changes) and owns the playlist
+    /// runners; held while waiting for the engine, never taken on the engine thread. Order:
+    /// `ops`, then `core`.
+    ops: Mutex<Playlists>,
     /// Short-lived lock, never held while waiting.
     core: Mutex<Core>,
     /// Client pause, kept here so that `get_state` answers at once.
     user_paused: Mutex<bool>,
+    /// Pause on battery: the setting, the power source (running only while the setting is on)
+    /// and what it last said.
+    battery: Battery,
+    /// The pause the engine was last asked for (client or battery). Held while sending it, so
+    /// that two changes reach the engine in the order they were decided.
+    engine_paused: Mutex<bool>,
     publisher: OnceLock<Publisher>,
     stats: Mutex<Sampler>,
     stats_wake: Condvar,
+    /// Wakes the playlist thread early (a change, a pause, the end).
+    playlist_wake: Arc<Wake>,
+    /// Some target plays a playlist (engine events then concern the playlist thread).
+    playlists_running: AtomicBool,
     me: Weak<Daemon>,
+}
+
+/// Pause on battery. The flags are atomics: the power source calls back from its own thread
+/// and the engine thread reads them for the state, neither takes the configuration lock.
+#[derive(Default)]
+struct Battery {
+    source: Option<Arc<dyn PowerSource>>,
+    /// The plan's `pause_on_battery`.
+    enabled: AtomicBool,
+    /// What the power source said last (false until it says, and while not followed).
+    on_battery: AtomicBool,
+    /// The running watch; dropping it stops the power source.
+    watch: Mutex<Option<Box<dyn Send>>>,
+}
+
+impl Battery {
+    /// The wallpapers are paused for battery.
+    fn pausing(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst) && self.on_battery.load(Ordering::SeqCst)
+    }
+}
+
+/// Wake-up flags of the playlist thread; the lock is only held to flip them.
+#[derive(Default)]
+struct Wake {
+    flags: Mutex<WakeFlags>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct WakeFlags {
+    /// Something changed: recompute pauses and the deadline.
+    dirty: bool,
+    stopped: bool,
+}
+
+impl Wake {
+    fn set(&self, f: impl FnOnce(&mut WakeFlags)) {
+        f(&mut lock(&self.flags));
+        self.cv.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -120,13 +187,18 @@ impl Daemon {
             .and_then(|b| std::str::from_utf8(b).ok())
             .and_then(|t| t.parse::<DocumentMut>().ok())
             .unwrap_or_default();
+        // Playlists named by the plan start now, at the wallpaper the plan shows.
+        let mut runners = Playlists::default();
+        runners.sync(&init.plan, &*init.playlists, Instant::now());
+        let positions = runners.positions(&init.plan);
+        let running = !runners.is_empty();
         let daemon = Arc::new_cyclic(|me| Daemon {
             resolver: init.resolver,
             playlists: init.playlists,
             control: init.control,
             monitor: init.monitor,
             log_filter: init.log_filter,
-            ops: Mutex::new(()),
+            ops: Mutex::new(runners),
             core: Mutex::new(Core {
                 cli: init.cli,
                 path: init.config_path,
@@ -135,11 +207,19 @@ impl Daemon {
                 plan: init.plan,
                 preview: BTreeMap::new(),
                 log_config: init.log_config,
+                playlists: positions,
             }),
             user_paused: Mutex::new(false),
+            battery: Battery {
+                source: init.power,
+                ..Battery::default()
+            },
+            engine_paused: Mutex::new(false),
             publisher: OnceLock::new(),
             stats: Mutex::new(Sampler::default()),
             stats_wake: Condvar::new(),
+            playlist_wake: Arc::default(),
+            playlists_running: AtomicBool::new(running),
             me: me.clone(),
         });
         let _ = init.config;
@@ -151,6 +231,8 @@ impl Daemon {
                 }
             })));
         }
+        // On battery at start: the engine gets the pause before its first frame.
+        daemon.sync_battery();
         daemon
     }
 
@@ -164,7 +246,7 @@ impl Daemon {
         let _ = self.publisher.set(publisher);
     }
 
-    /// Drops the engine listener (end of run).
+    /// Drops the engine listener and stops the playlist thread (end of run).
     pub fn detach(&self) {
         if let Some(m) = &self.monitor {
             m.set_listener(None);
@@ -172,6 +254,184 @@ impl Daemon {
         }
         lock(&self.stats).wanted = false;
         self.stats_wake.notify_all();
+        self.playlist_wake.set(|f| f.stopped = true);
+        let watch = lock(&self.battery.watch).take();
+        drop(watch);
+    }
+
+    // ----- pauses -----
+
+    /// Whether the engine is held: client pause or pause on battery.
+    fn held(&self) -> bool {
+        *lock(&self.user_paused) || self.battery.pausing()
+    }
+
+    /// Follows the plan's "pause on battery": the power source runs only while it is on, and
+    /// the engine's pause is brought up to date. Call after the plan changed, without the
+    /// `core` lock.
+    fn sync_battery(&self) {
+        let enabled = lock(&self.core).plan.pause_on_battery;
+        self.battery.enabled.store(enabled, Ordering::SeqCst);
+        let running = lock(&self.battery.watch).is_some();
+        if enabled && !running {
+            if let Some(source) = &self.battery.source {
+                tracing::info!("pause on battery: following the power source");
+                let me = self.me.clone();
+                // The callback may run before `watch` returns (current state): no lock is held
+                // here that it takes.
+                let watch = source.watch(Arc::new(move |on_battery| {
+                    if let Some(d) = me.upgrade() {
+                        d.power_changed(on_battery);
+                    }
+                }));
+                *lock(&self.battery.watch) = Some(watch);
+            } else {
+                tracing::info!("pause on battery: no power source in this build");
+            }
+        } else if !enabled && running {
+            tracing::info!("pause on battery: off");
+            let watch = lock(&self.battery.watch).take();
+            drop(watch);
+            self.battery.on_battery.store(false, Ordering::SeqCst);
+        }
+        self.apply_pause();
+    }
+
+    /// The power source's callback (its own thread): only flags and a non-blocking send.
+    fn power_changed(&self, on_battery: bool) {
+        if !self.battery.enabled.load(Ordering::SeqCst) {
+            return;
+        }
+        let before = self.battery.on_battery.swap(on_battery, Ordering::SeqCst);
+        if before != on_battery {
+            tracing::info!(
+                "power source: {}",
+                if on_battery { "on battery" } else { "on mains" }
+            );
+        }
+        self.apply_pause();
+    }
+
+    /// Asks the engine to pause or resume when the client pause or the pause on battery
+    /// changed it; publishes the state then. `false` once the engine has stopped.
+    fn apply_pause(&self) -> bool {
+        let mut sent = lock(&self.engine_paused);
+        let held = self.held();
+        if *sent == held {
+            return true;
+        }
+        *sent = held;
+        let delivered = self.control.send(Control::Pause(held));
+        drop(sent);
+        self.poke_playlists();
+        self.publish_state();
+        delivered
+    }
+
+    /// Starts the thread that changes playlist items when they are due. It sleeps until the
+    /// earliest deadline, or without a time limit when no playlist has one.
+    pub fn start_playlists(self: &Arc<Self>) {
+        let me = Arc::downgrade(self);
+        let wake = Arc::clone(&self.playlist_wake);
+        if let Err(e) = std::thread::Builder::new()
+            .name("lumenwall-playlists".into())
+            .spawn(move || playlist_loop(&me, &wake))
+        {
+            tracing::warn!("playlist thread: {e}; playlists only show their first item");
+        }
+    }
+
+    /// A pause or the outputs changed: the playlist thread has to look, if a playlist plays.
+    /// Cheap: callable from the engine thread.
+    fn poke_playlists(&self) {
+        if self.playlists_running.load(Ordering::Relaxed) {
+            self.playlist_wake.set(|f| f.dirty = true);
+        }
+    }
+
+    /// After the plan or the runners changed: follow the plan, publish the positions, wake the
+    /// playlist thread for its new deadline.
+    fn commit_playlists(&self, runners: &mut Playlists, now: Instant) {
+        let plan = lock(&self.core).plan.clone();
+        runners.sync(&plan, &*self.playlists, now);
+        let positions = runners.positions(&plan);
+        lock(&self.core).playlists = positions;
+        self.playlists_running
+            .store(!runners.is_empty(), Ordering::Relaxed);
+        self.playlist_wake.set(|f| f.dirty = true);
+    }
+
+    /// Whether the outputs of `key` are paused: held (user pause, pause on battery), or every
+    /// output that shows it is paused by the platform (fullscreen window, locked session,
+    /// hidden). A target no output reports (no engine status yet) counts as playing.
+    fn target_paused(snap: &EngineSnapshot, held: bool, key: &TargetKey) -> bool {
+        if held {
+            return true;
+        }
+        let key = key.to_string();
+        let mut outputs = snap
+            .outputs
+            .iter()
+            .filter(|o| {
+                o.target
+                    .and_then(|t| snap.targets.get(t))
+                    .is_some_and(|t| t.key == key)
+            })
+            .peekable();
+        outputs.peek().is_some() && outputs.all(|o| o.paused.is_some())
+    }
+
+    /// Playlist thread, and tests with their own clock: updates pauses, then changes the
+    /// items that are due at `now`.
+    fn playlist_tick(&self, now: Instant) {
+        let mut runners = lock(&self.ops);
+        let snap = self.snapshot();
+        let held = self.held();
+        runners.set_paused(|key| Self::target_paused(&snap, held, key), now);
+        let mut changed = false;
+        for key in runners.due(now) {
+            if let Some(r) = runners.get_mut(&key) {
+                changed |= r
+                    .runner
+                    .advance(now, project_is_usable, |item| self.show_item(&key, item))
+                    .is_some();
+            }
+        }
+        if changed {
+            self.commit_playlists(&mut runners, now);
+            drop(runners);
+            self.publish_state();
+        }
+    }
+
+    /// Switches the target `key` to `item` (a playlist change). Call with `ops` held.
+    /// `false`: the engine could not show it.
+    fn show_item(&self, key: &TargetKey, item: &Path) -> bool {
+        let (old, preview) = {
+            let core = lock(&self.core);
+            (core.plan.clone(), core.preview.clone())
+        };
+        let mut new_plan = (*old).clone();
+        let Some(target) = new_plan.targets.iter_mut().find(|t| &t.key == key) else {
+            return false;
+        };
+        if target.wallpaper.path == item {
+            return true;
+        }
+        let name = target.playlist.clone().unwrap_or_default();
+        target.wallpaper.path = item.to_path_buf();
+        let changes = plan::diff(&old, &new_plan);
+        tracing::info!("playlist '{name}' on {key}: {}", item.display());
+        match self.reload_engine(&new_plan, changes, &preview, true) {
+            Ok(()) => {
+                lock(&self.core).plan = Arc::new(new_plan);
+                true
+            }
+            Err(e) => {
+                tracing::warn!("cannot show {}: {}", item.display(), e.message);
+                false
+            }
+        }
     }
 
     fn services(&self) -> PlanServices<'_> {
@@ -210,8 +470,13 @@ impl Daemon {
                     });
                 }
                 self.publish_state();
+                self.poke_playlists();
             }
-            MonitorChange::State => self.publish_state(),
+            MonitorChange::State => {
+                self.publish_state();
+                // Pauses start and end here.
+                self.poke_playlists();
+            }
             MonitorChange::Properties => {
                 if self.has_subscribers(Topic::Properties) {
                     let snap = self.snapshot();
@@ -253,7 +518,11 @@ impl Daemon {
     fn state(&self) -> State {
         let snap = self.snapshot();
         let user_paused = *lock(&self.user_paused);
-        let audio = lock(&self.core).plan.audio.clone();
+        let battery = self.battery.pausing();
+        let (audio, positions) = {
+            let core = lock(&self.core);
+            (core.plan.audio.clone(), core.playlists.clone())
+        };
         let shown: Vec<_> = snap.outputs.iter().filter(|o| o.target.is_some()).collect();
         let platform_pause = (!shown.is_empty() && shown.iter().all(|o| o.paused.is_some()))
             .then(|| shown[0].paused)
@@ -267,7 +536,7 @@ impl Daemon {
                     None => (WallpaperStatus::Empty, None),
                     Some(TargetStatus::Loading) => (WallpaperStatus::Loading, None),
                     Some(TargetStatus::Error(e)) => (WallpaperStatus::Error, Some(e.clone())),
-                    Some(TargetStatus::Running) if user_paused || o.paused.is_some() => {
+                    Some(TargetStatus::Running) if user_paused || battery || o.paused.is_some() => {
                         (WallpaperStatus::Paused, None)
                     }
                     Some(TargetStatus::Running) => (WallpaperStatus::Running, None),
@@ -278,13 +547,16 @@ impl Daemon {
                     scaling: target.map_or(IpcScaling::Fill, |t| t.scaling),
                     status,
                     message,
+                    playlist: target.and_then(|t| positions.get(&t.key).cloned()),
                 }
             })
             .collect();
         State {
-            paused: user_paused || platform_pause.is_some(),
+            paused: user_paused || battery || platform_pause.is_some(),
             pause_reason: if user_paused {
                 Some(PauseReason::User)
+            } else if battery {
+                Some(PauseReason::Battery)
             } else {
                 platform_pause
             },
@@ -312,7 +584,7 @@ impl Daemon {
         Settings {
             fps_limit: plan.fps,
             pause_on_fullscreen: plan.fullscreen_pause.enabled,
-            pause_on_battery: false,
+            pause_on_battery: plan.pause_on_battery,
             pause_on_lock: true,
             automute: plan.audio.automute,
             muted: plan.audio.silent,
@@ -339,7 +611,7 @@ impl Daemon {
         &self,
         edit: impl FnOnce(&mut Draft, &ExecutionPlan, &EngineSnapshot) -> Result<(), RemoteError>,
     ) -> Result<(), RemoteError> {
-        let _ops = lock(&self.ops);
+        let mut runners = lock(&self.ops);
         let snapshot = self.snapshot();
         let (draft, text, new_plan, changes) = {
             let core = lock(&self.core);
@@ -352,14 +624,18 @@ impl Daemon {
             let text = draft.doc.to_string();
             let config =
                 Config::parse(&text).map_err(|e| invalid(format!("configuration: {e}")))?;
-            let new_plan = plan::build_with(&draft.cli, Some(&config), self.services(), true)
+            let mut new_plan = plan::build_with(&draft.cli, Some(&config), self.services(), true)
                 .map_err(|e| RemoteError::new(ErrorCode::NotFound, e.to_string()))?;
+            runners.overlay(&mut new_plan);
             let changes = plan::diff(&core.plan, &new_plan);
             (draft, text, new_plan, changes)
         };
         if !changes.is_empty() {
             tracing::info!("client change: {changes:?}");
-            self.reload_engine(&new_plan, changes, &draft.preview, true)?;
+            let engine = engine_changes(changes);
+            if !engine.is_empty() {
+                self.reload_engine(&new_plan, engine, &draft.preview, true)?;
+            }
         }
         let (path, bytes) = {
             let mut core = lock(&self.core);
@@ -375,6 +651,9 @@ impl Daemon {
                 (core.path.clone(), bytes)
             }
         };
+        self.commit_playlists(&mut runners, Instant::now());
+        self.sync_battery();
+        drop(runners);
         match path {
             Some(path) => {
                 if let Err(e) = write_atomic(&path, &bytes) {
@@ -442,6 +721,16 @@ impl Daemon {
             .to_str()
             .ok_or_else(|| invalid("the wallpaper path is not valid UTF-8"))?
             .to_owned();
+        self.apply_content(output, Content::Wallpaper(text), scaling)
+    }
+
+    /// A wallpaper or a playlist on `output`, or on every output.
+    fn apply_content(
+        &self,
+        output: Option<&str>,
+        content: Content,
+        scaling: IpcScaling,
+    ) -> Result<(), RemoteError> {
         let scaling = from_ipc_scaling(scaling);
         self.transact(|d, plan, snap| {
             let known = known_outputs(snap);
@@ -454,7 +743,6 @@ impl Daemon {
             {
                 return Err(RemoteError::new(ErrorCode::UnknownOutput, name));
             }
-            let content = Content::Wallpaper(text);
             match output {
                 Some(name) if !single_output_layout(plan, &known) => {
                     let mut entries = current_entries(plan, &known);
@@ -609,9 +897,6 @@ impl Daemon {
             self.publish_settings();
             Err(RemoteError::new(ErrorCode::Unsupported, message))
         };
-        if new.pause_on_battery && !current.pause_on_battery {
-            return refuse("pausing on battery is not supported yet");
-        }
         if !new.pause_on_lock {
             return refuse("Lumenwall always pauses while the session is locked");
         }
@@ -627,6 +912,9 @@ impl Daemon {
             if new.pause_on_fullscreen != current.pause_on_fullscreen {
                 t.insert("fullscreen-pause", value(new.pause_on_fullscreen));
                 d.cli.settings.no_fullscreen_pause = false;
+            }
+            if new.pause_on_battery != current.pause_on_battery {
+                t.insert("pause-on-battery", value(new.pause_on_battery));
             }
             if new.automute != current.automute {
                 t.insert("automute", value(new.automute));
@@ -654,8 +942,89 @@ impl Daemon {
 
     fn set_paused(&self, paused: bool) -> Result<(), RemoteError> {
         *lock(&self.user_paused) = paused;
-        if !self.control.send(Control::Pause(paused)) {
+        // A resume while on battery keeps the engine held (the state says why).
+        let delivered = {
+            let mut sent = lock(&self.engine_paused);
+            *sent = self.held();
+            self.control.send(Control::Pause(*sent))
+        };
+        if !delivered {
             return Err(internal("the engine has stopped"));
+        }
+        self.poke_playlists();
+        self.publish_state();
+        Ok(())
+    }
+
+    // ----- playlists -----
+
+    fn list_playlists(&self) -> Result<Vec<lumenwall_ipc::Playlist>, RemoteError> {
+        let list = self
+            .playlists
+            .list()
+            .map_err(|e| RemoteError::new(ErrorCode::NotFound, e.to_string()))?;
+        Ok(list.into_iter().map(ipc_playlist).collect())
+    }
+
+    fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        scaling: IpcScaling,
+    ) -> Result<(), RemoteError> {
+        // An unknown name lists the available ones.
+        self.playlists
+            .first_wallpaper(name)
+            .map_err(|e| RemoteError::new(ErrorCode::NotFound, e.to_string()))?;
+        self.apply_content(output, Content::Playlist(name.to_owned()), scaling)
+    }
+
+    /// Next or previous item of the playlist on `output`, or of every playing playlist.
+    fn step_playlist(&self, output: Option<&str>, forward: bool) -> Result<(), RemoteError> {
+        let mut runners = lock(&self.ops);
+        let snap = self.snapshot();
+        let plan = lock(&self.core).plan.clone();
+        let keys = match output {
+            None => runners.keys(),
+            Some(name) => {
+                let key = target_of_output(&plan, &snap, name).ok_or_else(|| {
+                    if known_outputs(&snap).iter().any(|k| k == name) {
+                        invalid(format!("no playlist plays on {name}"))
+                    } else {
+                        RemoteError::new(ErrorCode::UnknownOutput, name)
+                    }
+                })?;
+                vec![key]
+            }
+        };
+        let now = Instant::now();
+        let (mut playing, mut changed) = (false, false);
+        for key in keys {
+            let Some(r) = runners.get_mut(&key) else {
+                continue;
+            };
+            playing = true;
+            changed |= r
+                .runner
+                .step(now, forward, project_is_usable, |item| {
+                    self.show_item(&key, item)
+                })
+                .is_some();
+        }
+        if !playing {
+            return Err(invalid(match output {
+                Some(name) => format!("no playlist plays on {name}"),
+                None => "no playlist is playing".to_owned(),
+            }));
+        }
+        // The timers started again even when nothing could be shown.
+        self.commit_playlists(&mut runners, now);
+        drop(runners);
+        if !changed {
+            return Err(RemoteError::new(
+                ErrorCode::UnsupportedWallpaper,
+                "no other item of the playlist can be shown",
+            ));
         }
         self.publish_state();
         Ok(())
@@ -663,7 +1032,7 @@ impl Daemon {
 
     /// The configuration file changed on disk (watcher thread).
     pub fn on_config_change(&self, path: &Path, change: FileChange) {
-        let _ops = lock(&self.ops);
+        let mut runners = lock(&self.ops);
         let (config, bytes) = match change {
             FileChange::Contents(bytes) => {
                 if lock(&self.core).file_bytes.as_ref() == Some(&bytes) {
@@ -714,7 +1083,8 @@ impl Daemon {
         core.file_bytes = bytes;
         let allow_empty = core.plan.targets.is_empty() || core.cli.raw.len() <= 1;
         match plan::build_with(&core.cli, config.as_ref(), self.services(), allow_empty) {
-            Ok(new_plan) => {
+            Ok(mut new_plan) => {
+                runners.overlay(&mut new_plan);
                 let changes = plan::diff(&core.plan, &new_plan);
                 if changes.is_empty() {
                     tracing::debug!("configuration reloaded, nothing to change");
@@ -724,7 +1094,13 @@ impl Daemon {
                 core.plan = Arc::new(new_plan);
                 let (plan, preview) = (core.plan.clone(), core.preview.clone());
                 drop(core);
-                let _ = self.reload_engine(&plan, changes, &preview, false);
+                let engine = engine_changes(changes);
+                if !engine.is_empty() {
+                    let _ = self.reload_engine(&plan, engine, &preview, false);
+                }
+                self.commit_playlists(&mut runners, Instant::now());
+                self.sync_battery();
+                drop(runners);
                 self.publish_settings();
                 self.publish_state();
             }
@@ -783,7 +1159,7 @@ impl Daemon {
         *base = (now, cpu);
         let elapsed = counters.elapsed.as_secs_f64().max(1e-3);
         let snap = self.snapshot();
-        let user_paused = *lock(&self.user_paused);
+        let held = self.held();
         let outputs: Vec<OutputStats> = snap
             .outputs
             .iter()
@@ -802,7 +1178,7 @@ impl Daemon {
                     } else {
                         0.0
                     },
-                    rendering: o.target.is_some() && o.paused.is_none() && !user_paused,
+                    rendering: o.target.is_some() && o.paused.is_none() && !held,
                 }
             })
             .collect();
@@ -890,6 +1266,98 @@ fn stats_loop(me: Weak<Daemon>) {
     }
 }
 
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        self.playlist_wake.set(|f| f.stopped = true);
+    }
+}
+
+/// Sleeps until the earliest playlist deadline (or a poke), then lets the daemon change what
+/// is due. Holds the daemon only while working, so dropping it ends the thread.
+fn playlist_loop(me: &Weak<Daemon>, wake: &Wake) {
+    loop {
+        let Some(deadline) = me.upgrade().map(|d| lock(&d.ops).deadline()) else {
+            return;
+        };
+        {
+            let mut flags = lock(&wake.flags);
+            loop {
+                if flags.stopped {
+                    return;
+                }
+                if std::mem::take(&mut flags.dirty) {
+                    break;
+                }
+                match deadline {
+                    None => flags = wake.cv.wait(flags).unwrap_or_else(PoisonError::into_inner),
+                    Some(at) => {
+                        let left = at.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        flags = wake
+                            .cv
+                            .wait_timeout(flags, left)
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .0;
+                    }
+                }
+            }
+        }
+        let Some(d) = me.upgrade() else {
+            return;
+        };
+        d.playlist_tick(Instant::now());
+    }
+}
+
+/// The target that shows `output`: the plan's screen or span with it, else the engine's view
+/// (one wallpaper on every output), else the lone window target.
+fn target_of_output(
+    plan: &ExecutionPlan,
+    snap: &EngineSnapshot,
+    output: &str,
+) -> Option<TargetKey> {
+    plan.targets
+        .iter()
+        .find(|t| t.outputs.iter().any(|o| o == output))
+        .or_else(|| {
+            let key = &snap.target_of(output)?.key;
+            plan.targets.iter().find(|t| t.key.to_string() == *key)
+        })
+        .or_else(|| {
+            let [only] = &plan.targets[..] else {
+                return None;
+            };
+            (only.key == TargetKey::Window && snap.outputs.is_empty()).then_some(only)
+        })
+        .map(|t| t.key.clone())
+}
+
+fn ipc_playlist(p: crate::playlist::Playlist) -> lumenwall_ipc::Playlist {
+    use lumenwall_ipc::{PlaylistMode, PlaylistOrder, PlaylistSettings};
+    let s = &p.settings;
+    lumenwall_ipc::Playlist {
+        settings: PlaylistSettings {
+            mode: if s.timer {
+                PlaylistMode::Timer
+            } else {
+                PlaylistMode::Manual
+            },
+            delay_minutes: u32::try_from(s.delay.as_secs() / 60).unwrap_or(u32::MAX),
+            order: if s.random {
+                PlaylistOrder::Random
+            } else {
+                PlaylistOrder::Sequential
+            },
+            update_on_pause: s.update_on_pause,
+            transition: s.transition,
+        },
+        name: p.name,
+        items: p.items,
+    }
+}
+
 struct DaemonHandler(Arc<Daemon>);
 
 impl Handler for DaemonHandler {
@@ -950,6 +1418,20 @@ impl Handler for DaemonHandler {
     fn stats(&self) -> Result<Stats, RemoteError> {
         self.0.stats()
     }
+    fn playlists(&self) -> Result<Vec<lumenwall_ipc::Playlist>, RemoteError> {
+        self.0.list_playlists()
+    }
+    fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        scaling: IpcScaling,
+    ) -> Result<(), RemoteError> {
+        self.0.apply_playlist(output, name, scaling)
+    }
+    fn step_playlist(&self, output: Option<&str>, forward: bool) -> Result<(), RemoteError> {
+        self.0.step_playlist(output, forward)
+    }
     fn shutdown(&self) -> Result<(), RemoteError> {
         self.0.control.send(Control::Stop(StopReason::Client));
         Ok(())
@@ -975,6 +1457,15 @@ struct Entry {
     content: Content,
     scaling: Option<Scaling>,
     clamp: Option<String>,
+}
+
+/// The changes the engine applies; the others (pause on battery) are the daemon's, and an
+/// engine reload for them alone would wake a released GPU for nothing.
+fn engine_changes(changes: Vec<plan::PlanChange>) -> Vec<plan::PlanChange> {
+    changes
+        .into_iter()
+        .filter(plan::PlanChange::concerns_engine)
+        .collect()
 }
 
 fn known_outputs(snap: &EngineSnapshot) -> Vec<String> {

@@ -133,4 +133,10 @@ impl lumenwall_shader::ShaderFs for ShaderSource<'_> {
     fn read(&self, path: &str) -> Option<Cow<'_, [u8]>> {
         self.0.read(path).ok()
     }
+
+    /// The passes of a scene read their units and includes once: 873 VFS reads for the 156
+    /// passes of 3463520581, most of them files of the assets folder opened again from disk.
+    fn identity(&self) -> Option<u64> {
+        Some(self.0.generation())
+    }
 }

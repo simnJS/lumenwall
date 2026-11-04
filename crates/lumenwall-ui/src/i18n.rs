@@ -239,6 +239,17 @@ strings! {
         "Lancez le moteur pour voir et configurer vos écrans.";
     ChangeWallpaper => "Change", "Changer";
     RemoveWallpaper => "Remove", "Retirer";
+    PlaylistPick => "Play a Wallpaper Engine playlist", "Lancer une playlist Wallpaper Engine";
+    PlaylistPosition => "Playlist {name} · {n} of {count}", "Playlist {name} · {n} sur {count}";
+    PlaylistOutside => "Playlist {name} · {count} wallpapers", "Playlist {name} · {count} fonds";
+    PlaylistEvery => "every {n} min", "toutes les {n} min";
+    PlaylistManual => "changes with Next only", "change seulement avec Suivant";
+    PlaylistRandom => "random order", "ordre aléatoire";
+    PlaylistNext => "Next", "Suivant";
+    PlaylistPrevious => "Previous", "Précédent";
+    PlaylistStop => "Stop the playlist", "Arrêter la playlist";
+    PlaylistNone => "No Wallpaper Engine playlist yet: make one in Wallpaper Engine.", "Aucune playlist Wallpaper Engine pour l'instant : créez-en une dans Wallpaper Engine.";
+    PlaylistUnavailable => "Playlists unavailable: {e}", "Playlists indisponibles : {e}";
     EmptyScreen => "No wallpaper", "Aucun fond d'écran";
     StatusLoading => "Loading", "Chargement";
     StatusError => "Error", "Erreur";

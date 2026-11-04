@@ -104,6 +104,7 @@ impl LoadContext {
                 warnings: &mut project.warnings,
                 arenas: &mut arenas,
                 model_states: false,
+                files: std::collections::HashMap::new(),
             };
             project.scene = Some(loader.load_scene(&file)?);
         }

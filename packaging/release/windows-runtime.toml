@@ -1,0 +1,76 @@
+# Files of the Windows release that Cargo does not build, and what they are.
+#
+# package.py copies exactly these files into the zip (and Lumenwall-Setup.exe, made from
+# it), writes their notices into THIRD-PARTY-NOTICES.html, then checks the zip holds
+# exactly the expected files; the release workflow repeats that check before publishing
+# (`package.py --check <zip>`). docs/RELEASING.md.
+#
+# Recipes: crates/lumenwall-video/README.md ("Windows distribution") for FFmpeg,
+# crates/lumenwall-web/README.md ("Windows runtime files") for CEF. Bump [ffmpeg] with the
+# FFmpeg build pinned in .github/actions/setup-rust/action.yml, [cef] with the `cef` crate
+# of crates/lumenwall-web/Cargo.toml: package.py refuses a build that does not match.
+
+[ffmpeg]
+# BtbN's FFmpeg-Builds, release branch 8.1, "lgpl-shared": LGPL only (configured with
+# --enable-version3 --enable-shared --disable-static, never --enable-gpl), DLLs loaded by
+# name at run time by lumenwall.exe, never linked statically.
+folder = "ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1"
+version = "n8.1.3-27-g8dca1586f4"
+licence = "LGPL-3.0-or-later"
+archive = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1.zip"
+sha256 = "5cef7bc48e513f3cee7c881e8b2999d835541edb1846c3e89443a67f8f8556ab"
+# Corresponding source: FFmpeg at the build's commit, and the build scripts at the
+# autobuild tag (they pin every library compiled into the DLLs).
+source = "https://github.com/FFmpeg/FFmpeg/tree/8dca1586f468bfcbb78ae3ed618af1361d9f140a"
+build-scripts = "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-10-31-12-59"
+# From the archive's bin\, next to lumenwall.exe (128 MiB). swresample is needed by
+# avcodec. Not avfilter/avdevice, nor ffmpeg.exe/ffprobe.exe/ffplay.exe.
+dlls = ["avutil-60.dll", "swresample-6.dll", "swscale-9.dll", "avcodec-62.dll", "avformat-62.dll"]
+# The archive's LICENSE.txt (LGPL-3.0), shipped as:
+licence-file = "licenses/FFmpeg-LGPL-3.0.txt"
+# The LGPL-3.0 incorporates the GPL-3.0, whose text must accompany it
+# (packaging/about/GPL-3.0.txt, from https://www.gnu.org/licenses/gpl-3.0.txt).
+gpl-file = "licenses/GPL-3.0.txt"
+
+[cef]
+# The `cef` crate's distribution (CEF_PATH/<version>/cef_windows_x86_64): CEF 156.0.15,
+# windows64 "minimal", downloaded from the official CEF builds at build time.
+version = "156.0.15+gcf671c0+chromium-156.0.8078.80"
+archive = "cef_binary_156.0.15+gcf671c0+chromium-156.0.8078.80_windows64_minimal.tar.bz2"
+binaries = "https://cef-builds.spotifycdn.com/cef_binary_156.0.15%2Bgcf671c0%2Bchromium-156.0.8078.80_windows64_minimal.tar.bz2"
+source = "https://github.com/chromiumembedded/cef/tree/cf671c072925b27823a61181152f4f288e8e4306"
+chromium-source = "https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80"
+# Next to lumenwall-web-host.exe. Required: the host does not start without them.
+required = [
+    "libcef.dll",
+    "chrome_elf.dll",
+    "icudtl.dat",
+    "v8_context_snapshot.bin",
+    "resources.pak",
+    "chrome_100_percent.pak",
+    "chrome_200_percent.pak",
+]
+# Recommended: WebGL on D3D11 (ANGLE's HLSL compiler) and software rendering when the
+# GPU is unusable or blocklisted (SwiftShader).
+recommended = ["d3dcompiler_47.dll", "vk_swiftshader.dll", "vk_swiftshader_icd.json", "vulkan-1.dll"]
+# Every UI locale (parity with Wallpaper Engine: the page's navigator.language follows
+# the locale Chromium loads), en-US.pak at least.
+locales = 220
+# Never shipped: WebGPU on D3D12 only (dxcompiler.dll, 24.8 MiB), the sandbox
+# bootstrap (the sandbox is off), build-time files.
+never = [
+    "dxcompiler.dll",
+    "bootstrap.exe",
+    "bootstrapc.exe",
+    "libcef.lib",
+    "CMakeLists.txt",
+    "archive.json",
+    "cmake",
+    "include",
+    "libcef_dll",
+]
+# CEF's own licence (BSD-3-Clause, LICENSE.txt of the distribution archive, which the
+# `cef` crate keeps next to the extracted folder) and Chromium's CREDITS.html (licences
+# of Chromium and of the third-party code in libcef.dll), shipped as:
+licence-file = "licenses/CEF-LICENSE.txt"
+credits-file = "licenses/Chromium-CREDITS.html"

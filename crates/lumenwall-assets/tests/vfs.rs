@@ -549,3 +549,26 @@ fn release_mappings_keeps_archives_usable() {
     }
     assert_eq!(&*vfs.read("gif.json").unwrap(), b"gif");
 }
+
+#[test]
+fn generation_is_unique_and_follows_the_mounts() {
+    let (_dir, mut a) = wallpaper_fixture();
+    let (_dir2, b) = wallpaper_fixture();
+    assert_ne!(a.generation(), b.generation(), "two VFS never share one");
+    assert_ne!(Vfs::new().generation(), Vfs::new().generation());
+    // Reads leave it alone: readers can keep what they read under it.
+    let g = a.generation();
+    a.read("project.json").unwrap();
+    assert!(a.exists("scene.json"));
+    assert_eq!(a.generation(), g);
+    // Any change of what the mounts serve renews it.
+    a.mount_adapter("/", Adapter::Memory(Default::default()));
+    let g2 = a.generation();
+    assert_ne!(g2, g);
+    a.set_media_source(None);
+    assert_ne!(a.generation(), g2);
+    let g3 = a.generation();
+    a.release_mappings();
+    assert_ne!(a.generation(), g3);
+    assert_ne!(a.generation(), b.generation());
+}

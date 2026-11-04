@@ -11,7 +11,7 @@ use crate::config::{self, LoadedConfig};
 use crate::daemon::{Daemon, DaemonInit};
 use crate::logging::{self, LogOptions};
 use crate::plan::{self, PlanServices};
-use crate::services::{self, Engine, PlaylistCatalog, WallpaperResolver};
+use crate::services::{self, Engine, PlaylistCatalog, PowerSource, WallpaperResolver};
 use crate::settings::{Scaling, WallpaperRef};
 use crate::signals;
 use crate::watch::{self, FileWatcher};
@@ -38,6 +38,8 @@ pub struct Services {
     pub engine: Box<dyn Engine>,
     /// IPC endpoint of the daemon (`None`: no IPC, no single-instance check).
     pub ipc: Option<lumenwall_ipc::Endpoint>,
+    /// Power source for "pause on battery" (`None`: the setting never pauses).
+    pub power: Option<Arc<dyn PowerSource>>,
 }
 
 /// Where user-facing text goes: help, "running with", property listing, argument errors.
@@ -152,6 +154,7 @@ pub fn run(args: Vec<OsString>, services: Services, console: Console<'_>) -> Exi
         playlists: services.playlists.clone(),
         control,
         monitor: engine.monitor(),
+        power: services.power.clone(),
         log_filter: logging.filter_handle(),
         log_config: loaded
             .config
@@ -159,6 +162,7 @@ pub fn run(args: Vec<OsString>, services: Services, console: Console<'_>) -> Exi
             .map(|c| c.log.clone())
             .unwrap_or_default(),
     });
+    daemon.start_playlists();
     let server = match &services.ipc {
         None => None,
         Some(endpoint) => {
@@ -221,38 +225,46 @@ fn forward(
         Some(Scaling::Stretch) => lumenwall_ipc::Scaling::Stretch,
         _ => lumenwall_ipc::Scaling::Fill,
     };
-    let mut requests: Vec<(Option<String>, &WallpaperRef, lumenwall_ipc::Scaling)> = cli
+    // A target's playlist drives it (§2.3); its wallpaper is only where it starts.
+    let content = |playlist: &Option<String>, wallpaper: &Option<WallpaperRef>| match playlist {
+        Some(name) => Some(WallpaperRef::PlaylistFirst(name.clone())),
+        None => wallpaper.clone(),
+    };
+    let mut requests: Vec<(Option<String>, WallpaperRef, lumenwall_ipc::Scaling)> = cli
         .layout
         .screens
         .iter()
         .filter_map(|s| {
-            let w = s.settings.wallpaper.as_ref()?;
-            Some((Some(s.name.clone()), w, scaling(s.settings.scaling)))
+            let what = content(&s.settings.playlist, &s.settings.wallpaper)?;
+            Some((Some(s.name.clone()), what, scaling(s.settings.scaling)))
         })
         .collect();
     if requests.is_empty()
-        && let Some(w) = &cli.layout.default_wallpaper
+        && let Some(what) = content(&cli.layout.window_playlist, &cli.layout.default_wallpaper)
     {
-        requests.push((None, w, scaling(cli.layout.global_scaling)));
+        requests.push((None, what, scaling(cli.layout.global_scaling)));
     }
     if requests.is_empty() {
         let _ = writeln!(out, "Lumenwall is already running");
         return Exit::Success;
     }
     for (output, reference, scaling) in requests {
-        let WallpaperRef::Source(source) = reference else {
-            tracing::warn!("playlists are not sent to the running daemon");
-            continue;
+        let sent = match &reference {
+            WallpaperRef::PlaylistFirst(name) => client
+                .apply_playlist(output.as_deref(), name, scaling)
+                .map_err(|e| format!("the running daemon refused playlist '{name}': {e}")),
+            WallpaperRef::Source(source) => {
+                let path = match resolver.resolve(source) {
+                    Ok(p) => p,
+                    Err(e) => return fatal(e),
+                };
+                client
+                    .apply(output.as_deref(), &path, scaling)
+                    .map_err(|e| format!("the running daemon refused {}: {e}", path.display()))
+            }
         };
-        let path = match resolver.resolve(source) {
-            Ok(p) => p,
-            Err(e) => return fatal(e),
-        };
-        if let Err(e) = client.apply(output.as_deref(), &path, scaling) {
-            return fatal(format!(
-                "the running daemon refused {}: {e}",
-                path.display()
-            ));
+        if let Err(e) = sent {
+            return fatal(e);
         }
     }
     let _ = writeln!(out, "Lumenwall is already running: wallpaper sent to it");
