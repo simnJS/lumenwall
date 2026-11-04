@@ -154,6 +154,10 @@ struct SceneSlot {
     serial: u64,
     /// The scene's own time, started on its first frame (`crate::clock`).
     clock: crate::clock::SceneClock,
+    /// Its scripts handle media events (`crate::script::media::wants_media`).
+    wants_media: bool,
+    /// They were given the current media state.
+    media_ready: bool,
 }
 
 /// The renderer of one target.
@@ -367,6 +371,9 @@ pub(crate) struct Local {
     user_paused: bool,
     /// Backend that opened (X11 after a layer-shell failure on GNOME).
     backend: BackendChoice,
+    /// The system's media sessions, followed while a scene's scripts handle media events. With
+    /// an engine process, it lives there: the daemon follows none.
+    media: crate::script::media::MediaFeed,
 }
 
 impl Local {
@@ -388,6 +395,7 @@ impl Local {
             known: Vec::new(),
             user_paused: false,
             backend: BackendChoice::Auto,
+            media: Default::default(),
         }
     }
 
@@ -717,6 +725,8 @@ impl Local {
     /// Ends scripts and releases the surfaces and the GPU device.
     fn close_running(&mut self, mut running: Running) {
         log_summary(&running.stats);
+        // No scene left to follow the media for: the OS subscription goes now.
+        self.media = Default::default();
         for (slot, wp) in running.scenes.iter_mut().zip(&mut self.wallpapers) {
             if let Some(slot) = slot {
                 slot.runtime.shutdown_scripts(&mut wp.project);
@@ -806,6 +816,7 @@ impl Local {
             }
             request_due_videos(r);
             pump_webs(r);
+            self.pump_media(r);
         };
         if let Some(r) = running.take() {
             self.close_running(r);
@@ -855,6 +866,48 @@ impl Local {
             }
         }
         None
+    }
+
+    /// Media for the scenes whose scripts handle it: the system's media sessions are followed
+    /// while one does, and a change reaches their scripts at their next frame, requested now
+    /// (the scripts may only have event handlers, like those of 3372348904). A scene that just
+    /// started gets the current state.
+    fn pump_media(&mut self, r: &mut Running) {
+        let wanted = r.scenes.iter().flatten().any(|s| s.wants_media);
+        let waker = self.waker.clone();
+        self.media
+            .sync(wanted, move || -> lumenwall_audio::media::MediaWaker {
+                Arc::new(move || waker.wake())
+            });
+        if !wanted {
+            return;
+        }
+        let update = self.media.poll();
+        let mut current = None;
+        for (t, slot) in r.scenes.iter_mut().enumerate() {
+            let Some(s) = slot.as_mut().filter(|s| s.wants_media) else {
+                continue;
+            };
+            let media = if s.media_ready {
+                update.clone()
+            } else {
+                if current.is_none() {
+                    current = self.media.current();
+                }
+                s.media_ready = current.is_some();
+                current.clone()
+            };
+            let Some(media) = media else {
+                continue;
+            };
+            if let Some(enabled) = media.status {
+                s.runtime.media_status(enabled);
+            }
+            s.runtime.media_changed(media.snapshot);
+            for o in r.outputs.iter_mut().filter(|o| o.target == t && !o.paused) {
+                request(r.surfaces.as_mut(), o);
+            }
+        }
     }
 
     fn set_fps(&mut self, r: Option<&mut Running>, fps: u32) {
@@ -1943,6 +1996,8 @@ fn build_renderer(
         updated_at: u64::MAX,
         serial: 0,
         clock: crate::clock::SceneClock::new(),
+        wants_media: crate::script::media::wants_media(&wp.project),
+        media_ready: false,
     })))
 }
 

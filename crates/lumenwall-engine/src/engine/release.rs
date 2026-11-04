@@ -183,6 +183,8 @@ impl Local {
             w.log_stats();
         }
         r.ctx.wait_idle();
+        // The scenes go: so does the media subscription (taken again with them on restore).
+        self.media = Default::default();
         // Video sound tracks restart with their pictures: a sound player without them.
         if r.videos.iter().any(Option::is_some) {
             r.videos.iter_mut().for_each(|v| *v = None);

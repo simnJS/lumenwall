@@ -32,13 +32,6 @@ const MEDIA_EVENTS: [&str; 5] = [
 /// Whether a scene's scripts handle media events: only then does the engine follow the system's
 /// media session for it. A plain search of the sources (a handler named in a comment costs a
 /// subscription, nothing more).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by engine.rs once the scene media patch of task bf94875c is applied"
-    )
-)]
 pub(crate) fn wants_media(project: &Project) -> bool {
     project
         .settings
@@ -200,13 +193,6 @@ pub(crate) struct SceneMedia {
 }
 
 /// The engine's subscription for scenes: taken while a scene wants media, dropped otherwise.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by engine.rs once the scene media patch of task bf94875c is applied"
-    )
-)]
 #[derive(Default)]
 pub(crate) struct MediaFeed {
     subscription: Option<MediaSubscription>,
@@ -214,13 +200,6 @@ pub(crate) struct MediaFeed {
     thumbnails: Thumbnails,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by engine.rs once the scene media patch of task bf94875c is applied"
-    )
-)]
 impl MediaFeed {
     /// Follows the system's media sessions while `wanted` (some scene [`wants_media`]); the
     /// engine `waker` runs after each change.
