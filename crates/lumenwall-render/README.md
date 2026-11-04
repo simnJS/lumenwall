@@ -11,7 +11,7 @@ GPU foundation of the Lumenwall scene renderer (wgpu 30): device and outputs, te
 - `specs/08-puppet-squelette.md` §9.7–§9.8 (skinning attributes, `mat4x3` bone palette).
 - `specs/09-scenes-3d.md` §0.3, §3.1, §3.2.2, §3.5, §3.7, §3.9, §4.5, §4.6 (depth buffers, static meshes, Wallpaper Engine clip convention for 3D passes, culling, clip-space images).
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/render.md`, `docs/TESTING.md` (reference wallpaper used only to size the benchmark: pass count and target scales).
-- Public documentation and API of `wgpu` 30.0.1 and `naga` 30.0.1.
+- Public documentation and API of `wgpu` 30.0.1 and `naga` 30.0.1; for the direct Vulkan path, the API and sources of `wgpu-hal` / `wgpu-core` 30.0.1 (MIT/Apache-2.0: what they hand to Vulkan, so that both paths match) and the Vulkan specification through `ash` 0.38.
 
 No upstream code, fork or snippet was consulted.
 
@@ -26,13 +26,14 @@ No upstream code, fork or snippet was consulted.
 | `blend` | WE `blending` → `wgpu::BlendState` (§14), RGB-only write mask, culling, `FrontFace::Cw` (verified by test). |
 | `shader` | Pass binding contract (2D and 3D texture slots), reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation, GPU module creation under an error scope. |
 | `dynbuf` | One buffer for frame globals + every pass uniform block (dynamic offsets) + image vertices; CPU shadow with change detection and one `write_buffer` per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. Writes follow nested layouts (arrays of matrices such as `mat4x3 g_Bones[N]`: 16-byte columns, 64-byte elements). |
-| `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind group layouts per (slots, volume slots), bind groups per slot-0 variant (animated textures), automatic hazard copies (only for slots the shader samples), consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, frame reordering when the owner marked transient targets (`schedule`: chains first, scene draws together, conflicting operations kept in order, 8 MiB budget of targets kept alive), per-frame uploads through a `StagingBelt`, `profile_frame` (GPU time per render pass, tools), `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. After load: `extend` (passes added with the scene's shaders, pipelines and layouts) and `set_ops` (new frame order; only bundles of changed runs are re-recorded). |
+| `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind group layouts per (slots, volume slots), bind groups per slot-0 variant (animated textures), automatic hazard copies (only for slots the shader samples), consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, frame reordering when the owner marked transient targets (`schedule`: chains first, scene draws together, conflicting operations kept in order, 8 MiB budget of targets kept alive), per-frame uploads through a `StagingBelt`, `profile_frame` (GPU time per render pass, tools), `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. After load: `extend` (passes added with the scene's shaders, pipelines and layouts) and `set_ops` (new frame order; only bundles of changed runs are re-recorded). On Vulkan the frame is recorded directly (`hal`): no bundles, `encode_frame` hands back the scene's command buffers for one submission. |
+| `hal` | Direct Vulkan recording of a scene through wgpu-hal (below, "Direct Vulkan recording"): pipelines, layouts, bind groups and samplers created through wgpu-hal from the descriptors of the wgpu path, the frame planned once (`plan_barriers`: image transitions from the resting states) and replayed into one Vulkan command buffer, adoption of new textures, lifetimes of in-flight frames; `Recording`, `WgpuReason`, `choose` (path decision), automatic fallback to wgpu per scene. |
 | `chain` | §9.8/§10/§11.6: destinations, inputs, `previous`, A/B ping-pong, geometry case, matrix kind, blend transfer (the only place it is applied, see "Blending contract"), RGB-only last pass (pure, unit tested with the spec examples). |
 | `image` | `add_image` (chain plan → passes, geometry, static matrices) and `ImageHandle::update` (rect, alignment, rotation pivot, `M_ecran` with parallax, scene geometry) every frame. |
 | `math` | `ortho`, `lookAt`, camera `P = ortho · T(eye)`, auto projection, pointer, parallax, hierarchy, alignment, rect, rotation, `M_copie`, `uMax/vMax`, quads in the spec vertex order, text matrix. |
 | `compose` | `uv_range` (stretch/fill/fit/default with the exact truncations), span (`bounding_box`, `span_range`), vertical flip, `Compositor`/`OutputComposer` (one fullscreen triangle, blending off, alpha 1, clamp/border/repeat). |
 | `bloom` | §17 as five generic passes; `BloomShaders` takes the translated WE asset shaders (what `lumenwall-engine` feeds), `BloomShaders::internal()` provides WGSL stand-ins (tests, installs without the WE shaders). |
-| `headless` | `HeadlessOutput`, `read_texture_rgba8`, `write_png`. |
+| `headless` | `HeadlessOutput`, `read_texture_rgba8` (puts a sampled texture back in its sampled state afterwards), `write_png`. |
 | `stats` | `GpuTimer` (timestamps, 3-slot async readback, never stalls), `FrameStats`, `allocator_bytes`. |
 | `yuv` | Video frames: `YuvConverter` (8-bit UNORM planes sampled, 9–16-bit `R16Uint`/`Rg16Uint` planes filtered in the shader), `YuvPlanes` (uploaded planes) or `source_from_views` (zero-copy planes), `conversion_matrix` (BT.601/709/2020/240M/FCC, limited/full range, bit depth, MSB/LSB alignment), chroma siting and decoder padding crop; one draw into an RGBA8 target. |
 | `video_device` | Optional device creation through wgpu-hal with Vulkan Video decode queues (`ContextOptions::video_decode`): decode/compute/transfer families other than wgpu's, `synchronization2`, decode extensions; `GpuContext::video_queues` for lumenwall-video's zero-copy decoder. |
@@ -125,13 +126,15 @@ image.update(&mut scene, &ImageFrame { view_projection, transform, parallax, sce
 if scene.needs_redraw() || output_changed {
     let Some(frame) = output.acquire(&ctx)? else { /* occluded */ };
     let mut enc = ctx.device().create_command_encoder(&Default::default());
-    scene.encode(&ctx, &mut enc);                         // ≤ 1 write_buffer, prerecorded segments
+    let scene_cmds = scene.encode_frame(&ctx, &mut enc);  // uploads + the frame (empty on the wgpu path)
     let uv = composer.update(&ctx, frame.size(), logical); // also feeds next frame's pointer
     compositor.encode(&mut enc, &composer, frame.view(), region, Some(clear));
-    ctx.queue().submit([enc.finish()]);
+    ctx.queue().submit(scene_cmds.into_iter().chain([enc.finish()])); // one submission
     frame.present(&ctx);
 }
 ```
+
+`scene.encode(&ctx, &mut enc)` still works on both paths: on the direct path it submits the uploads and the frame itself (one submission more per frame) and leaves a fresh `enc` for the composition.
 
 `examples/headless.rs` is a complete minimal integration (texture + base pass + effect + composition → PNG).
 
@@ -140,7 +143,7 @@ if scene.needs_redraw() || output_changed {
 - Load time only: every texture, target, buffer, sampler, bind group, pipeline and bundle. Steady state creates no GPU object (`ctx.resources_created()` is constant, tested) and the CPU update path performs **zero heap allocations** (`tests/alloc.rs`, counting allocator; wgpu itself allocates ~90 times to create an encoder and record a 6-pass frame).
 - Layers added after load (`RenderScene::extend`, scripts' `createLayer`): shader modules, pipelines (cache by shader, blend, mask, cull), bind group layouts and textures are reused; only the new passes' uniform blocks, vertices, bind groups and targets are created. The dynamic buffer grows with headroom (≥ 64 KiB, geometric for vertices); a reallocation recreates the uniform bind group and re-records the bundles once. `set_ops` re-records only the bundles whose run of passes changed (`tests/gpu.rs` `layers_added_after_build`: a reorder creates one bundle, the same order again none).
 - Per-frame uploads (the changed uniform byte range, the vertex streams written since the last frame) are copied from a recycled `wgpu::util::StagingBelt` in the frame's encoder: no buffer is created per frame; nothing when nothing changed.
-- Frozen passes are replayed from render bundles; consecutive draws to one target share one render pass.
+- On Vulkan the whole frame is recorded directly into one Vulkan command buffer (`hal`, below): ≈ 1.5–2.2 µs of CPU per render pass instead of wgpu-core's ≈ 8.5 µs in `finish`. Elsewhere frozen passes are replayed from render bundles. Consecutive draws to one target share one render pass on both paths.
 - `needs_redraw()` is false when no uniform, vertex, variant or external texture changed: the caller skips rendering and presenting. Graphs that accumulate across frames (translucent/additive passes into never-cleared targets, §15) keep rendering `ACCUMULATION_SETTLE_FRAMES` (120) frames after the last change; graphs with cross-frame reads keep 2.
 - `examples/chain_bench.rs` reproduces the shape of the reference wallpaper (3440×1440, one image with 19 passes: 8 single-pass effects, shine 5 passes at ½, localcontrast 4 passes at ¼, chromatic aberration; bloom 5 passes; composition) with synthetic shaders of similar tap counts:
 
@@ -220,6 +223,50 @@ clocks). Without FIFO's presentation queue, with the scene now at 0.66–0.75 ms
 ≈ 1.3–1.4 % (2.89 %). Scaling Perf A's projection (3.3–3.8 %) by the Mailbox/FIFO ratio measured
 above under game clocks (0.70–0.80), which understates the gain at idle clocks, gives 2.3–3.0 %.
 
+### Direct Vulkan recording (`hal`)
+
+wgpu 30 validates, tracks and encodes every render pass in `CommandEncoder::finish`, ≈ 8.5 µs per render pass on
+the reference scenes whatever the number of draws (bundles change nothing). On a Vulkan device a scene records its
+frame into one Vulkan command buffer of its own instead:
+
+- **Same pixels.** Shader modules (the naga module wgpu-core would get: clip fix applied, validated,
+  `ShaderRuntimeChecks::checked()`), pipelines (`PipelineSpec`: the vertex layouts, states and colour target of the
+  wgpu path), bind group layouts, bind groups and samplers (the `GpuContext::sampler` descriptors) are created
+  through wgpu-hal. Render passes are compatible with wgpu-hal's (same attachments, layouts and single subpass) and
+  use its flipped viewport; the first render pass of a frame is begun through wgpu-hal itself (it resets the
+  pooled encoder's bind point), the others directly. Headless renders are byte-identical to the wgpu path on every
+  installed scene (docs/PERFORMANCE.md, part D).
+- **The frame, planned once.** `build_program` turns the segments into image barriers (`plan_barriers`: every
+  render target and depth buffer starts and ends the frame in its resting state; a transition before a step that
+  needs another use or follows a write; a full memory barrier at both ends), hazard copies, render passes with
+  cached framebuffers and draws with resolved handles. A frame reads only the slot-0 variants and the stream index
+  counts; visibility changes and reorders rebuild the plan from cached objects (no object created).
+- **wgpu-core's view stays true.** Between frames targets and textures are in `RESOURCE`, depth buffers in
+  `DEPTH_STENCIL_WRITE`, what wgpu-core believes: the composition samples `_rt_FullFrameBuffer` and readbacks copy
+  targets as usual. A texture the frame uses for the first time is adopted through wgpu (an empty loading render
+  pass for targets, so wgpu-core initialises them as it would lazily, keeping what wgpu already wrote; then
+  `transition_resources`). Uploads stay on wgpu (staging belt in the caller's encoder, queue writes), submitted
+  before the frame. **Contract:** after writing a scene texture or target through wgpu (`GpuTexture::write_level0`,
+  a queue write, a copy), call `RenderScene::mark_dirty`: the next frame puts them back in their sampled state.
+  After `targets_mut().resize`, `rebuild_bindings` before the next frame (as before).
+- **Lifetimes.** The Vulkan command buffer holds no wgpu-core reference: the graph keeps clones of every wgpu
+  object a recorded frame uses and waits for the GPU (only when a frame was recorded since) before destroying
+  anything of its own (`rebuild_bindings`, scene drop). wgpu-hal objects are counted (`hal::live_objects`,
+  `RenderScene::direct_stats`): none per frame, all destroyed with the scene (tested).
+- **Fallback.** Direct3D 12, `LUMENWALL_DIRECT_VULKAN=0`, `SceneBuilder::set_recording(Recording::Wgpu)`, and any
+  scene whose wgpu-hal objects cannot be created or whose frame uses an image two ways in one step record through
+  wgpu (`RenderScene::records_direct`, `wgpu_reason`), also when it happens after load (layers added by
+  scripts): the missing wgpu objects are created then and the scene goes on.
+- **One command buffer.** The whole frame is one `VkCommandBuffer` (wgpu-core makes two per render pass): the
+  shared GPU memory of 3463520581 drops from 22.7 to 15.2 MiB headless (see the section above for why).
+
+Measured (headless 2560×1440, 300 frames paced at 30 fps, Idle priority with a game running, interleaved with the
+wgpu path of the same build): render thread after the scene update 1.55–1.57 → 0.51–0.60 ms on 3463520581 (65
+render passes, 156 draws), 0.72–0.88 → 0.37–0.41 ms on 3018340632 (24 render passes); per extra render pass
+17–20 → 3.5–4.5 µs in these conditions, ≈ 1.5–2.2 µs scaled to the 8.5 µs of a quiet PC. Details and
+projections: docs/PERFORMANCE.md, part D. Not measured on Linux, where the same code records (Vulkan); no Vulkan
+validation layer was available on the measuring PC.
+
 ## Decisions on the open questions of spec 04
 
 Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes fixed, 3 visible output reproduced, 4 WE gaps filled, 5 visible bugs follow WE when known, 6 frame-rate independence). Items owned by another crate are recorded here so the integration follows them.
@@ -276,6 +323,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 
 - Unit (46): matrices, camera, pointer, parallax laws, hierarchy, alignment, rect, rotation sense, uv padding, quad order/winding, scaling modes with the spec examples and truncation effects, span, blend table, culling/masks, chain plans (spec examples), RT sizes and scopes, uniform layouts and patches, sampler flags, upload validation, surface formats, adapter ranking, naga reflection (2D/3D slots) and clip fix, volume upload validation.
 - GPU (`tests/gpu.rs`, 15, headless): orientation end to end, padding window, culling with `FrontFace::Cw`, translucent blend + RGB mask, A/B ping-pong, read/write hazard copy, unfed attributes, animated variants, bloom chain, volume LUT slot (3D texture grading, volume in a 2D slot), composition modes, BC1 upload, visibility toggle, pipeline cache on disk, steady state (no new GPU objects, `needs_redraw`, `g_Time`, GPU timer). They pass on the RTX 4080, RADV and llvmpipe (`LUMENWALL_TEST_SOFTWARE=1`); without any adapter they print "skipped".
+- Direct Vulkan path: `hal::plan` units (path decision, barrier plans: resting states at both ends, writes after writes, copies and shared images, an image used two ways refused, layouts) and `hal::tests` on the GPU (same pixels as the wgpu path with ping-pong composites and a hazard copy; Direct3D 12 records through wgpu; fallback at build and while running with injected failures; wgpu-hal objects: none per frame, bounded across visibility changes and resizes, texture writes with `mark_dirty`, readbacks between frames, all destroyed with the scene). `tests/gpu.rs` runs on whichever path the device takes (both with `LUMENWALL_DIRECT_VULKAN=0`).
 - `tests/alloc.rs`: zero allocation in the per-frame update path.
 - `tests/gpu3d.rs`: F-3D-O of spec 09 (first row red ≈ 1 with a clip-space quad, top-left UV (0, 0) through the VP-1 camera), depth test across two meshes over two frames, back-face culling with `FrontFace::Ccw`. VP-1/VP-2 vectors in `math::tests`.
 - Examples: `headless` (writes a PNG), `chain_bench` (reference-shaped chain timing).
