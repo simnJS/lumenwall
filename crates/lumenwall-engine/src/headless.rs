@@ -251,6 +251,9 @@ pub fn render_headless(
     let mut finish_submit = (Duration::ZERO, Duration::ZERO);
     // Direct Vulkan recording: (record, submit) inside the encode time.
     let mut direct = (Duration::ZERO, Duration::ZERO);
+    // `LUMENWALL_SINGLE_SUBMIT=1` (measurements): the scene's command buffers and the
+    // composition in one submission (`RenderScene::encode_frame`) instead of `encode`'s own.
+    let single_submit = std::env::var_os("LUMENWALL_SINGLE_SUBMIT").is_some_and(|v| v != "0");
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
     let paced_from = Instant::now();
@@ -317,7 +320,12 @@ pub fn render_headless(
         }
         let t_update = start.elapsed();
         changed_frames += u32::from(rt.scene.needs_redraw());
-        rt.scene.encode(&ctx, &mut enc);
+        let before = if single_submit {
+            rt.scene.encode_frame(&ctx, &mut enc)
+        } else {
+            rt.scene.encode(&ctx, &mut enc);
+            lumenwall_render::FrameCommands::default()
+        };
         let d = rt.scene.last_direct_times();
         direct.0 += d.record;
         direct.1 += d.submit;
@@ -336,7 +344,8 @@ pub fn render_headless(
         let t_finish0 = start.elapsed();
         let commands = enc.finish();
         let t_finish1 = start.elapsed();
-        ctx.queue().submit(std::iter::once(commands));
+        ctx.queue()
+            .submit(before.into_iter().chain(std::iter::once(commands)));
         let t_submit = start.elapsed();
         finish_submit.0 += t_finish1 - t_finish0;
         finish_submit.1 += t_submit - t_finish1;
