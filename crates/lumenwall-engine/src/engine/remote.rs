@@ -416,22 +416,37 @@ impl Remote {
         }
         self.known.sort_by(|a, b| a.name.cmp(&b.name));
         self.last_targets = report.targets.clone();
-        for k in &self.known {
+        for k in &mut self.known {
             if !report.outputs.iter().any(|o| o.name == k.name) {
-                report.outputs.push(not_shown(k));
+                // Shown by an earlier process only: no target of this one.
+                *k = not_shown(k);
+                report.outputs.push(k.clone());
             }
         }
         report.outputs.sort_by(|a, b| a.name.cmp(&b.name));
         self.monitor.publish(report, change);
     }
 
-    /// The report while no engine process runs.
+    /// The report while no engine process runs. After a crash (`after_crash`) each output
+    /// keeps the target it showed, so clients see that target's error on it.
     fn publish_idle(&self, change: Change) {
+        self.publish_idle_with(change, false);
+    }
+
+    fn publish_idle_with(&self, change: Change, after_crash: bool) {
+        let outputs = self
+            .known
+            .iter()
+            .map(|o| OutputReport {
+                target: if after_crash { o.target } else { None },
+                ..not_shown(o)
+            })
+            .collect();
         self.monitor.publish(
             EngineReport {
                 active: false,
                 user_paused: self.user_paused,
-                outputs: self.known.iter().map(not_shown).collect(),
+                outputs,
                 targets: self.last_targets.clone(),
             },
             change,
@@ -465,7 +480,7 @@ impl Remote {
         for t in &mut self.last_targets {
             t.state = TargetState::Error(message.clone());
         }
-        self.publish_idle(Change::State);
+        self.publish_idle_with(Change::State, true);
     }
 
     /// Asks the process to stop and waits for it (killed after [`STOP_TIMEOUT`]).
@@ -639,5 +654,11 @@ mod tests {
         assert!(!r.active && r.user_paused);
         assert!(r.outputs.iter().all(|o| !o.shown && o.target.is_none()));
         assert_eq!(r.targets, vec![target]);
+        // After a crash the outputs keep their target, so its error reaches the clients.
+        remote.publish_idle_with(Change::State, true);
+        let r = monitor.report();
+        assert!(r.outputs.iter().all(|o| !o.shown && o.paused.is_none()));
+        assert_eq!(r.outputs[1].target, Some(0));
+        assert_eq!(r.outputs[0].target, None);
     }
 }
