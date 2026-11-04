@@ -152,6 +152,75 @@ impl Drop for MappedMemory {
     }
 }
 
+/// Read-only view of a shared memory frame ([`SharedTexture::Memory`], a section handle).
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct MappedMemory {
+    ptr: std::ptr::NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: the view is read-only and owned by this value; it is only unmapped on drop.
+#[cfg(windows)]
+unsafe impl Send for MappedMemory {}
+
+#[cfg(windows)]
+impl MappedMemory {
+    /// Maps the first `len` bytes of the section read-only. The host keeps writing into the
+    /// same section between frames, so the contents are only stable between a [`SharedFrame`]
+    /// and its release. The view stays valid after the handle is closed.
+    pub fn map(section: &std::os::windows::io::OwnedHandle, len: usize) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Memory::{FILE_MAP_READ, MapViewOfFile};
+        if len == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "empty mapping",
+            ));
+        }
+        // SAFETY: a fresh read-only view chosen by the system; it aliases no Rust object and
+        // is unmapped in Drop. A section smaller than `len` makes the call fail.
+        let view = unsafe { MapViewOfFile(section.as_raw_handle(), FILE_MAP_READ, 0, 0, len) };
+        let ptr = std::ptr::NonNull::new(view.Value.cast::<u8>())
+            .ok_or_else(std::io::Error::last_os_error)?;
+        Ok(Self { ptr, len })
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: `len` readable bytes mapped in `map`, alive until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for MappedMemory {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
+        // SAFETY: the view created in `map`, unmapped once.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.ptr.as_ptr().cast(),
+            });
+        }
+    }
+}
+
+/// Whether two handles refer to the same kernel object (Windows 10 and later). The main process
+/// receives a new duplicate for every frame; this tells which buffer of the browser's pool it
+/// is, so an import or a mapping can be reused instead of being redone for every frame.
+#[cfg(windows)]
+pub fn same_object(
+    a: &std::os::windows::io::OwnedHandle,
+    b: &std::os::windows::io::OwnedHandle,
+) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    // SAFETY: both handles are open for the duration of the call.
+    unsafe {
+        windows_sys::Win32::Foundation::CompareObjectHandles(a.as_raw_handle(), b.as_raw_handle())
+            != 0
+    }
+}
+
 /// GPU handle of a shared frame, owned by the receiving process.
 #[derive(Debug)]
 pub enum SharedTexture {
@@ -170,11 +239,21 @@ pub enum SharedTexture {
         stride: u32,
         size: u64,
     },
-    /// Windows: NT handle of an `ID3D11Texture2D` created without keyed mutex; open with
-    /// `ID3D12Device::OpenSharedHandle` (wgpu DX12) or `ID3D11Device1::OpenSharedResource1`.
+    /// Windows: NT handle of an `ID3D11Texture2D` created without keyed mutex; import with
+    /// Vulkan `VK_KHR_external_memory_win32` (handle type `D3D11_TEXTURE`, wgpu-hal
+    /// `texture_from_d3d11_shared_handle`), `ID3D12Device::OpenSharedHandle` (DX12) or
+    /// `ID3D11Device1::OpenSharedResource1`. [`same_object`] identifies the pool buffer.
     #[cfg(windows)]
     D3D11 {
         handle: std::os::windows::io::OwnedHandle,
+    },
+    /// Windows, software painting: pixels in a shared memory section (`stride` bytes per row,
+    /// `size` bytes), to map with [`MappedMemory`] and upload.
+    #[cfg(windows)]
+    Memory {
+        handle: std::os::windows::io::OwnedHandle,
+        stride: u32,
+        size: u64,
     },
 }
 

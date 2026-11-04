@@ -5,18 +5,18 @@
 //! Frames: the browser paints into a small pool of GPU textures and lends one per frame. On
 //! Linux it arrives as a DMA-BUF, imported into the render device once per buffer of that pool
 //! (`texture_from_dmabuf_fd`, cached by inode) and copied by one draw into the target; the frame
-//! is released as soon as the copy completed on the GPU. When the import is impossible (driver
-//! without `VK_EXT_external_memory_dma_buf` + `VK_EXT_image_drm_format_modifier`, import error),
-//! the host is restarted with software painting into shared memory, uploaded with
-//! `write_texture` (`LUMENWALL_WEB_FRAMES=memory` forces it, for measurements).
+//! is released as soon as the copy completed on the GPU. On Windows it arrives as the NT handle
+//! of a D3D11 texture, imported the same way on a Vulkan device created with
+//! `VULKAN_EXTERNAL_MEMORY_WIN32` (`texture_from_d3d11_shared_handle`, cached by kernel object).
+//! When the import is impossible (Linux driver without `VK_EXT_external_memory_dma_buf` +
+//! `VK_EXT_image_drm_format_modifier`; Windows device without that feature or on DX12; import
+//! error), the host is started or restarted with software painting into shared memory (a
+//! `memfd` or a paging-file section), uploaded with `write_texture` (`LUMENWALL_WEB_FRAMES=memory`
+//! forces it, for measurements).
 //!
 //! Pacing: the browser's own scheduler at the wallpaper fps (`FramePacing::Internal`). It only
 //! paints when the page changed, so a static page produces no frame and no wake-up; a new frame
 //! wakes the engine through its waker and the outputs showing the page are redrawn.
-//!
-//! Windows: the Direct3D shared texture import is not written yet; the module compiles and
-//! [`unsupported_reason`] refuses web wallpapers there.
-#![cfg_attr(not(unix), allow(dead_code, unused_variables, unreachable_code))]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -53,10 +53,8 @@ type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// Why a web wallpaper cannot run in this build, if it cannot.
 pub(crate) fn unsupported_reason() -> Option<String> {
-    if !cfg!(target_os = "linux") {
-        return Some(
-            "web wallpapers run on Linux only for now (no Direct3D frame import yet)".into(),
-        );
+    if !cfg!(any(target_os = "linux", windows)) {
+        return Some("web wallpapers run on Linux and Windows only".into());
     }
     if lumenwall_web::process::find_host_executable().is_none() {
         return Some(format!(
@@ -512,20 +510,70 @@ fn apply_overrides(properties: &mut PropertySet, overrides: &BTreeMap<String, St
 /// A browser texture imported into the render device.
 struct Imported {
     key: ImportKey,
+    buffer: BufferId,
     _texture: wgpu::Texture,
     bind: wgpu::BindGroup,
     used: u64,
 }
 
-/// Identity of one buffer of the browser's pool, with its layout.
+/// Which buffer of the browser's pool (or which shared memory buffer of the host) a frame
+/// uses: (device, inode) of the DMA-BUF or `memfd`; on Windows a handle kept open on the
+/// kernel object, compared with `same_object` (every frame brings a new duplicate).
+#[cfg(unix)]
+type BufferId = (u64, u64);
+#[cfg(windows)]
+type BufferId = std::os::windows::io::OwnedHandle;
+
+/// Shared memory a software-painted frame arrives in: a `memfd` or a section handle.
+#[cfg(unix)]
+type MemoryHandle = std::os::fd::OwnedFd;
+#[cfg(windows)]
+type MemoryHandle = std::os::windows::io::OwnedHandle;
+
+/// Layout of one buffer of the browser's pool (stride, offset and modifier: DMA-BUF only).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImportKey {
-    buffer: (u64, u64),
     size: (u32, u32),
     stride: u32,
     offset: u64,
     modifier: u64,
     format: PixelFormat,
+}
+
+/// Read-only mapping of the host's frame buffer, kept while the host reuses that buffer.
+struct Mapping {
+    buffer: BufferId,
+    len: usize,
+    memory: lumenwall_web::ipc::frame::MappedMemory,
+}
+
+impl Mapping {
+    fn new(handle: &MemoryHandle, len: usize) -> Result<Self, String> {
+        let memory = lumenwall_web::ipc::frame::MappedMemory::map(handle, len)
+            .map_err(|e| format!("frame memory: {e}"))?;
+        #[cfg(unix)]
+        let buffer = lumenwall_web::ipc::frame::buffer_id(handle).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        let buffer = handle.try_clone().map_err(|e| e.to_string())?;
+        Ok(Self {
+            buffer,
+            len,
+            memory,
+        })
+    }
+
+    /// Whether this mapping shows the buffer behind `handle`.
+    fn maps(&self, handle: &MemoryHandle, len: usize) -> Result<bool, String> {
+        if self.len != len {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        return Ok(
+            lumenwall_web::ipc::frame::buffer_id(handle).map_err(|e| e.to_string())? == self.buffer,
+        );
+        #[cfg(windows)]
+        return Ok(lumenwall_web::ipc::frame::same_object(&self.buffer, handle));
+    }
 }
 
 /// Upload texture of the shared-memory path.
@@ -534,8 +582,7 @@ struct Staging {
     bind: wgpu::BindGroup,
     size: (u32, u32),
     format: wgpu::TextureFormat,
-    #[cfg(unix)]
-    map: Option<((u64, u64), usize, lumenwall_web::ipc::frame::MappedMemory)>,
+    map: Option<Mapping>,
 }
 
 enum Source {
@@ -643,15 +690,22 @@ impl FrameCopier {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let zero_copy = cfg!(target_os = "linux")
+        // Linux: DMA-BUF; Windows: D3D11 shared textures into Vulkan (the device must have been
+        // created with `VULKAN_EXTERNAL_MEMORY_WIN32`; no DX12 import is written).
+        let (import_feature, import_name) = if cfg!(windows) {
+            (
+                wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32,
+                "D3D11 shared texture",
+            )
+        } else {
+            (wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF, "DMA-BUF")
+        };
+        let zero_copy = cfg!(any(target_os = "linux", windows))
             && ctx.adapter().get_info().backend == wgpu::Backend::Vulkan
-            && ctx
-                .device()
-                .features()
-                .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
+            && ctx.device().features().contains(import_feature);
         if !zero_copy {
             tracing::info!(
-                "web frames: no DMA-BUF import on this device, shared-memory copies instead"
+                "web frames: no {import_name} import on this device, shared-memory copies instead"
             );
         }
         Self {
@@ -708,8 +762,18 @@ impl FrameCopier {
                 (FramePath::Memory, Source::Staging)
             }
             #[cfg(windows)]
-            SharedTexture::D3D11 { .. } => {
-                return Err("Direct3D shared textures are not imported yet".into());
+            SharedTexture::D3D11 { handle } => (
+                FramePath::ZeroCopy,
+                Source::Import(self.import(ctx, frame, handle, format)?),
+            ),
+            #[cfg(windows)]
+            SharedTexture::Memory {
+                handle,
+                stride,
+                size,
+            } => {
+                self.upload(ctx, frame, handle, *stride, *size, format)?;
+                (FramePath::Memory, Source::Staging)
             }
         };
         if self.origin != Some(origin) {
@@ -760,6 +824,47 @@ impl FrameCopier {
         Ok(path)
     }
 
+    /// Index of the cached import of the frame's buffer (`same` recognises it), if any.
+    fn cached_import(
+        &mut self,
+        key: &ImportKey,
+        same: impl Fn(&BufferId) -> bool,
+    ) -> Option<usize> {
+        self.tick += 1;
+        let i = self
+            .imports
+            .iter()
+            .position(|e| e.key == *key && same(&e.buffer))?;
+        self.imports[i].used = self.tick;
+        Some(i)
+    }
+
+    /// Caches a new import; the least recently used one goes when the cache is full.
+    fn add_import(
+        &mut self,
+        ctx: &GpuContext,
+        key: ImportKey,
+        buffer: BufferId,
+        texture: wgpu::Texture,
+    ) -> usize {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.bind_group(ctx, &view);
+        if self.imports.len() >= MAX_IMPORTS
+            && let Some(oldest) = (0..self.imports.len()).min_by_key(|&i| self.imports[i].used)
+        {
+            self.imports.swap_remove(oldest);
+        }
+        self.imports.push(Imported {
+            key,
+            buffer,
+            _texture: texture,
+            bind,
+            used: self.tick,
+        });
+        self.imports_done += 1;
+        self.imports.len() - 1
+    }
+
     /// Bind group of an imported DMA-BUF, imported on first sight of the buffer.
     #[cfg(unix)]
     fn import(
@@ -777,16 +882,14 @@ impl FrameCopier {
             return Err(format!("{} planes (one supported)", planes.len()));
         };
         let key = ImportKey {
-            buffer: plane.buffer_id().map_err(|e| e.to_string())?,
             size: (frame.width, frame.height),
             stride: plane.stride,
             offset: plane.offset,
             modifier,
             format: frame.format,
         };
-        self.tick += 1;
-        if let Some(i) = self.imports.iter().position(|e| e.key == key) {
-            self.imports[i].used = self.tick;
+        let buffer = plane.buffer_id().map_err(|e| e.to_string())?;
+        if let Some(i) = self.cached_import(&key, |b| *b == buffer) {
             return Ok(i);
         }
         let fd = plane.fd.try_clone().map_err(|e| e.to_string())?;
@@ -799,41 +902,60 @@ impl FrameCopier {
             plane.stride,
             plane.offset,
         )?;
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind = self.bind_group(ctx, &view);
-        if self.imports.len() >= MAX_IMPORTS
-            && let Some(oldest) = (0..self.imports.len()).min_by_key(|&i| self.imports[i].used)
-        {
-            self.imports.swap_remove(oldest);
-        }
-        self.imports.push(Imported {
-            key,
-            _texture: texture,
-            bind,
-            used: self.tick,
-        });
-        self.imports_done += 1;
+        let i = self.add_import(ctx, key, buffer, texture);
         tracing::debug!(
             "web frame buffer imported: {}x{}, modifier {modifier:#x}, stride {}",
             frame.width,
             frame.height,
             plane.stride
         );
-        Ok(self.imports.len() - 1)
+        Ok(i)
+    }
+
+    /// Bind group of an imported D3D11 shared texture, imported on first sight of the texture.
+    #[cfg(windows)]
+    fn import(
+        &mut self,
+        ctx: &GpuContext,
+        frame: &SharedFrame,
+        handle: &std::os::windows::io::OwnedHandle,
+        format: wgpu::TextureFormat,
+    ) -> Result<usize, String> {
+        use lumenwall_web::ipc::frame::same_object;
+        if !self.zero_copy {
+            return Err("D3D11 shared texture import unavailable on this device".into());
+        }
+        let key = ImportKey {
+            size: (frame.width, frame.height),
+            stride: 0,
+            offset: 0,
+            modifier: 0,
+            format: frame.format,
+        };
+        if let Some(i) = self.cached_import(&key, |b| same_object(b, handle)) {
+            return Ok(i);
+        }
+        let texture = import_d3d11(ctx, handle, (frame.width, frame.height), format)?;
+        let buffer = handle.try_clone().map_err(|e| e.to_string())?;
+        let i = self.add_import(ctx, key, buffer, texture);
+        tracing::debug!(
+            "web frame texture imported: {}x{}",
+            frame.width,
+            frame.height
+        );
+        Ok(i)
     }
 
     /// Uploads a shared-memory frame into the staging texture.
-    #[cfg(unix)]
     fn upload(
         &mut self,
         ctx: &GpuContext,
         frame: &SharedFrame,
-        fd: &std::os::fd::OwnedFd,
+        handle: &MemoryHandle,
         stride: u32,
         size: u64,
         format: wgpu::TextureFormat,
     ) -> Result<(), String> {
-        use lumenwall_web::ipc::frame::{MappedMemory, buffer_id};
         let extent = wgpu::Extent3d {
             width: frame.width.max(1),
             height: frame.height.max(1),
@@ -866,18 +988,16 @@ impl FrameCopier {
             });
         }
         let staging = self.staging.as_mut().ok_or("no staging texture")?;
-        let id = buffer_id(fd).map_err(|e| e.to_string())?;
         let len = usize::try_from(size).map_err(|e| e.to_string())?;
-        if staging
-            .map
-            .as_ref()
-            .is_none_or(|(k, l, _)| *k != id || *l != len)
-        {
+        let mapped = match &staging.map {
+            Some(map) => map.maps(handle, len)?,
+            None => false,
+        };
+        if !mapped {
             staging.map = None;
-            let mapped = MappedMemory::map(fd, len).map_err(|e| format!("frame memory: {e}"))?;
-            staging.map = Some((id, len, mapped));
+            staging.map = Some(Mapping::new(handle, len)?);
         }
-        let Some((_, _, mapped)) = &staging.map else {
+        let Some(map) = &staging.map else {
             return Err("frame memory not mapped".into());
         };
         ctx.queue().write_texture(
@@ -887,7 +1007,7 @@ impl FrameCopier {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            mapped.as_slice(),
+            map.memory.as_slice(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(stride),
@@ -897,6 +1017,44 @@ impl FrameCopier {
         );
         Ok(())
     }
+}
+
+/// Descriptors of an imported browser texture: wgpu-hal's, then wgpu's.
+fn frame_descriptors(
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+) -> (
+    wgpu::hal::TextureDescriptor<'static>,
+    wgpu::TextureDescriptor<'static>,
+) {
+    let extent = wgpu::Extent3d {
+        width: size.0,
+        height: size.1,
+        depth_or_array_layers: 1,
+    };
+    (
+        wgpu::hal::TextureDescriptor {
+            label: Some("lumenwall.web.frame"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::wgt::TextureUses::RESOURCE,
+            memory_flags: wgpu::hal::MemoryFlags::empty(),
+            view_formats: Vec::new(),
+        },
+        wgpu::TextureDescriptor {
+            label: Some("lumenwall.web.frame"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+    )
 }
 
 /// Wraps a DMA-BUF of the browser as a sampled texture of the render device.
@@ -910,11 +1068,7 @@ fn import_dmabuf(
     stride: u32,
     offset: u64,
 ) -> Result<wgpu::Texture, String> {
-    let extent = wgpu::Extent3d {
-        width: size.0,
-        height: size.1,
-        depth_or_array_layers: 1,
-    };
+    let (hal_desc, desc) = frame_descriptors(size, format);
     // SAFETY: `fd` is a DMA-BUF of `size` pixels in `format` with this modifier, stride and
     // offset, as described by the browser; Vulkan takes ownership of it. The texture is only
     // sampled, after the browser finished painting it (it is handed over in its paint
@@ -927,42 +1081,65 @@ fn import_dmabuf(
             .as_hal::<wgpu::hal::api::Vulkan>()
             .ok_or("not a Vulkan device")?;
         let hal_texture = hal_device
-            .texture_from_dmabuf_fd(
-                fd,
-                &wgpu::hal::TextureDescriptor {
-                    label: Some("lumenwall.web.frame"),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::wgt::TextureUses::RESOURCE,
-                    memory_flags: wgpu::hal::MemoryFlags::empty(),
-                    view_formats: Vec::new(),
-                },
-                modifier,
-                u64::from(stride),
-                offset,
-            )
+            .texture_from_dmabuf_fd(fd, &hal_desc, modifier, u64::from(stride), offset)
             .map_err(|e| format!("DMA-BUF import (modifier {modifier:#x}): {e}"))?;
         drop(hal_device);
         Ok(ctx
             .device()
             .create_texture_from_hal::<wgpu::hal::api::Vulkan>(
                 hal_texture,
-                &wgpu::TextureDescriptor {
-                    label: Some("lumenwall.web.frame"),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
+                &desc,
                 wgpu::wgt::TextureUses::RESOURCE,
             ))
     }
+}
+
+/// Wraps a D3D11 shared texture of the browser as a sampled texture of the render device
+/// (Vulkan `VK_KHR_external_memory_win32`, handle type `D3D11_TEXTURE`).
+#[cfg(windows)]
+fn import_d3d11(
+    ctx: &GpuContext,
+    handle: &std::os::windows::io::OwnedHandle,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+) -> Result<wgpu::Texture, String> {
+    use std::os::windows::io::AsRawHandle;
+    let (hal_desc, desc) = frame_descriptors(size, format);
+    // SAFETY: `handle` is the NT handle of a D3D11 texture of `size` pixels in `format`,
+    // shared without keyed mutex, as described by the browser; the imported memory holds its
+    // own reference to the resource and the handle stays ours. The texture is only sampled,
+    // after the browser finished painting it and before the frame is released; its initial
+    // state is declared as already readable, as for DMA-BUF imports.
+    unsafe {
+        let hal_device = ctx
+            .device()
+            .as_hal::<wgpu::hal::api::Vulkan>()
+            .ok_or("not a Vulkan device")?;
+        let hal_texture = hal_device
+            .texture_from_d3d11_shared_handle(win32_handle(handle.as_raw_handle()), &hal_desc)
+            .map_err(|e| format!("D3D11 shared texture import: {e}"))?;
+        drop(hal_device);
+        Ok(ctx
+            .device()
+            .create_texture_from_hal::<wgpu::hal::api::Vulkan>(
+                hal_texture,
+                &desc,
+                wgpu::wgt::TextureUses::RESOURCE,
+            ))
+    }
+}
+
+/// wgpu-hal takes the handle as the `windows` crate's `HANDLE`, a `#[repr(transparent)]`
+/// wrapper of the raw pointer; it is inferred here so this crate needs no `windows` dependency.
+///
+/// # Safety
+///
+/// `H` must be a transparent wrapper of a raw handle (checked: same size).
+#[cfg(windows)]
+unsafe fn win32_handle<H>(raw: std::os::windows::raw::HANDLE) -> H {
+    const { assert!(std::mem::size_of::<H>() == std::mem::size_of::<std::os::windows::raw::HANDLE>()) };
+    // SAFETY: forwarded to the caller; sizes are equal.
+    unsafe { std::mem::transmute_copy::<std::os::windows::raw::HANDLE, H>(&raw) }
 }
 
 /// [`crate::render_headless`] for web wallpapers. The page runs in real time: frame `i` is

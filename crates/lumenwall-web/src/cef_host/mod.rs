@@ -14,7 +14,7 @@
 mod app;
 mod audio_out;
 mod client;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod memory;
 mod scheme;
 
@@ -53,7 +53,7 @@ pub struct Shared {
     audio: audio_out::AudioOut,
     audio_channels: AtomicU32,
     /// Software-painted frames ([`FrameTransport::Memory`]).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     memory: Mutex<Option<memory::SharedPixels>>,
     params: LaunchParams,
 }
@@ -570,7 +570,7 @@ fn host_browser(
         software_warned: AtomicBool::new(false),
         audio: audio_out::AudioOut::new(params.audio),
         audio_channels: AtomicU32::new(0),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         memory: Mutex::new(None),
         params: params.clone(),
     });
