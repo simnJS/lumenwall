@@ -63,6 +63,12 @@ param(
     # so that a fresh -LumenwallLocalAppData has its shader and pipeline caches filled, as the
     # user's installed copy and Wallpaper Engine's own caches are.
     [switch] $WarmLumenwall,
+    # Extra environment of the Lumenwall bench daemon, 'NAME=value' (diagnostic switches).
+    [string[]] $LumenwallEnv = @(),
+    # Engines measured ('we', 'lumenwall'). With only 'we', no Lumenwall bench daemon starts.
+    # (Wallpaper Engine's `-playInWindow` is not offered: `-control mute` does not reach a
+    # wallpaper played in a window, so it would be audible.)
+    [string[]] $Engines = @('we', 'lumenwall'),
     [string] $WeDir = 'C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine',
     [string] $WorkshopDir = 'C:\Program Files (x86)\Steam\steamapps\workshop\content\431960',
     # Key of the user section in Wallpaper Engine's config.json.
@@ -98,6 +104,8 @@ $ErrorActionPreference = 'Stop'
 $Wallpapers = @($Wallpapers | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ })
 $WeMonitors = @($WeMonitors | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ } | ForEach-Object { [int]$_ })
 $LumenwallOutputs = @($LumenwallOutputs | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ })
+$Engines = @($Engines | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ } | ForEach-Object ToLowerInvariant)
+$LumenwallEnv = @($LumenwallEnv | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ })
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Add-Type -Path (Join-Path $here 'BenchNative.cs')
 $Native = [LumenwallBench.Native]
@@ -497,6 +505,10 @@ function Get-WeMonitorMap {
 function Get-LwEnv {
     $e = @{ LUMENWALL_IPC_ENDPOINT = $IpcEndpoint }
     if ($LumenwallLocalAppData) { $e.LOCALAPPDATA = $LumenwallLocalAppData }
+    foreach ($kv in $LumenwallEnv) {
+        $k, $v = "$kv" -split '=', 2
+        if ($k) { $e[$k.Trim()] = "$v" }
+    }
     $e
 }
 
@@ -747,7 +759,7 @@ $machine = [ordered]@{
     we_settings = [ordered]@{}
     fps         = $script:TargetFps
     wallpapers  = @($wallpaperList | ForEach-Object { [ordered]@{ id = $_.Id; type = $_.Type; title = $_.Title } })
-    parameters  = [ordered]@{ repetitions = $Repetitions; warmup_s = $WarmupSeconds; measure_s = $MeasureSeconds; idle_s = $IdleSeconds; settle_s = $SettleSeconds; we_monitors = $WeMonitors; lumenwall_outputs = $(if ($LumenwallOutputs.Count) { $LumenwallOutputs } else { @('all') }) }
+    parameters  = [ordered]@{ repetitions = $Repetitions; warmup_s = $WarmupSeconds; measure_s = $MeasureSeconds; idle_s = $IdleSeconds; settle_s = $SettleSeconds; we_monitors = $WeMonitors; lumenwall_outputs = $(if ($LumenwallOutputs.Count) { $LumenwallOutputs } else { @('all') }); lumenwall_env = $LumenwallEnv; engines = $Engines }
 }
 foreach ($k in @('fps', 'preset', 'msaa', 'postprocessing', 'reflection', 'shadows', 'volumetrics', 'resolution', 'playbackfocus', 'playbackmaximized', 'playbackfullscreen', 'playbackaudio', 'videoframework', 'videohardwareacceleration', 'processpriority', 'highprecisiontimer')) {
     if ($weUserCfg.ContainsKey($k)) { $machine.we_settings[$k] = $weUserCfg[$k] }
@@ -798,8 +810,8 @@ try {
     # The daemon needs a wallpaper to start: a scene (this build may lack video or web support).
     $script:PrimeWallpaper = @($wallpaperList | Where-Object Type -EQ 'scene')[0]
     if (-not $script:PrimeWallpaper) { $script:PrimeWallpaper = $wallpaperList[0] }
-    Start-LumenwallDaemon $script:PrimeWallpaper.Dir
-    if ($WarmLumenwall) {
+    if ($Engines -contains 'lumenwall') { Start-LumenwallDaemon $script:PrimeWallpaper.Dir }
+    if ($WarmLumenwall -and $Engines -contains 'lumenwall') {
         foreach ($wp in $wallpaperList) {
             $refused = Open-Wallpaper 'lumenwall' $wp
             Log "cache warm-up on Lumenwall: $($wp.Id)$(if ($refused) { " refused: $refused" })"
@@ -815,7 +827,10 @@ try {
         for ($i = 0; $i -lt $wallpaperList.Count; $i++) {
             $order = if ((($i + $rep - 1) % 2) -eq 0) { @('we', 'lumenwall') } else { @('lumenwall', 'we') }
             $n = 0
-            foreach ($engine in $order) { $n++; Invoke-Run $rep ($i * 2 + $n) $engine $wallpaperList[$i] }
+            foreach ($engine in $order) {
+                $n++
+                if ($Engines -contains $engine) { Invoke-Run $rep ($i * 2 + $n) $engine $wallpaperList[$i] }
+            }
         }
     }
 
@@ -870,9 +885,9 @@ finally {
     if ($script:ProcRows.Count) { $script:ProcRows | Export-Csv -LiteralPath (Join-Path $OutDir 'processes.csv') -NoTypeInformation -Encoding utf8 }
     if ($script:Runs.Count) {
         $script:Runs | Select-Object Run, Kind, Engine, Wallpaper, @{ n = 'Start'; e = { $_.Start.ToString('yyyy-MM-ddTHH:mm:ss.fff', $Invariant) } }, @{ n = 'End'; e = { $_.End.ToString('yyyy-MM-ddTHH:mm:ss.fff', $Invariant) } }, FirstGpuMs, CommandMs,
-            @{ n = 'LwStatus'; e = { if ($_.Lumenwall) { $_.Lumenwall.Status } } }, @{ n = 'LwFps'; e = { if ($_.Lumenwall) { $_.Lumenwall.Fps } } },
-            @{ n = 'LwOutputs'; e = { if ($_.Lumenwall) { $_.Lumenwall.Outputs } } }, @{ n = 'LwCpuMsPerFrame'; e = { if ($_.Lumenwall) { $_.Lumenwall.FrameMs } } },
-            @{ n = 'LwGpuPct'; e = { if ($_.Lumenwall) { $_.Lumenwall.GpuPct } } }, Error |
+            @{ n = 'LwStatus'; e = { if ($_.Lumenwall) { $_.Lumenwall.Status } } }, @{ n = 'LwFps'; e = { if ($_.Lumenwall -and $null -ne $_.Lumenwall.Fps) { Fmt $_.Lumenwall.Fps 2 } } },
+            @{ n = 'LwOutputs'; e = { if ($_.Lumenwall) { $_.Lumenwall.Outputs } } }, @{ n = 'LwCpuMsPerFrame'; e = { if ($_.Lumenwall -and $null -ne $_.Lumenwall.FrameMs) { Fmt $_.Lumenwall.FrameMs 3 } } },
+            @{ n = 'LwGpuPct'; e = { if ($_.Lumenwall -and $null -ne $_.Lumenwall.GpuPct) { Fmt $_.Lumenwall.GpuPct 2 } } }, Error |
             Export-Csv -LiteralPath (Join-Path $OutDir 'runs.csv') -NoTypeInformation -Encoding utf8
     }
 }
