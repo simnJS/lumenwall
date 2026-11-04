@@ -68,7 +68,7 @@ marked *target* apply to the output or span group named by the last `-r`/`--scre
 | `--fps` | `-f` | integer ≥ 1 | 30 | Frame-rate cap |
 | `--hwdec` | | `auto` `nvdec-copy` `no` | `auto` | Hardware video decoding |
 | `--no-fullscreen-pause` | | | pause on | Keep rendering under fullscreen windows |
-| `--fullscreen-pause-only-active` | | | off | Wayland: only active fullscreen windows pause |
+| `--fullscreen-pause-only-active` | | | off | Wayland and Windows: only the active (foreground) fullscreen window pauses |
 | `--fullscreen-pause-ignore-appid` | | text | — | Ignore app_ids containing it; empty values ignored. Repeatable |
 | `--volume` | `-v` | integer | 64 | Clamped to 0..=128 (gain = volume / 128); see [Sound](#sound). Exclusive with `--silent` |
 | `--silent` | `-s` | | off | Mute wallpapers |

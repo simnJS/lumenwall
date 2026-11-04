@@ -176,7 +176,7 @@ None of the person's 10 wallpapers is 3D (all `orthogonalprojection` is set).
 | Pause when a window is maximised | Yes | done (`MAXIMIZED`, per output); GNOME Wayland needs the Shell extension | platform README Coverage | — |
 | Pause when covered/hidden, locked, screen off | Not in the reference | done (extra) | platform README | — |
 | Pause on battery | Yes (a setting) | done: `pause-on-battery` (off by default), a Settings switch, "Paused: on battery" in the app; Windows `PowerSettingRegisterNotification`, Linux UPower, followed only while the setting is on. The switch to battery itself was not tested (desktop PC on mains) | `crates/lumenwall/src/daemon.rs` (`Battery`), `lumenwall-ui` `view/settings.rs`; `lumenwall-audio` README "Not tested"; `aea5fe0` | — |
-| Pause when not focused / other apps (`--fullscreen-pause-only-active`) | Yes | partial: Wayland only | `lumenwall` README | S |
+| Pause when not focused / other apps (`--fullscreen-pause-only-active`) | Yes | done on Wayland and Windows (Windows: only the foreground fullscreen window or its root owner pauses; QUNS states unchanged); X11 not covered | `lumenwall` README; `crates/lumenwall-platform/src/win_logic.rs` (`decide_pause`, `is_active_window`), commit `eca72f8` (task 2f29cdf1, pending landing) | — |
 | GPU released after a long pause | Not in the reference | done (extra) | `docs/PERFORMANCE.md`; engine README | — |
 | NVIDIA overlay prompt | — | known issue, documented not fixed: the driver's capture module counts unknown executables as games | `lumenwall-platform` README; `4f027ea` | — |
 
