@@ -125,7 +125,11 @@ Users can check an archive by hand with the release public key:
 minisign -Vm lumenwall-<version>-x86_64-unknown-linux-gnu.tar.gz -P <release public key>
 ```
 
-The release public key is published here once it exists (see step 5 of the setup).
+Release public key (the same one is compiled into the app):
+
+```
+RWQt/7tWeHNqM8Z/BqlP0VmbIHU4DhM9iWA8dzM7rfrHXK5ZxtoIHMbY
+```
 
 ## Trying it without publishing
 
