@@ -12,9 +12,9 @@ use lumenwall_formats::tex::{
     Animation, GpuContent, GpuFormat, Spritesheet, TextureDimension, UploadOptions,
 };
 use lumenwall_render::texture::{
-    MipLevel, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload,
+    MipLevel, SamplerKey, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload,
 };
-use lumenwall_render::{SceneBuilder, TextureId};
+use lumenwall_render::{RtId, SceneBuilder, TextureId};
 use lumenwall_scene::MainTextureFormat;
 
 /// Frames of an animated texture (flag 4), for the slot-0 variants of the passes using it.
@@ -68,10 +68,40 @@ impl LoadedTexture {
     }
 }
 
+/// The cover art textures of the media playing (spec 04 §12.2, §16.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaThumbnail {
+    /// `$mediaThumbnail`: the current cover.
+    Current = 0,
+    /// `$mediaPreviousThumbnail`: the cover before it (transitions).
+    Previous = 1,
+}
+
+impl MediaThumbnail {
+    /// The special name a material uses (`textures` or `usertextures` of type `system`).
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "$mediaThumbnail" => Some(Self::Current),
+            "$mediaPreviousThumbnail" => Some(Self::Previous),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Current => "$mediaThumbnail",
+            Self::Previous => "$mediaPreviousThumbnail",
+        }
+    }
+}
+
 /// Per-scene texture cache, keyed by name (spec 04 Q16: per wallpaper, never shared).
 #[derive(Default)]
 pub struct TextureCache {
     map: HashMap<String, Option<Rc<LoadedTexture>>>,
+    /// Render targets standing for the media thumbnails, created when a slot first names one
+    /// ([`Self::media_target`]); `crate::scene::media` fills them with the cover art.
+    media: [Option<RtId>; 2],
     /// CPU bytes uploaded (statistics).
     pub uploaded_bytes: u64,
 }
@@ -86,6 +116,12 @@ impl TextureCache {
     ) -> Option<Rc<LoadedTexture>> {
         if let Some(t) = self.map.get(name) {
             return t.clone();
+        }
+        if MediaThumbnail::from_name(name).is_some() {
+            // A render target, not a file: image layers bind it (`Self::media_target`).
+            tracing::debug!("texture '{name}': media thumbnails are bound in image layers only");
+            self.map.insert(name.to_owned(), None);
+            return None;
         }
         let loaded = match load_texture(b, vfs, name, &mut self.uploaded_bytes) {
             Ok(t) => Some(Rc::new(t)),
@@ -106,10 +142,36 @@ impl TextureCache {
         t
     }
 
-    /// Whether a texture exists in the VFS (no upload).
+    /// Whether a texture exists in the VFS (no upload). The media thumbnails always do (spec 07
+    /// §3.4: a mount of their own), transparent while nothing plays.
     pub fn exists(&self, vfs: &Vfs, name: &str) -> bool {
         self.map.get(name).is_some_and(Option::is_some)
+            || MediaThumbnail::from_name(name).is_some()
             || vfs.exists(&lumenwall_assets::path::texture_path(name))
+    }
+
+    /// The render target of a media thumbnail, created the first time a slot of the scene
+    /// names one: 1×1 transparent until a cover arrives (spec 04 §16.5: RGBA8, clamp-to-edge,
+    /// linear, no mipmap). The previous cover is copied from the current one on the GPU, so
+    /// naming `$mediaPreviousThumbnail` creates both.
+    pub(crate) fn media_target(&mut self, b: &mut SceneBuilder<'_>, which: MediaThumbnail) -> RtId {
+        let ctx = b.context();
+        let mut create = |t: MediaThumbnail| {
+            *self.media[t as usize].get_or_insert_with(|| {
+                b.targets
+                    .create_anonymous(ctx, t.name(), (1, 1), SamplerKey::CLAMP_LINEAR)
+            })
+        };
+        let current = create(MediaThumbnail::Current);
+        match which {
+            MediaThumbnail::Current => current,
+            MediaThumbnail::Previous => create(MediaThumbnail::Previous),
+        }
+    }
+
+    /// The media thumbnail targets created so far (`[current, previous]`).
+    pub(crate) fn media_targets(&self) -> [Option<RtId>; 2] {
+        self.media
     }
 
     /// Number of textures uploaded.

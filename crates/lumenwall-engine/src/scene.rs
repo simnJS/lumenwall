@@ -45,9 +45,10 @@ use crate::puppet::{Layer, MAX_GPU_BONES, MAX_STEP, Puppet, Rig, decompose_attac
 use crate::script::{SceneScripts, TextSink};
 use crate::shaders::{ConstantParam, PassKind, ShaderProvider, ShaderRequest};
 use crate::text;
-use crate::texture::{LoadedTexture, TextureCache};
+use crate::texture::{LoadedTexture, MediaThumbnail, TextureCache};
 
 mod layers;
+mod media;
 pub use layers::LayerStats;
 
 /// Scene construction settings.
@@ -268,6 +269,9 @@ struct PreparedPass {
     constants: Vec<(ConstantParam, Value, Option<SettingId>)>,
     /// Slot 0 samples the image's animated main texture (spec 04 §16.3).
     animated_slot0: bool,
+    /// `(slot, thumbnail)` of the slots sampling a media thumbnail (their resolution follows
+    /// the cover).
+    media: Vec<(usize, MediaThumbnail)>,
 }
 
 struct PendingImage {
@@ -333,6 +337,9 @@ pub struct SceneRuntime {
     scene3d: Option<Box<Scene3d>>,
     /// Layers created, destroyed or reordered by scripts; `None` when no script can.
     layers: Option<Box<layers::RuntimeLayers>>,
+    /// `$mediaThumbnail` / `$mediaPreviousThumbnail`; `None` (and no cost) when no slot names
+    /// them.
+    media: Option<Box<media::MediaThumbnails>>,
 }
 
 /// Text junction: queues the strings scripts compute for text layers.
@@ -776,6 +783,7 @@ pub fn build_scene(
     let mut particle_rts = Vec::new();
     let mut animated_passes = Vec::new();
     let mut live = Vec::new();
+    let mut media_resolutions = Vec::new();
     let mut uses_time = false;
     let mut uses_pointer = false;
     let mut frame_inputs = false;
@@ -835,6 +843,11 @@ pub fn build_scene(
                 };
                 stats.images += 1;
                 stats.passes += handle.passes.len();
+                media_resolutions.extend(media::resolution_uniforms(
+                    &b,
+                    &handle.passes,
+                    img.passes.iter().map(|p| p.media.as_slice()),
+                ));
                 for (k, &pass) in handle.passes.iter().enumerate() {
                     if opts.debug.pass_log {
                         tracing::info!("{label} pass {k}: {:?}", handle.plan[k]);
@@ -1032,6 +1045,8 @@ pub fn build_scene(
     stats.textures = textures.len();
     stats.texture_bytes = textures.uploaded_bytes;
     stats.stand_in_shaders = shaders.replaced();
+    // Media thumbnails, only when a slot names one (`None`: no target, no cost).
+    let media = media::MediaThumbnails::new(textures.media_targets(), media_resolutions);
     let mut layers = dynamic_layers.then(|| {
         Box::new(layers::RuntimeLayers::new(
             vfs.clone(),
@@ -1051,8 +1066,11 @@ pub fn build_scene(
         // Render-graph aliasing: lumenwall-render lets targets whose frame lifetimes never
         // overlap share memory, and keeps its own for any target read before it is written
         // (feedback, accumulation). Every target but the scene's, which the outputs read after
-        // the frame. Layers that scripts add or reorder would change the lifetimes.
-        b.targets.mark_transient_all(&[st.full]);
+        // the frame, and the media thumbnails, written between frames. Layers that scripts add
+        // or reorder would change the lifetimes.
+        let mut keep = vec![st.full];
+        keep.extend(media.iter().flat_map(|m| m.targets()).flatten());
+        b.targets.mark_transient_all(&keep);
     }
     let mut scene_rt = b.build().map_err(|e| e.to_string())?;
     log_target_memory(scene_rt.targets(), stats.texture_bytes);
@@ -1142,6 +1160,7 @@ pub fn build_scene(
         text_changes,
         scene3d,
         layers,
+        media: media.map(Box::new),
     };
     // Layers scripts created or registered while loading (`init`, module top level).
     rt.apply_layer_changes(ctx, project);
@@ -1393,8 +1412,25 @@ fn prepare_image(
     let main_ref = project.main_texture(idx);
     let mut main_tex: Option<Rc<LoadedTexture>> = None;
     let mut main_name: Option<String> = None;
-    let (main, main_sizes, main_flags, main_format) = match main_ref {
+    let main_media = match main_ref {
         Some(lumenwall_scene::TextureRef::File(sym)) => {
+            MediaThumbnail::from_name(project.strings.resolve(sym))
+        }
+        _ => None,
+    };
+    let (main, main_sizes, main_flags, main_format) = match (main_ref, main_media) {
+        // A media thumbnail (spec 04 §16.5): its render target, at its size at load.
+        (_, Some(which)) => {
+            let rt = textures.media_target(b, which);
+            let sz = b.targets.get(rt).size();
+            (
+                TextureRef::Target(rt),
+                (sz, sz),
+                TexFlags(TexFlags::CLAMP_UVS),
+                MainTextureFormat::Other,
+            )
+        }
+        (Some(lumenwall_scene::TextureRef::File(sym)), None) => {
             let name = project.strings.resolve(sym).to_owned();
             let t = textures
                 .get(b, vfs, &name)
@@ -1409,7 +1445,7 @@ fn prepare_image(
             main_tex = Some(t);
             r
         }
-        Some(lumenwall_scene::TextureRef::RenderTarget(sym)) => {
+        (Some(lumenwall_scene::TextureRef::RenderTarget(sym)), None) => {
             let name = project.strings.resolve(sym);
             let rt = b
                 .targets
@@ -1603,6 +1639,7 @@ fn prepare_image(
         // the first/last transfer of spec 04 §9.8 to the final chain (tests/blend_contract.rs).
         pass.blend = blend(desc.blending);
         pass.cull = cull;
+        let mut media = Vec::new();
         for (slot, r) in slots_ref {
             let slot = slot as usize;
             if slot >= pass.slots.len() {
@@ -1613,6 +1650,10 @@ fn prepare_image(
                     let name = project.strings.resolve(sym);
                     if k == 0 && slot == 0 && main_name.as_deref() == Some(name) {
                         None
+                    } else if let Some(which) = MediaThumbnail::from_name(name) {
+                        media.push((slot, which));
+                        let rt = textures.media_target(b, which);
+                        Some(SlotSource::Texture(TextureRef::Target(rt)))
                     } else {
                         textures
                             .get(b, vfs, name)
@@ -1636,6 +1677,13 @@ fn prepare_image(
                     Some(SlotSource::Texture(TextureRef::Target(composites.a)))
                 }
             };
+        }
+        if k == 0
+            && pass.slots[0].is_none()
+            && let Some(which) = main_media
+        {
+            // Slot 0 of the first pass samples the main texture.
+            media.push((0, which));
         }
         let animated_slot0 =
             k == 0 && pass.slots[0].is_none() && main_tex.as_ref().is_some_and(|t| t.is_animated());
@@ -1670,6 +1718,7 @@ fn prepare_image(
             pass,
             constants,
             animated_slot0,
+            media,
         });
     }
 
