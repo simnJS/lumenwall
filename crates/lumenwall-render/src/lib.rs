@@ -31,6 +31,7 @@ pub mod headless;
 pub mod image;
 pub mod loader;
 pub mod math;
+pub mod quality;
 pub mod schedule;
 pub mod shader;
 pub mod stats;
@@ -57,6 +58,7 @@ pub use image::{
     add_image, add_image_with_options, add_image_with_puppet,
 };
 pub use math::{SkinVertex, UvRange, Vertex};
+pub use quality::{HdrMode, Msaa, QualitySettings, TextureResolution};
 pub use shader::ShaderDesc;
 pub use surface::OutputSurface;
 pub use targets::{RenderTargetPool, RtId};

@@ -43,7 +43,8 @@ pub use plan::{
     TargetPlan,
 };
 pub use scene::{
-    FrameState, LayerStats, SceneOptions, SceneRuntime, SceneStats, ScreenState, build_scene,
+    EngineSettings, FrameState, LayerStats, SceneOptions, SceneRuntime, SceneStats, ScreenState,
+    build_scene, build_scene_with,
 };
 pub use script::TextSink;
 pub use shaders::{ShaderProvider, default_provider};
@@ -55,7 +56,9 @@ pub use wallpaper::Wallpaper;
 pub use lumenwall_script::{MediaSnapshot, ScriptStats};
 
 /// Output composition modes (spec 04 §21), re-exported for the application.
-pub use lumenwall_render::{ClampMode, ScalingMode};
+pub use lumenwall_render::{
+    ClampMode, HdrMode, Msaa, QualitySettings, ScalingMode, TextureResolution,
+};
 
 /// Per-user cache folder of Lumenwall (pipeline and shader caches).
 pub fn cache_dir() -> Option<PathBuf> {

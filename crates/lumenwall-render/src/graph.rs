@@ -27,6 +27,7 @@ use crate::hal::{
     VertexBuffer, WgpuReason,
 };
 use crate::math::{SKIN_VERTEX_SIZE, SkinVertex, VERTEX_SIZE, Vertex};
+use crate::quality::QualitySettings;
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
 use crate::targets::{
     ALIAS_AREA_SLACK, Access, AliasPlan, AliasSize, RT_FORMAT, RenderTargetPool, RtId,
@@ -398,6 +399,8 @@ pub struct SceneBuilder<'c> {
     direct: std::result::Result<(), WgpuReason>,
     /// `(shader id, final module, validation info)` of the shaders added, for wgpu-hal.
     direct_modules: Vec<(usize, naga::Module, naga::valid::ModuleInfo)>,
+    /// Quality settings (texture resolution applies to every texture added afterwards).
+    quality: QualitySettings,
 }
 
 /// Passes and frame operations added by [`RenderScene::extend`]. The operations are not
@@ -565,7 +568,19 @@ impl<'c> SceneBuilder<'c> {
             pass_base: 0,
             direct: crate::hal::choose(Recording::from_env(), ctx.adapter().get_info().backend),
             direct_modules: Vec::new(),
+            quality: QualitySettings::default(),
         }
+    }
+
+    /// Quality settings: call before adding textures.
+    pub fn set_quality(&mut self, quality: QualitySettings) {
+        self.quality = quality;
+    }
+
+    /// The quality settings in force.
+    #[must_use]
+    pub fn quality(&self) -> QualitySettings {
+        self.quality
     }
 
     /// How the built scene records its frames ([`Recording::Auto`] by default, unless
@@ -634,7 +649,23 @@ impl<'c> SceneBuilder<'c> {
 
     /// Upload a texture; the caller may drop its CPU copy right after.
     pub fn add_texture(&mut self, upload: &TextureUpload<'_>) -> Result<TextureId> {
-        let t = upload_texture(self.ctx, upload)?;
+        let skip = self.quality.texture_levels_to_skip(upload.levels.len());
+        let t = if skip == 0 {
+            upload_texture(self.ctx, upload)?
+        } else {
+            // Texture resolution: the top levels are not uploaded. The declared content size
+            // stays the original one, so texture coordinates and `g_Texture0Resolution` do not
+            // change.
+            let l0 = upload.levels[0];
+            upload_texture(
+                self.ctx,
+                &TextureUpload {
+                    levels: &upload.levels[skip..],
+                    content_size: upload.content_size.or(Some((l0.width, l0.height))),
+                    ..*upload
+                },
+            )?
+        };
         self.textures.push(t);
         Ok(TextureId(self.textures.len() as u32 - 1))
     }
@@ -879,6 +910,7 @@ impl<'c> SceneBuilder<'c> {
             direct: None,
             direct_pipelines: HashMap::new(),
             wgpu_reason: None,
+            quality: self.quality,
             textures_written: false,
             default_texture: default_texture(ctx),
             default_volume,
@@ -1527,6 +1559,8 @@ pub struct RenderScene {
     direct_pipelines: HashMap<PipelineKey, usize>,
     /// Why the scene records through wgpu (`None` on the direct path).
     wgpu_reason: Option<WgpuReason>,
+    /// Quality settings the scene was built with (textures added by extensions follow them).
+    quality: QualitySettings,
     /// [`Self::mark_dirty`] since the last frame: textures may have been written by the queue.
     textures_written: bool,
     targets: RenderTargetPool,
@@ -2376,6 +2410,7 @@ impl RenderScene {
                 Some(r) => Err(r),
             },
             direct_modules: Vec::new(),
+            quality: self.quality,
             live: Some(self),
         };
         let r = f(&mut b);

@@ -27,7 +27,7 @@ use lumenwall_render::targets::{ScopeId, composite_names, scaled_actual, scaled_
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
     BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
-    ImageSpec, Op, PassId, PuppetGeometry, RenderScene, RtId, ScalingMode, SceneBuilder,
+    ImageSpec, Op, PassId, PuppetGeometry, QualitySettings, RenderScene, RtId, ScalingMode, SceneBuilder,
     SkinVertex, SlotSource, TextureRef, Vertex, add_image_with_options,
 };
 use lumenwall_scene::{
@@ -93,10 +93,46 @@ fn target_aliasing_disabled() -> bool {
     std::env::var_os("LUMENWALL_NO_TARGET_ALIASING").is_some_and(|v| v != "0")
 }
 
-/// `LUMENWALL_FULL_SIZE_CHAINS=1`: image composites and effect targets at the scene's own size (the
-/// scene target still follows the output): sharper fine detail, more GPU time and memory.
-fn full_size_chains_forced() -> bool {
-    std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS").is_some_and(|v| v != "0")
+/// Engine-wide settings fed to [`build_scene_with`]: today the quality settings, the place the
+/// CLI, `config.toml` and the application hand their choices to the engine.
+///
+/// `Default` costs exactly what rendering cost before the settings existed (no anti-aliasing,
+/// full-size textures, 8-bit targets, scenes rendered at the displayed size).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineSettings {
+    pub quality: QualitySettings,
+}
+
+impl EngineSettings {
+    /// Developer overrides, used by [`build_scene`] (the entry point without settings):
+    /// `LUMENWALL_MSAA=off|x2|x4|x8`, `LUMENWALL_TEXTURE_RESOLUTION=full|half|quarter`,
+    /// `LUMENWALL_HDR=off|scene` and `LUMENWALL_FULL_SIZE_CHAINS=1` (image composites and effect
+    /// targets at the scene's own size: sharper fine detail, more GPU time and memory). An
+    /// unset or unreadable variable keeps the default.
+    #[must_use]
+    pub fn from_env() -> Self {
+        fn parsed<T: std::str::FromStr + Default>(name: &str) -> T {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_default()
+        }
+        Self {
+            quality: QualitySettings {
+                msaa: parsed("LUMENWALL_MSAA"),
+                texture_resolution: parsed("LUMENWALL_TEXTURE_RESOLUTION"),
+                hdr: parsed("LUMENWALL_HDR"),
+                native_resolution: std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS")
+                    .is_some_and(|v| v != "0"),
+            },
+        }
+    }
+}
+
+/// Render scale of image composites and effect targets: the scene's displayed-size scale,
+/// or 1 when the native resolution is asked for.
+fn chain_scale_for(quality: &QualitySettings, scale: f32) -> f32 {
+    if quality.native_resolution { 1.0 } else { scale }
 }
 
 /// Displayed pixels per scene pixel of a scene of logical size `logical` shown on `display`
@@ -502,7 +538,8 @@ fn raw_objects(vfs: &Vfs, file: &str) -> HashMap<i64, Json> {
         .unwrap_or_default()
 }
 
-/// Builds the render graph of a scene project.
+/// Builds the render graph of a scene project with the developer overrides of
+/// [`EngineSettings::from_env`] (the defaults when none is set).
 pub fn build_scene(
     ctx: &GpuContext,
     project: &mut Project,
@@ -510,6 +547,19 @@ pub fn build_scene(
     shaders: &mut dyn ShaderProvider,
     opts: &SceneOptions,
 ) -> Result<SceneRuntime, String> {
+    build_scene_with(ctx, project, vfs, shaders, opts, &EngineSettings::from_env())
+}
+
+/// Builds the render graph of a scene project with explicit engine settings.
+pub fn build_scene_with(
+    ctx: &GpuContext,
+    project: &mut Project,
+    vfs: &Arc<Vfs>,
+    shaders: &mut dyn ShaderProvider,
+    opts: &SceneOptions,
+    settings: &EngineSettings,
+) -> Result<SceneRuntime, String> {
+    let quality = settings.quality;
     // Scripts that add, remove or reorder layers after load: the scene keeps what that needs
     // (per-object frame operations, shader provider, texture cache).
     let dynamic_layers = project.settings.scripts().iter().any(|s| {
@@ -550,6 +600,7 @@ pub fn build_scene(
     let skylight = settings.value(general.skylight_color).vec3();
 
     let mut b = SceneBuilder::new(ctx, (size.x, size.y));
+    b.set_quality(quality);
     let full_sampler = SamplerKey {
         address: opts.clamp.address(),
         nearest: false,
@@ -559,13 +610,8 @@ pub fn build_scene(
     let scale = render_scale(logical, opts.display);
     let rendered = scaled_actual(logical, scale);
     // Image composites and effect targets follow the same scale unless the scene's native
-    // resolution is asked for (`LUMENWALL_FULL_SIZE_CHAINS=1`, read here only: the place an
-    // engine setting will feed).
-    let chain_scale = if full_size_chains_forced() {
-        1.0
-    } else {
-        scale
-    };
+    // resolution is asked for (`QualitySettings::native_resolution`).
+    let chain_scale = chain_scale_for(&quality, scale);
     if rendered != logical {
         tracing::debug!(
             "scene {}x{} rendered at {}x{} (displayed size)",
