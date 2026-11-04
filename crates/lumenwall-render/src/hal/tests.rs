@@ -60,8 +60,13 @@ fn context(backends: Option<wgpu::Backends>) -> Option<GpuContext> {
     .ok()
 }
 
-/// A Vulkan context, or `None` (test skipped).
+/// A Vulkan context, or `None` (test skipped: no Vulkan adapter, or the direct path switched off
+/// for the whole run with `LUMENWALL_DIRECT_VULKAN=0`).
 fn vulkan() -> Option<GpuContext> {
+    if Recording::from_env() == Recording::Wgpu {
+        eprintln!("skipped: LUMENWALL_DIRECT_VULKAN=0");
+        return None;
+    }
     let ctx = context(Some(wgpu::Backends::VULKAN));
     if ctx.is_none() {
         eprintln!("skipped: no Vulkan adapter");
