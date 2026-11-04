@@ -134,10 +134,9 @@ cold). `late_frames` (frames more than 5 ms late) was 0 for every run except Vul
 - **Shared GPU memory: D3D11 does not quite reach "under 3 MiB", but it nearly does.** 3.16–3.21
   MiB against 17.18 MiB for the same workload on Vulkan (−14 MiB, −81 %), and against Wallpaper
   Engine's 3 MiB (a rounded figure). The bare device + flip swap chain costs 0.72 MiB (Nora's
-  0.7); the 2.4–2.5 MiB on top are explained in "Bisection" below. Original hypotheses (all tested below):
-  pinned down (candidates: the 153 dynamic constant buffers and their `WRITE_DISCARD` renaming,
-  the 156 vertex buffers, command-stream memory of the driver for 86 render passes); it is the
-  next thing to bisect before deciding, since the person's requirement is strictly below WE.
+  0.7); the 2.4–2.5 MiB on top are what the driver keeps for the 153 constant buffers and 156
+  vertex buffers once frames run, see "Bisection" below (a design with few buffer objects reaches
+  2.7–3.1 MiB).
 - **Dedicated:** 284.5 against 436.7 MiB (−35 %). Both are above/below the engine's 248 MiB
   because the probe does not alias targets; WE shows 323 MiB.
 - **Private bytes:** 433 against 488 MiB (−11 %). **Working set:** 65 against 131 MiB (−50 %).
