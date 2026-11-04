@@ -48,11 +48,14 @@ impl GpuTimer {
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        // Not in a block of system memory of its own (`readback_usage`: −4 MiB of shared GPU
+        // memory on NVIDIA/Windows).
+        let usage = crate::context::readback_usage(ctx.caps());
         let readback = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("lumenwall.timer.readback"),
                 size: 2 * wgpu::QUERY_SIZE as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                usage,
                 mapped_at_creation: false,
             })
         });

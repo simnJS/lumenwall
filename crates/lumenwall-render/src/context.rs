@@ -80,6 +80,27 @@ pub struct GpuCaps {
     pub pipeline_cache: bool,
     /// Timestamps can be written anywhere in a command encoder.
     pub timestamps: bool,
+    /// Buffers may be mapped for reading *and* writing ([`readback_usage`]).
+    pub mappable_primary_buffers: bool,
+}
+
+/// Usage of a small buffer the CPU reads back (timestamps): `MAP_READ | COPY_DST`, plus
+/// `MAP_WRITE` when the device allows it.
+///
+/// wgpu's Vulkan backend places a buffer mapped for reading only in host-cached system memory,
+/// and its allocator keeps a 4 MiB block of each memory type it has used for the life of the
+/// device: measured on NVIDIA/Windows, the first timer adds 4.0 MiB of shared GPU memory to the
+/// process for 48 bytes, and keeps it after the timer is dropped. A buffer the CPU may also
+/// write goes to the memory the upload buffers already use (device-local and host-visible with
+/// resizable BAR, else system memory), where it shares a block that exists anyway: +0 MiB.
+#[must_use]
+pub fn readback_usage(caps: GpuCaps) -> wgpu::BufferUsages {
+    let read = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
+    if caps.mappable_primary_buffers {
+        read | wgpu::BufferUsages::MAP_WRITE
+    } else {
+        read
+    }
 }
 
 /// Bytes of GPU memory allocated by lumenwall-render (textures, targets, buffers).
@@ -279,8 +300,11 @@ impl GpuContext {
             wanted |= wgpu::Features::PIPELINE_CACHE;
         }
         if options.profiling {
-            wanted |=
-                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+            // MAPPABLE_PRIMARY_BUFFERS: timestamps read back without a block of system memory
+            // (`readback_usage`).
+            wanted |= wgpu::Features::TIMESTAMP_QUERY
+                | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS;
         }
         if options.video_decode {
             // Plane views of decoded NV12 images (zero-copy video).
@@ -308,6 +332,7 @@ impl GpuContext {
             timestamps: features.contains(
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
             ),
+            mappable_primary_buffers: features.contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS),
         };
         let info = adapter.get_info();
         let desc = wgpu::DeviceDescriptor {
