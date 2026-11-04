@@ -175,7 +175,9 @@ wgpu's own buffers add nothing there: with resizable BAR its upload and staging 
 reading land in system memory, and the allocator then keeps a 4 MiB block of that memory type for
 the life of the device: `GpuTimer` did that for 48 bytes (+4.0 MiB, kept after the timer is
 dropped); its buffers are now also mappable for writing (`readback_usage`,
-`MAPPABLE_PRIMARY_BUFFERS`) and share the upload buffers' block.
+`MAPPABLE_PRIMARY_BUFFERS`, requested with `ContextOptions::profiling`) and share the upload
+buffers' block. wgpu then logs one warning at device creation ("MAPPABLE_PRIMARY_BUFFERS enabled
+on a discrete gpu…"): only those 48-byte buffers use it.
 
 NVIDIA's Vulkan driver presents a FIFO swap chain through its own Direct3D 12 presentation queue:
 besides the memory, it costs ≈ 0.69 ms of the process's 3D-engine time per presented frame
@@ -184,9 +186,39 @@ to create (Mailbox: 16 ms). `OutputSurface` asks for Mailbox on Windows: the wal
 frames below the refresh rate, so every frame is still shown at the next vertical blank, without
 tearing (Direct3D 12 backend: `Present(0, 0)` on a flip-model swap chain, no tearing either).
 
-The floor left is the Vulkan device itself, 12.4–12.9 MiB on this driver, against 0.7 MiB for a
-Direct3D 11 device with its swap chain: under Wallpaper Engine's 3 MiB only with a Direct3D 11
-renderer.
+The rest depends on the scene: NVIDIA's driver keeps system memory for submissions made of many
+command buffers, and wgpu-core records one command buffer per render pass plus one for the
+barriers before it. Bare Vulkan, 65 passes per frame for 300 frames: +0 MiB in one command
+buffer, +5 MiB in 65; wgpu: +19 MiB (probe), +16 MiB on 3463520581 headless (frames back to back),
++2.5–3 MiB in a paced window. Pipelines (160) and bind groups (400) add nothing. Recording the
+frame into a single command buffer removes that part.
+
+The whole daemon (process tree: daemon + engine process), release build, in a 2560×1440 window
+below the monitors, 30 fps, Idle priority, 20 s windows, FIFO (`LUMENWALL_PRESENT_MODE=fifo`, the
+previous behaviour) and Mailbox (the default now) interleaved. A game was running on the PC: the
+GPU ran at its game clocks, so the 3D percentages are lower than on an idle desktop, and only the
+before/after ratio carries over; memory is unaffected.
+
+| Wallpaper | | GPU 3D | Shared | Dedicated | Private |
+|---|---|---|---|---|---|
+| 3463520581 | FIFO | 1.83 / 2.08 % | 42.7 / 43.7 MiB | 266.7 MiB | 344–350 MiB |
+| 3463520581 | Mailbox | 1.45 / 1.46 / 1.50 % | 15.9 MiB | 248.2 MiB | 279–281 MiB |
+| 3018340632 | FIFO | 2.23 / 2.18 % | 42.2 / 42.7 MiB | 217.1 MiB | 284–286 MiB |
+| 3018340632 | Mailbox | 1.70 / 1.67 % | 15.4 MiB | 198.6 MiB | 221–222 MiB |
+
+FIFO's 42–44 MiB is the 43 MiB of the desktop bench (`docs/benchmarks`); Wallpaper Engine
+(Direct3D 11) shows 3 MiB. The floor left is the Vulkan device itself, 12.4–12.9 MiB on this
+driver, against 0.7 MiB for a Direct3D 11 device with its swap chain: under Wallpaper Engine's
+3 MiB only with a Direct3D 11 renderer.
+
+Projection of the desktop GPU 3D time (DISPLAY1, 30 fps, no game), from main's desktop bench
+(3463520581 6.63 %, 3018340632 5.21 %) and main's headless GPU times (1.15 and 0.72 ms per frame):
+desktop ms per frame = 1.10 × headless ms + 0.945 ms, the constant being the per-frame cost the
+headless runs do not have (presentation; the probe measured 0.69 ms of it for FIFO at idle
+clocks). Without FIFO's presentation queue, with the scene now at 0.66–0.75 ms headless:
+3463520581 ≈ 3 × (1.10 × 0.66–0.75 + ≤ 0.05) = 2.2–2.6 % (Wallpaper Engine 3.23 %), 3018340632
+≈ 1.3–1.4 % (2.89 %). Scaling Perf A's projection (3.3–3.8 %) by the Mailbox/FIFO ratio measured
+above under game clocks (0.70–0.80), which understates the gain at idle clocks, gives 2.3–3.0 %.
 
 ## Decisions on the open questions of spec 04
 
@@ -223,6 +255,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 ## Deviations
 
 - `blending: normal` disables the blend unit instead of computing `src·1 + dst·0`: identical bits on UNORM targets, cheaper.
+- Windows presents in Mailbox instead of FIFO when the surface offers it: the same frames reach the display at the same vertical blanks (the wallpaper paces itself below the refresh rate) without tearing, and NVIDIA's FIFO presentation queue is avoided (−27 MiB of shared GPU memory, −18 MiB dedicated, −65 MiB private bytes, less 3D time per frame; "Windows: shared GPU memory and presentation" above). A frame rate configured above a monitor's refresh rate is no longer held back by the swap chain: the extra frames are rendered and replaced before they are shown.
 - Targets render at the size the scene is displayed at (lumenwall-engine `render_scale`: the scene target, image composites, effect targets and bloom), and report their nominal size in `g_TextureNResolution`, so texel offsets keep their length in texture coordinates. The reference renders at the scene's size. Fine detail is resampled at the display's resolution (docs/PERFORMANCE.md, visual comparison).
 - Transient render targets share memory when their frame lifetimes do not overlap; a shared texture is cleared before its first draw of the frame (identical pixels: a transient target is never read before it is written in a frame).
 - `_rt_shadowAtlas` is allocated 1×1 (never filled, samples as transparent black; only its resolution vector differs). The bloom image's B composite is 1×1 (never written, unreachable by name). lumenwall-engine does the same for every image composite its chain never writes and no material names (`create_composites_sized`): it would only hold zeros.
