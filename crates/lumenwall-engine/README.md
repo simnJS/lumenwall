@@ -52,6 +52,7 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
 | `script` | SceneScript (`lumenwall-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. `script/dynamic.rs`: layers scripts create, destroy and sort (scene-model side, pools). |
 | `scene/layers.rs` | GPU side of the layers scripts create after load: `RenderScene::extend`, parking and reuse, draw order (see "Layers created by scripts"). |
+| `scene/media.rs`, `script/media.rs` | Media integration: the now-playing state of the system's media session reaching scenes (SceneScript media events, `$mediaThumbnail` / `$mediaPreviousThumbnail` render targets) and web pages (`wallpaperRegisterMedia*Listener`); see "Media integration". |
 | `vulkan_driver` | `restrict_vulkan_loader` (first call of `main`, Linux and Windows): `VK_LOADER_DRIVERS_SELECT` set to the manifest glob of the driver used last time (`<cache>/vulkan-driver`: glob, PCI vendor and device), so the loader does not open the other drivers (Linux: Mesa's stay mapped, ≈ 50 MiB RSS, 25 ms per instance here). Windows: the glob is the adapter's manifest name read from its driver's registry key (`*nv-vk64.json`, `lumenwall_platform::vulkan_registry`), and the implicit layers the other adapters' drivers register are turned off with `VK_LOADER_LAYERS_DISABLE` (AMD's `VK_LAYER_AMD_switchable_graphics` lives in `amdvlk64.dll`, which the loader mapped into every Vulkan process even with only the NVIDIA driver selected). `open_gpu` lifts it and opens again with every driver when the restricted loader finds no adapter or not the remembered one, then remembers the new choice. Untouched when the user sets a loader driver variable. |
 | `audio` | Scene sounds (`lumenwall-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
 | `engine` | `Engine`: in this process (`Local`) or, on Windows, in an engine process of its own (`engine/remote.rs`, `engine/host.rs`, below). `Local`: platform backend selection (desktop, X11 fallback, window), GPU context (one backend per instance, `gpu_backends`: Vulkan, then DX12 when Vulkan has no adapter; `LUMENWALL_GPU_BACKEND=vulkan\|dx12`), outputs, event loop, pause (platform and user), pointer, screenshots, statistics, scene media events; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device); `engine/release.rs`: GPU released after a long pause and restored on resume (Frame loop below). |
@@ -136,7 +137,7 @@ working set and 6 driver threads after its device and instance are destroyed (`n
   `log` records (wgpu, naga) included, through tracing-log.
 - The process restricts the Vulkan loader itself (the daemon's variables are removed from its
   environment) and follows the system's media sessions only while one of its scenes handles
-  media events; the daemon follows none.
+  media events or samples a cover (see "Media integration"); the daemon follows none.
 - `LUMENWALL_ENGINE_PROCESS=0` keeps the engine in the daemon; `--list-properties` and
   `--dump-structure` always do. Linux: the engine stays in the daemon (the driver cost there is
   covered by the GPU release and `malloc_trim`; the split is not measured on Linux yet).
@@ -203,6 +204,8 @@ working set and 6 driver threads after its device and instance are destroyed (`n
   `applyGeneralProperties`, audio listener fed with the spectrum), pointer and buttons, page
   sound under `--volume`/`--silent`, pause freezing the page, hot switching scene ↔ web through
   `EngineControl::Reload` (IPC `apply`). Frames and wake-ups only when the page paints.
+- Playlists, battery pause and playback state are the daemon's (`crates/lumenwall`, README "Playlists"): the engine sees them as plan reloads of one target (`TargetContent`) and as pause/resume, never a playlist object. The engine process on Windows (above) is started and ended by the daemon the same way.
+- Media integration (now playing and its cover) for scenes and web pages: see "Media integration".
 - Particles (sprites, trails, ropes), sounds, audio spectrum, automute.
 - SceneScript (see below): property scripts, dynamic text layers, timers, events.
 - Window (`-w XxYxWxH`, or `LUMENWALL_WINDOWED=1` for the 640×480 window), desktop on every output
@@ -283,6 +286,20 @@ previews where there is some):
 Within a model, meshes whose passes all blend are drawn after its opaque meshes (`fantasticcar`:
 the windshield comes before the interior in `body.mdl`; the preview shows the interior through it).
 
+## Media integration
+
+The system's now-playing session (Windows: Global System Media Transport Controls; Linux: MPRIS on the session bus) comes from `lumenwall-audio`'s media hub, which runs the OS source only while something subscribes (`aea5fe0`). The engine follows it for exactly these cases, so a wallpaper that does not use it costs nothing and wakes nothing:
+
+| Consumer | Followed when | What it gets |
+|---|---|---|
+| Scene scripts | a script names a media handler (`wants_media`: `mediaStatusChanged`, `mediaPropertiesChanged`, `mediaThumbnailChanged`, `mediaPlaybackChanged`, `mediaTimelineChanged`) | the SceneScript events of spec 06 §8.4: title, artist, album, playback state, timeline, thumbnail state and its colours; `MediaFeed` (`engine.rs`, `pump_media`) hands the state to the scene and redraws the outputs showing it |
+| Scene textures | a slot or a main texture names `$mediaThumbnail` or `$mediaPreviousThumbnail` (`wants_media_artwork`; commit `d7c8758`) | two render targets of the scene's own pool, 1×1 transparent until a cover arrives. On a new cover (deduplicated by its key): the shown cover is copied into `$mediaPreviousThumbnail` on the GPU, the new one is written into `$mediaThumbnail`; bind groups are rebuilt only when a size changes and the `g_TextureNResolution` of the sampling slots follow. Layers created by scripts are covered. The pixels stay on the CPU only for the upload |
+| Web pages | the page registered a `wallpaperRegisterMedia*Listener` (`web.rs`: `set_media_listeners`, `forward_media`) | status, properties, thumbnail (PNG data URL and colours), playback and timeline listeners, only what changed; a listener registered late receives the latest event of its kind |
+
+- Artwork is decoded off the render thread, kept within 512 px and re-encoded as PNG; `http(s)` artwork is never downloaded (nothing leaves the machine). The colours of scripts and pages come from the same function (`lumenwall_web::media::MediaEvent::thumbnail_from_png`), once per artwork.
+- Tests: the cover's lifecycle on the GPU (creation on first use, change of cover, same cover, no art, memory given back), no cost for scenes without thumbnails, and an ignored headless render of 3372348904 with the media tests' fake source (no real player).
+- Not done: playback control (play/pause/next from a wallpaper). Not tested: a playing session's timeline events on Windows, session changes between players, every MPRIS player; the MPRIS bus glue was only type-checked (`lumenwall-audio` README, "Not tested").
+
 ## Not done yet
 
 | Feature | Current behaviour |
@@ -293,17 +310,14 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
 | Puppet extras (spec 08 §11) | Bone physics, inverse kinematics, blend rules, blend shapes (`MORPHING`) and `SKINNING_ALPHA` have no known format: not implemented. Particles attached to bones are not wired (images only). The SceneScript bone and layer API waits for `lumenwall-script` integration. |
 | Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumenwall-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
-| Web wallpapers on Windows | Refused (`unsupported_reason`): the Direct3D shared texture import is not written. |
+| Web wallpapers on Windows | Frames of a Vulkan device come from the web host's D3D11 shared textures (zero copy into the render target); a DX12 device has no import and uses shared-memory frames. On a machine with several GPUs the host is not yet told the render adapter's LUID. Mouse input and a desktop run (only headless rendering and the host alone were run) are not tested (`lumenwall-web` README). |
 | Web page audio and automute | `--volume`, `--silent` and pause apply; automute does not (the page's stream comes from the host process, which the detector would count as another application and mute the page in a loop), and that stream can automute the scene sounds of other outputs (spec 07 §15.6). |
-| `thisScene.createLayer` / `destroyLayer` / `sortLayer` | Neutral results (`undefined` / `false`): layers cannot be added to the render graph after load. Scripts that build layers in `init` (audio visualizers) fail there. |
-| Web wallpapers | Load error (`lumenwall-web` not integrated). |
 | Created layers | Puppet meshes are not created after load (the image gets the plain quad); scripts carried by a creation configuration do not run; a created particle system starts at the layer's origin but does not follow later `origin` writes (like the scene's own systems); 3D models (`.mdl`) cannot be created. |
-| Sound layers | Listed and found (`getLayer('jump')`), but `play()`/`stop()` are neutral: the scene does not drive the audio player yet. |
-| Media cover in scenes | Scene scripts get the media events (title, artist, album, playback, timeline, thumbnail state and colours) from the system's media session (GSMTC on Windows, MPRIS on Linux, followed only while a scene's scripts handle them); the cover image itself (`$mediaThumbnail` texture) is not bound yet. |
+| Sound layers | Listed and found (`getLayer('jump')`), but `play()`/`stop()`/`isPlaying` are neutral (`lumenwall-script` `hostobj.rs`): the scene does not drive the audio player yet. |
 | Script effects on fixed state | Effect visibility, particle `origin`/`scale`/`angles` (read by `lumenwall-particles` at creation), camera/bloom/clear-colour members: scripts can read and write them, the image is unchanged. |
 | `localStorage` | In memory (not persisted between runs). |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
-| Playlist transitions | Playlists run in the daemon (`lumenwall` README, Playlists): each change is a plan reload of the target, a cut. Wallpaper Engine's `transition` (blend into the next item) needs the old and new renderers alive at once and a blend pass: not done. |
+| Playlist transitions | Playlists run in the daemon (`lumenwall` README, "Playlists"; the app lists, starts and steps them): the engine only receives a plan reload of the target, a cut. Wallpaper Engine's `transition` (blend into the next item) needs the old and new renderers alive at once and a blend pass: not done. |
 | Plan reload | Wallpapers, layout, fps, audio, pause policy, GPU release delay and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A plan received while the GPU is released restores it first (≈ 0.2 s), even when nothing needs drawing. A video applied to a device created without decode queues recreates the device (below): the other targets are rebuilt too (scripts restart, web pages reload), and a video that fails to open then leaves its target in error instead of keeping the previous wallpaper. |
 | Screenshot formats | PNG data whatever the extension. |
 
