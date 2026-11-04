@@ -919,22 +919,40 @@ fn layers_added_after_build() {
     assert_eq!(px(&d, 32, 16, 16), [0, 0, 255, 255], "layer on top");
     assert_eq!(px(&d, 32, 2, 2), [255, 0, 0, 255], "base around it");
 
-    // Reordering re-records bundles but creates no other GPU object.
-    let before = ctx.resources_created();
+    // Reordering re-records bundles but creates no other GPU object. Recorded directly in
+    // Vulkan the frame has no bundle: a reorder creates nothing at all, neither wgpu nor
+    // wgpu-hal objects (framebuffers and render passes come from the graph's caches).
+    let direct_objects = || scene_objects(&scene);
+    let before = (ctx.resources_created(), direct_objects());
     scene.set_ops(place(true));
     scene.render(ctx);
-    let created = ctx.resources_created() - before;
+    let created = ctx.resources_created() - before.0;
     assert_eq!(
         px(&read(ctx, &scene, &s.st), 32, 16, 16),
         [255, 0, 0, 255],
         "layer under"
     );
-    assert_eq!(created, 1, "one bundle re-recorded");
-    // The same order again reuses every bundle.
-    let before = ctx.resources_created();
+    if scene.records_direct() {
+        assert_eq!(created, 0, "no wgpu object for a reorder (direct path)");
+        assert_eq!(
+            scene_objects(&scene),
+            before.1,
+            "no wgpu-hal object for a reorder (direct path)"
+        );
+    } else {
+        assert_eq!(created, 1, "one bundle re-recorded");
+    }
+    // The same order again reuses every bundle (every cached object on the direct path).
+    let before = (ctx.resources_created(), scene_objects(&scene));
     scene.set_ops(place(true));
     scene.render(ctx);
-    assert_eq!(ctx.resources_created(), before);
+    assert_eq!(ctx.resources_created(), before.0);
+    assert_eq!(scene_objects(&scene), before.1);
+}
+
+/// wgpu-hal objects alive in a scene recorded directly in Vulkan (0 on the wgpu path).
+fn scene_objects(scene: &RenderScene) -> i64 {
+    scene.direct_stats().map_or(0, |s| s.objects)
 }
 
 /// The wgpu pipeline cache is written to disk (Vulkan only).

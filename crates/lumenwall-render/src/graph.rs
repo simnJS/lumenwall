@@ -5,8 +5,13 @@
 //! groups, hazard copies, render-pass grouping and render bundles for frozen
 //! passes. A frame then performs at most one `write_buffer` and records the
 //! precomputed segments, with no allocation and no GPU object creation.
+//!
+//! On a Vulkan device the frame is recorded directly in Vulkan ([`crate::hal`]): the same
+//! segments, pipelines and bind groups created through wgpu-hal, replayed without wgpu-core's
+//! per-pass validation and tracking. Direct3D 12, `LUMENWALL_DIRECT_VULKAN=0`,
+//! [`SceneBuilder::set_recording`] and anything wgpu-hal refuses keep the wgpu path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::blend::{BlendMode, CullMode, FRONT_FACE, WriteMask};
@@ -17,6 +22,10 @@ use crate::dynbuf::{
     UniformSlot, UniformType, VertexRange, frame_globals, patches_for,
 };
 use crate::error::{RenderError, Result};
+use crate::hal::{
+    DirectGraph, DrawCall, DrawStep, FrameState, PipelineSpec, Recording, SlotView, Step,
+    VertexBuffer, WgpuReason,
+};
 use crate::math::{SKIN_VERTEX_SIZE, SkinVertex, VERTEX_SIZE, Vertex};
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
 use crate::targets::{
@@ -155,6 +164,7 @@ struct StaticMesh {
 struct DepthBuffer {
     target: RtId,
     size: (u32, u32),
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     _memory: MemoryToken,
 }
@@ -179,6 +189,7 @@ fn create_depth(ctx: &GpuContext, target: RtId, size: (u32, u32)) -> DepthBuffer
         target,
         size,
         view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        texture,
         _memory: ctx
             .memory()
             .track(u64::from(size.0.max(1)) * u64::from(size.1.max(1)) * 4),
@@ -382,6 +393,11 @@ pub struct SceneBuilder<'c> {
     live: Option<&'c mut RenderScene>,
     /// Id of the first pass added by this builder (passes of the extended scene come first).
     pass_base: u32,
+    /// `Ok` while the scene may record directly in Vulkan (then the final naga module of each
+    /// shader is kept for wgpu-hal).
+    direct: std::result::Result<(), WgpuReason>,
+    /// `(shader id, final module, validation info)` of the shaders added, for wgpu-hal.
+    direct_modules: Vec<(usize, naga::Module, naga::valid::ModuleInfo)>,
 }
 
 /// Passes and frame operations added by [`RenderScene::extend`]. The operations are not
@@ -547,6 +563,19 @@ impl<'c> SceneBuilder<'c> {
             scene_size,
             live: None,
             pass_base: 0,
+            direct: crate::hal::choose(Recording::from_env(), ctx.adapter().get_info().backend),
+            direct_modules: Vec::new(),
+        }
+    }
+
+    /// How the built scene records its frames ([`Recording::Auto`] by default, unless
+    /// `LUMENWALL_DIRECT_VULKAN=0`). Call before adding shaders: [`Recording::Auto`] set later
+    /// cannot make shaders already added usable by the direct path.
+    pub fn set_recording(&mut self, recording: Recording) {
+        self.direct = crate::hal::choose(recording, self.ctx.adapter().get_info().backend)
+            .and(self.direct);
+        if self.direct.is_err() {
+            self.direct_modules.clear();
         }
     }
 
@@ -577,9 +606,25 @@ impl<'c> SceneBuilder<'c> {
     /// Compile a shader (reflection, clip fix, validation). An error means the
     /// object using it must be dropped (spec 03 §10.4); the scene goes on.
     pub fn add_shader(&mut self, desc: ShaderDesc) -> Result<ShaderId> {
+        // The direct path hands wgpu-hal the module wgpu-core receives: clip fix applied,
+        // validated. A module it cannot prepare sends the scene to wgpu at build.
+        let direct = self.direct.is_ok().then(|| {
+            let mut module = desc.module.clone();
+            if desc.upstream_clip_space {
+                crate::shader::apply_clip_space_fix(&mut module, &desc.vertex_entry).ok()?;
+            }
+            let info = crate::shader::validate(&module, &desc.label).ok()?;
+            Some((module, info))
+        });
         let s = crate::shader::compile(self.ctx, desc)?;
         self.shaders.push(s);
-        Ok(ShaderId(self.shaders.len() as u32 - 1))
+        let id = self.shaders.len() - 1;
+        match direct {
+            Some(Some((module, info))) => self.direct_modules.push((id, module, info)),
+            Some(None) => self.direct = Err(WgpuReason::Unsupported),
+            None => {}
+        }
+        Ok(ShaderId(id as u32))
     }
 
     #[must_use]
@@ -831,6 +876,10 @@ impl<'c> SceneBuilder<'c> {
             .map(|&t| create_depth(ctx, t, self.targets.get(t).size()))
             .collect();
         let mut scene = RenderScene {
+            direct: None,
+            direct_pipelines: HashMap::new(),
+            wgpu_reason: None,
+            textures_written: false,
             default_texture: default_texture(ctx),
             default_volume,
             depths,
@@ -866,6 +915,7 @@ impl<'c> SceneBuilder<'c> {
             aliased: !alias.shares.is_empty(),
             unshare_pending: false,
         };
+        scene.start_direct(ctx, self.direct, std::mem::take(&mut self.direct_modules));
 
         let mut pipelines: HashMap<PipelineKey, wgpu::RenderPipeline> = HashMap::new();
         for rec in &self.passes {
@@ -886,8 +936,13 @@ impl<'c> SceneBuilder<'c> {
         // Kept for passes added later (RenderScene::extend): modules and pipelines are reused.
         scene.shaders = std::mem::take(&mut self.shaders);
         scene.pipelines = pipelines;
+        if scene.direct.is_none() && scene.passes.iter().any(|p| p.pipeline.is_none()) {
+            // Direct path abandoned while compiling: the passes compiled for it get wgpu pipelines.
+            scene.ensure_wgpu(ctx)?;
+        }
         scene.analyse_ops();
         scene.rebuild_bindings(ctx)?;
+        scene.log_recording();
         Ok(scene)
     }
 
@@ -1101,6 +1156,32 @@ impl<'c> SceneBuilder<'c> {
             scene.bundles_stale = true;
             scene.bundle_runs.clear();
         }
+        // Direct path: wgpu-hal modules of the new shaders, uniform group over a new buffer.
+        if let (Some(_), Err(r)) = (&scene.direct, self.direct) {
+            scene.abandon_direct(&format!("a shader added to the scene cannot be prepared ({r:?})"));
+        }
+        if let Some(d) = &mut scene.direct {
+            let mut failed = None;
+            for (id, module, info) in std::mem::take(&mut self.direct_modules) {
+                if let Err(e) = d.add_module(id, module, info) {
+                    failed = Some(e.0);
+                    break;
+                }
+            }
+            if failed.is_none()
+                && rebound
+                && let Err(e) = d.set_uniform_group(
+                    scene.dynbuf.buffer(),
+                    scene.dynbuf.binding_size(),
+                    frame_globals::SIZE,
+                )
+            {
+                failed = Some(e.0);
+            }
+            if let Some(f) = failed {
+                scene.abandon_direct(&f);
+            }
+        }
         if !self.indices.is_empty() || !self.skins.is_empty() {
             scene.shaders = shaders;
             return Err(RenderError::Pass {
@@ -1138,6 +1219,15 @@ impl<'c> SceneBuilder<'c> {
         for i in first..scene.passes.len() {
             scene.hazard_for(ctx, i);
             scene.bind_groups_for(ctx, i);
+        }
+        if scene.direct.is_none()
+            && scene
+                .passes
+                .iter()
+                .any(|p| p.pipeline.is_none() || p.bind_groups.is_empty())
+        {
+            // Abandoned during this extension: the passes made for the direct path get theirs.
+            let _ = scene.ensure_wgpu(ctx);
         }
         scene.dirty = true;
         compiled?;
@@ -1225,6 +1315,19 @@ fn uniform_entry(binding: u32, dynamic: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Everything a pipeline is created from (both paths).
+struct PipelinePlan {
+    key: PipelineKey,
+    buffers: Vec<VertexBuffer>,
+    /// Vertex buffer slots (≥ 1) fed with defaults: `(slot, integer?)`.
+    unfed: Vec<(u32, bool)>,
+    primitive: wgpu::PrimitiveState,
+    depth_stencil: Option<wgpu::DepthStencilState>,
+    target: wgpu::ColorTargetState,
+    /// `(slots, volume slots)` of the shader.
+    layout: (u8, u8),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     shader: ShaderId,
@@ -1247,9 +1350,14 @@ struct CompiledPass {
     shader: ShaderId,
     desc: PassDesc,
     uniform: Option<UniformBlock>,
-    pipeline: wgpu::RenderPipeline,
-    /// One per variant (at least one).
+    /// wgpu path (`None` while the scene records directly in Vulkan).
+    pipeline: Option<wgpu::RenderPipeline>,
+    /// Direct path: index of the wgpu-hal pipeline.
+    direct_pipeline: Option<usize>,
+    /// wgpu path: one per variant (empty while the scene records directly in Vulkan).
     bind_groups: Vec<wgpu::BindGroup>,
+    /// Slot-0 variants (at least one).
+    variants: usize,
     variant: usize,
     /// Vertex buffer slots (≥ 1) fed with defaults: `(slot, integer?)`.
     unfed: Vec<(u32, bool)>,
@@ -1265,6 +1373,59 @@ struct CompiledPass {
 enum Item {
     Bundle(usize),
     Pass(usize),
+}
+
+/// What one texture slot of a pass binds (bindings `2 * slot` and `2 * slot + 1`).
+struct BoundSlot<'a> {
+    slot: u32,
+    view: &'a wgpu::TextureView,
+    sampler: SamplerKey,
+    /// Sampled as a volume (no anisotropy).
+    volume: bool,
+    /// The render target behind the view.
+    target: Option<RtId>,
+}
+
+/// Per-frame state the direct path reads while recording.
+struct FrameView<'a> {
+    passes: &'a [CompiledPass],
+    streams: &'a [VertexStream],
+}
+
+impl FrameState for FrameView<'_> {
+    fn variant(&self, pass: u32) -> usize {
+        self.passes.get(pass as usize).map_or(0, |p| p.variant)
+    }
+
+    fn stream_indices(&self, stream: u32) -> u32 {
+        self.streams
+            .get(stream as usize)
+            .map_or(0, |s| s.index_count)
+    }
+}
+
+/// Command buffers of a frame recorded directly in Vulkan
+/// ([`RenderScene::encode_frame`]): the caller's commands up to the scene with the frame's
+/// uploads, then the scene. Empty on the wgpu path (everything went into the caller's encoder).
+#[derive(Default)]
+pub struct FrameCommands {
+    buffers: [Option<wgpu::CommandBuffer>; 2],
+}
+
+impl FrameCommands {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.buffers.iter().all(Option::is_none)
+    }
+}
+
+impl IntoIterator for FrameCommands {
+    type Item = wgpu::CommandBuffer;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<wgpu::CommandBuffer>, 2>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.buffers.into_iter().flatten()
+    }
 }
 
 /// GPU time of one render pass or copy of a frame ([`RenderScene::profile_frame`]).
@@ -1346,6 +1507,15 @@ impl<'a> Recorder<'a> for wgpu::RenderBundleEncoder<'a> {
 
 /// A compiled scene graph ready to render frames.
 pub struct RenderScene {
+    /// Direct Vulkan recording; `None` on the wgpu path. First field: dropped (after a GPU
+    /// wait) before the resources its frames used.
+    direct: Option<DirectGraph>,
+    /// wgpu-hal pipelines by key (direct path).
+    direct_pipelines: HashMap<PipelineKey, usize>,
+    /// Why the scene records through wgpu (`None` on the direct path).
+    wgpu_reason: Option<WgpuReason>,
+    /// [`Self::mark_dirty`] since the last frame: textures may have been written by the queue.
+    textures_written: bool,
     targets: RenderTargetPool,
     textures: Vec<GpuTexture>,
     default_texture: GpuTexture,
@@ -1410,32 +1580,7 @@ impl RenderScene {
         let (slots, volumes) = key;
         let uniform_layout = &self.uniform_layout;
         self.texture_layouts.entry(key).or_insert_with(|| {
-            let mut entries = Vec::new();
-            for n in 0..MAX_SLOTS as u32 {
-                if slots & (1 << n) == 0 {
-                    continue;
-                }
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: 2 * n,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: if volumes & (1 << n) == 0 {
-                            wgpu::TextureViewDimension::D2
-                        } else {
-                            wgpu::TextureViewDimension::D3
-                        },
-                        multisampled: false,
-                    },
-                    count: None,
-                });
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: 2 * n + 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                });
-            }
+            let entries = crate::hal::texture_layout_entries(slots, volumes);
             let bgl = ctx
                 .device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1454,14 +1599,13 @@ impl RenderScene {
         })
     }
 
-    fn compile_pass(
-        &mut self,
+    /// Vertex layouts, states and cache key of the pipeline of a pass (both paths).
+    fn pipeline_plan(
+        &self,
         ctx: &GpuContext,
         shader: &PassShader,
-        rec: &PassRecord,
-        cache: &mut HashMap<PipelineKey, wgpu::RenderPipeline>,
-    ) -> Result<CompiledPass> {
-        let desc = &rec.desc;
+        desc: &PassDesc,
+    ) -> Result<PipelinePlan> {
         let iface = shader.interface();
         let err = |reason: String| RenderError::Pass {
             label: desc.label.clone(),
@@ -1498,6 +1642,21 @@ impl RenderScene {
         let mut main_attrs = Vec::new();
         let mut skin_attrs = Vec::new();
         let mut unfed_attrs = Vec::new();
+        let unfed_attr = |location, attr: VertexAttr| {
+            let (components, kind) = match attr {
+                VertexAttr::Position => (3, ScalarKind::Float),
+                VertexAttr::TexCoord => (2, ScalarKind::Float),
+                VertexAttr::Unfed { components, kind } => (components, kind),
+            };
+            (
+                wgpu::VertexAttribute {
+                    format: unfed_format(kind, components),
+                    offset: 0,
+                    shader_location: location,
+                },
+                kind != ScalarKind::Float,
+            )
+        };
         for input in &iface.vertex_inputs {
             if let Some(mesh) = mesh {
                 let name = iface.vertex_input_name(input.location).unwrap_or("");
@@ -1507,21 +1666,9 @@ impl RenderScene {
                         offset: u64::from(a.offset),
                         shader_location: input.location,
                     });
-                    continue;
+                } else {
+                    unfed_attrs.push(unfed_attr(input.location, input.attr));
                 }
-                let (components, kind) = match input.attr {
-                    VertexAttr::Position => (3, ScalarKind::Float),
-                    VertexAttr::TexCoord => (2, ScalarKind::Float),
-                    VertexAttr::Unfed { components, kind } => (components, kind),
-                };
-                unfed_attrs.push((
-                    [wgpu::VertexAttribute {
-                        format: unfed_format(kind, components),
-                        offset: 0,
-                        shader_location: input.location,
-                    }],
-                    kind != ScalarKind::Float,
-                ));
                 continue;
             }
             if skinned
@@ -1550,21 +1697,9 @@ impl RenderScene {
                         offset: u64::from(a.offset_floats) * 4,
                         shader_location: input.location,
                     });
-                    continue;
+                } else {
+                    unfed_attrs.push(unfed_attr(input.location, input.attr));
                 }
-                let (components, kind) = match input.attr {
-                    VertexAttr::Position => (3, ScalarKind::Float),
-                    VertexAttr::TexCoord => (2, ScalarKind::Float),
-                    VertexAttr::Unfed { components, kind } => (components, kind),
-                };
-                unfed_attrs.push((
-                    [wgpu::VertexAttribute {
-                        format: unfed_format(kind, components),
-                        offset: 0,
-                        shader_location: input.location,
-                    }],
-                    kind != ScalarKind::Float,
-                ));
                 continue;
             }
             match input.attr {
@@ -1578,15 +1713,8 @@ impl RenderScene {
                     offset: 12,
                     shader_location: input.location,
                 }),
-                VertexAttr::Unfed { components, kind } => {
-                    unfed_attrs.push((
-                        [wgpu::VertexAttribute {
-                            format: unfed_format(kind, components),
-                            offset: 0,
-                            shader_location: input.location,
-                        }],
-                        kind != ScalarKind::Float,
-                    ));
+                VertexAttr::Unfed { .. } => {
+                    unfed_attrs.push(unfed_attr(input.location, input.attr));
                 }
             }
         }
@@ -1612,126 +1740,262 @@ impl RenderScene {
             .iter()
             .any(|d| d.target == desc.target)
             .then_some(desc.depth);
-        let mut layouts = vec![Some(wgpu::VertexBufferLayout {
-            array_stride: stride,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &main_attrs,
-        })];
+        let mut buffers = vec![VertexBuffer {
+            stride,
+            step: wgpu::VertexStepMode::Vertex,
+            attributes: main_attrs,
+        }];
         if skinned {
-            layouts.push(Some(wgpu::VertexBufferLayout {
-                array_stride: u64::from(SKIN_VERTEX_SIZE),
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &skin_attrs,
-            }));
-        }
-        for (a, _) in &unfed_attrs {
-            // Instance step with a single instance: every vertex reads element 0.
-            layouts.push(Some(wgpu::VertexBufferLayout {
-                array_stride: 16,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: a,
-            }));
+            buffers.push(VertexBuffer {
+                stride: u64::from(SKIN_VERTEX_SIZE),
+                step: wgpu::VertexStepMode::Vertex,
+                attributes: skin_attrs,
+            });
         }
         let unfed = unfed_attrs
             .iter()
             .enumerate()
             .map(|(i, (_, int))| (i as u32 + first_unfed, *int))
             .collect();
+        for (a, _) in unfed_attrs {
+            // Instance step with a single instance: every vertex reads element 0.
+            buffers.push(VertexBuffer {
+                stride: 16,
+                step: wgpu::VertexStepMode::Instance,
+                attributes: vec![a],
+            });
+        }
+        // Passes into a target with a depth buffer clip against the near and far planes like
+        // Wallpaper Engine's 3D passes; the others never discard geometry for its depth.
+        let unclipped = ctx.caps().unclipped_depth && depth.is_none();
+        Ok(PipelinePlan {
+            key: PipelineKey {
+                shader: desc.shader,
+                blend: desc.blend,
+                write_mask: desc.write_mask,
+                cull: desc.cull,
+                stream_layout: layout_key,
+                skinned,
+                mesh_layout,
+                front_face: desc.front_face,
+                depth,
+            },
+            buffers,
+            unfed,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: desc.front_face,
+                cull_mode: desc.cull.face(),
+                // Without a depth buffer, never discard geometry for its depth (spec 04 Q4).
+                unclipped_depth: unclipped,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: depth.map(|d| wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(d.write),
+                depth_compare: Some(if d.test {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            target: wgpu::ColorTargetState {
+                format: RT_FORMAT,
+                blend: desc.blend.state(),
+                write_mask: desc.write_mask.writes(),
+            },
+            layout: (iface.slots, iface.volume_slots),
+        })
+    }
 
-        let key = PipelineKey {
-            shader: desc.shader,
-            blend: desc.blend,
-            write_mask: desc.write_mask,
-            cull: desc.cull,
-            stream_layout: layout_key,
-            skinned,
-            mesh_layout,
-            front_face: desc.front_face,
-            depth,
+    /// The wgpu pipeline of a plan, from the cache or created.
+    fn wgpu_pipeline(
+        &mut self,
+        ctx: &GpuContext,
+        shader: &PassShader,
+        plan: &PipelinePlan,
+        label: &str,
+        cache: &mut HashMap<PipelineKey, wgpu::RenderPipeline>,
+    ) -> Result<wgpu::RenderPipeline> {
+        if let Some(p) = cache.get(&plan.key) {
+            return Ok(p.clone());
+        }
+        let (_, pl) = self.texture_layout(ctx, plan.layout);
+        let pl = pl.clone();
+        let buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> = plan
+            .buffers
+            .iter()
+            .map(|b| {
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: b.stride,
+                    step_mode: b.step,
+                    attributes: &b.attributes,
+                })
+            })
+            .collect();
+        let scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let p = ctx
+            .device()
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader.module,
+                    entry_point: Some(&shader.vertex_entry),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &buffers,
+                },
+                primitive: plan.primitive,
+                depth_stencil: plan.depth_stencil.clone(),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader.module,
+                    entry_point: Some(&shader.fragment_entry),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(plan.target.clone())],
+                }),
+                multiview_mask: None,
+                cache: ctx.pipeline_cache(),
+            });
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            return Err(RenderError::Validation {
+                label: label.to_owned(),
+                message: e.to_string(),
+            });
+        }
+        ctx.note_resources(1);
+        cache.insert(plan.key, p.clone());
+        Ok(p)
+    }
+
+    /// The direct (wgpu-hal) pipeline of a plan, from the cache or created; `None` sends the
+    /// scene back to wgpu.
+    fn direct_pipeline(&mut self, shader: &PassShader, plan: &PipelinePlan) -> Option<usize> {
+        if let Some(i) = self.direct_pipelines.get(&plan.key) {
+            return Some(*i);
+        }
+        let d = self.direct.as_mut()?;
+        let spec = PipelineSpec {
+            shader: plan.key.shader.0 as usize,
+            vertex_entry: &shader.vertex_entry,
+            fragment_entry: &shader.fragment_entry,
+            layout: plan.layout,
+            buffers: &plan.buffers,
+            primitive: plan.primitive,
+            depth_stencil: plan.depth_stencil.clone(),
+            target: plan.target.clone(),
         };
-        let pipeline = if let Some(p) = cache.get(&key) {
-            p.clone()
-        } else {
-            // Passes into a target with a depth buffer clip against the near and far planes like
-            // Wallpaper Engine's 3D passes; the others never discard geometry for its depth.
-            let unclipped = ctx.caps().unclipped_depth && depth.is_none();
-            let (_, pl) = self.texture_layout(ctx, (iface.slots, iface.volume_slots));
-            let pl = pl.clone();
-            let scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
-            let p = ctx
-                .device()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(&desc.label),
-                    layout: Some(&pl),
-                    vertex: wgpu::VertexState {
-                        module: &shader.module,
-                        entry_point: Some(&shader.vertex_entry),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        buffers: &layouts,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: desc.front_face,
-                        cull_mode: desc.cull.face(),
-                        // Without a depth buffer, never discard geometry for its depth (spec 04 Q4).
-                        unclipped_depth: unclipped,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        conservative: false,
-                    },
-                    depth_stencil: depth.map(|d| wgpu::DepthStencilState {
-                        format: DEPTH_FORMAT,
-                        depth_write_enabled: Some(d.write),
-                        depth_compare: Some(if d.test {
-                            wgpu::CompareFunction::LessEqual
-                        } else {
-                            wgpu::CompareFunction::Always
-                        }),
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader.module,
-                        entry_point: Some(&shader.fragment_entry),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: RT_FORMAT,
-                            blend: desc.blend.state(),
-                            write_mask: desc.write_mask.writes(),
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: ctx.pipeline_cache(),
-                });
-            if let Some(e) = pollster::block_on(scope.pop()) {
-                return Err(RenderError::Validation {
-                    label: desc.label.clone(),
-                    message: e.to_string(),
-                });
+        match d.add_pipeline(&spec) {
+            Ok(i) => {
+                self.direct_pipelines.insert(plan.key, i);
+                Some(i)
             }
-            ctx.note_resources(1);
-            cache.insert(key, p.clone());
-            p
-        };
+            Err(e) => {
+                self.abandon_direct(&format!("{}: {}", shader.label(), e.0));
+                None
+            }
+        }
+    }
 
-        let res0 = rec
-            .uniform
-            .and_then(|b| iface.field(RESOLUTION_NAMES[0]).map(|f| f.slot(b.offset)));
+    fn compile_pass(
+        &mut self,
+        ctx: &GpuContext,
+        shader: &PassShader,
+        rec: &PassRecord,
+        cache: &mut HashMap<PipelineKey, wgpu::RenderPipeline>,
+    ) -> Result<CompiledPass> {
+        let desc = &rec.desc;
+        let plan = self.pipeline_plan(ctx, shader, desc)?;
+        let direct = if self.direct.is_some() {
+            self.direct_pipeline(shader, &plan)
+        } else {
+            None
+        };
+        let pipeline = match direct {
+            Some(_) => None,
+            None => Some(self.wgpu_pipeline(ctx, shader, &plan, &desc.label, cache)?),
+        };
+        let res0 = rec.uniform.and_then(|b| {
+            shader
+                .interface()
+                .field(RESOLUTION_NAMES[0])
+                .map(|f| f.slot(b.offset))
+        });
         Ok(CompiledPass {
             label: desc.label.clone(),
             shader: desc.shader,
             desc: desc.clone(),
             uniform: rec.uniform,
             pipeline,
+            direct_pipeline: direct,
             bind_groups: Vec::new(),
+            variants: desc.slot0_variants.len().max(1),
             variant: 0,
-            unfed,
+            unfed: plan.unfed,
             hazard_scratch: None,
             res0,
             enabled: true,
             clear_first: false,
         })
+    }
+
+    /// Sends the scene back to the wgpu path for good (a wgpu-hal object could not be created,
+    /// or the frame cannot be planned): the direct graph is destroyed after a GPU wait, and the
+    /// caller creates the missing wgpu objects ([`Self::ensure_wgpu`]).
+    fn abandon_direct(&mut self, why: &str) {
+        if self.direct.take().is_some() {
+            tracing::warn!(target: "lumenwall_render::direct", "recording through wgpu: {why}");
+            self.direct_pipelines.clear();
+            self.wgpu_reason = Some(WgpuReason::Unsupported);
+            for p in &mut self.passes {
+                p.direct_pipeline = None;
+            }
+        }
+    }
+
+    /// Creates the wgpu pipelines, bind groups, segments and bundles a scene abandoned by the
+    /// direct path is missing.
+    fn ensure_wgpu(&mut self, ctx: &GpuContext) -> Result<()> {
+        let shaders = std::mem::take(&mut self.shaders);
+        let mut cache = std::mem::take(&mut self.pipelines);
+        let mut res = Ok(());
+        for i in 0..self.passes.len() {
+            if self.passes[i].pipeline.is_some() {
+                continue;
+            }
+            let Some(shader) = shaders.get(self.passes[i].shader.0 as usize) else {
+                continue;
+            };
+            let desc = self.passes[i].desc.clone();
+            match self
+                .pipeline_plan(ctx, shader, &desc)
+                .and_then(|plan| self.wgpu_pipeline(ctx, shader, &plan, &desc.label, &mut cache))
+            {
+                Ok(p) => self.passes[i].pipeline = Some(p),
+                Err(e) => {
+                    // The wgpu path would have refused the scene: the pass is left out.
+                    tracing::error!(target: "lumenwall_render", "{}: {e}", desc.label);
+                    self.passes[i].enabled = false;
+                    res = Err(e);
+                }
+            }
+        }
+        self.shaders = shaders;
+        self.pipelines = cache;
+        for i in 0..self.passes.len() {
+            if self.passes[i].bind_groups.is_empty() {
+                self.bind_groups_for(ctx, i);
+            }
+        }
+        self.bundle_runs.clear();
+        self.bundles.clear();
+        self.rebuild_frame(ctx);
+        self.dirty = true;
+        res
     }
 
     /// Detect cross-frame dependencies (feedback, accumulation).
@@ -1797,16 +2061,16 @@ impl RenderScene {
         };
     }
 
-    /// View and sampler of a slot. A `volume` slot (`texture_3d`) only takes a volume
-    /// texture, a 2D slot only 2D textures and targets; anything else reads the default
-    /// (0, 0, 0, 1) of the right dimension.
-    fn view_and_sampler(
+    /// View, sampler key and render target of a slot. A `volume` slot (`texture_3d`) only
+    /// takes a volume texture, a 2D slot only 2D textures and targets; anything else reads the
+    /// default (0, 0, 0, 1) of the right dimension. The target is the one behind the view (the
+    /// hazard scratch when the pass samples its own target).
+    fn slot_view(
         &self,
-        ctx: &GpuContext,
         b: Option<SlotBinding>,
         hazard: Option<(RtId, RtId)>,
         volume: bool,
-    ) -> (&wgpu::TextureView, wgpu::Sampler) {
+    ) -> (&wgpu::TextureView, SamplerKey, Option<RtId>) {
         let b = b.unwrap_or(SlotBinding {
             texture: TextureRef::Default,
             sampler: None,
@@ -1824,15 +2088,15 @@ impl RenderScene {
                 // Unreachable: the default volume exists when a shader has a volume slot.
                 (None, None) => &self.default_texture,
             };
-            let key = b.sampler.unwrap_or(tex.sampler_key());
-            return (tex.view(), ctx.volume_sampler(key));
+            return (tex.view(), b.sampler.unwrap_or(tex.sampler_key()), None);
         }
-        let (view, key) = match b.texture {
+        let (view, key, rt) = match b.texture {
             TextureRef::Texture(t) => match self.textures.get(t.0 as usize) {
-                Some(tex) if !tex.is_volume() => (tex.view(), tex.sampler_key()),
+                Some(tex) if !tex.is_volume() => (tex.view(), tex.sampler_key(), None),
                 _ => (
                     self.default_texture.view(),
                     self.default_texture.sampler_key(),
+                    None,
                 ),
             },
             TextureRef::Target(r) => {
@@ -1841,19 +2105,84 @@ impl RenderScene {
                     Some((target, scratch)) if target == r => scratch,
                     _ => r,
                 };
-                (self.targets.get(r).view(), key)
+                (self.targets.get(r).view(), key, Some(r))
             }
             TextureRef::Default => (
                 self.default_texture.view(),
                 self.default_texture.sampler_key(),
+                None,
             ),
         };
-        (view, ctx.sampler(b.sampler.unwrap_or(key)))
+        (view, b.sampler.unwrap_or(key), rt)
+    }
+
+    /// Bindings of each slot-0 variant of pass `i` (both paths).
+    fn pass_slots(&self, i: usize) -> Vec<Vec<BoundSlot<'_>>> {
+        let pass = &self.passes[i];
+        let iface = &self.interfaces[pass.shader.0 as usize];
+        let (slots_mask, volume_mask) = (iface.slots, iface.volume_slots);
+        let hazard = pass.hazard_scratch.map(|s| (pass.desc.target, s));
+        let variants: Vec<Option<TextureRef>> = if pass.desc.slot0_variants.is_empty() {
+            vec![None]
+        } else {
+            pass.desc.slot0_variants.iter().copied().map(Some).collect()
+        };
+        variants
+            .into_iter()
+            .map(|v| {
+                (0..MAX_SLOTS)
+                    .filter(|n| slots_mask & (1 << n) != 0)
+                    .map(|n| {
+                        let mut b = pass.desc.slots[n];
+                        if n == 0
+                            && let Some(t) = v
+                        {
+                            b = Some(SlotBinding {
+                                texture: t,
+                                sampler: b.and_then(|b| b.sampler),
+                            });
+                        }
+                        let volume = volume_mask & (1 << n) != 0;
+                        let (view, sampler, target) = self.slot_view(b, hazard, volume);
+                        BoundSlot {
+                            slot: n as u32,
+                            view,
+                            sampler,
+                            volume,
+                            target,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Every texture the scene owns (targets, textures, depth buffers).
+    fn owned_textures(&self) -> HashSet<wgpu::Texture> {
+        let mut owned: HashSet<wgpu::Texture> = self
+            .targets
+            .iter()
+            .map(|t| t.texture().clone())
+            .chain(self.textures.iter().map(|t| t.texture().clone()))
+            .chain(self.depths.iter().map(|d| d.texture.clone()))
+            .collect();
+        owned.insert(self.default_texture.texture().clone());
+        if let Some(v) = &self.default_volume {
+            owned.insert(v.texture().clone());
+        }
+        owned
     }
 
     /// Rebuild bind groups, hazard copies, segments and bundles. Call after
     /// any target reallocation or sampler change (event-driven, not per frame).
     pub fn rebuild_bindings(&mut self, ctx: &GpuContext) -> Result<()> {
+        // Direct path: the GPU finishes the recorded frames before what they use is replaced.
+        if self.direct.is_some() {
+            let owned = self.owned_textures();
+            if let Some(d) = &mut self.direct {
+                d.idle(&|t| owned.contains(t));
+            }
+        }
         // Depth buffers follow their target's size.
         for i in 0..self.depths.len() {
             let target = self.depths[i].target;
@@ -1869,9 +2198,15 @@ impl RenderScene {
         for i in 0..self.passes.len() {
             self.bind_groups_for(ctx, i);
         }
+        if self.direct.is_none() && self.passes.iter().any(|p| p.pipeline.is_none()) {
+            // Direct path abandoned while binding: its passes get wgpu pipelines.
+            self.ensure_wgpu(ctx)?;
+        }
         self.bundle_runs.clear();
-        self.build_segments();
-        self.build_bundles(ctx);
+        self.rebuild_frame(ctx);
+        if let Some(d) = &mut self.direct {
+            d.compact();
+        }
         self.bundles_stale = false;
         self.dirty = true;
         Ok(())
@@ -1908,60 +2243,81 @@ impl RenderScene {
         self.passes[i].hazard_scratch = scratch;
     }
 
-    /// Texture bind groups of pass `i` (one per slot-0 variant).
+    /// Texture bind groups of pass `i` (one per slot-0 variant), on the scene's path.
     fn bind_groups_for(&mut self, ctx: &GpuContext, i: usize) {
         let iface = &self.interfaces[self.passes[i].shader.0 as usize];
-        let (slots_mask, volume_mask) = (iface.slots, iface.volume_slots);
-        self.texture_layout(ctx, (slots_mask, volume_mask));
-        let pass = &self.passes[i];
-        let hazard = pass.hazard_scratch.map(|s| (pass.desc.target, s));
-        let variants: Vec<Option<TextureRef>> = if pass.desc.slot0_variants.is_empty() {
-            vec![None]
-        } else {
-            pass.desc.slot0_variants.iter().copied().map(Some).collect()
-        };
-        let (bgl, _) = &self.texture_layouts[&(slots_mask, volume_mask)];
-        let mut groups = Vec::with_capacity(variants.len());
-        for v in variants {
-            let mut views = Vec::new();
-            for n in 0..MAX_SLOTS {
-                if slots_mask & (1 << n) == 0 {
-                    continue;
+        let key = (iface.slots, iface.volume_slots);
+        if let Some(mut d) = self.direct.take() {
+            let result = {
+                let slots = self.pass_slots(i);
+                let views: Vec<Vec<SlotView<'_>>> = slots
+                    .iter()
+                    .map(|v| {
+                        v.iter()
+                            .map(|s| SlotView {
+                                slot: s.slot,
+                                view: s.view,
+                                sampler: s.sampler,
+                                volume: s.volume,
+                            })
+                            .collect()
+                    })
+                    .collect();
+                d.set_pass_groups(i, key, &views)
+            };
+            self.direct = Some(d);
+            match result {
+                Ok(()) => {
+                    let p = &mut self.passes[i];
+                    p.variant = p.variant.min(p.variants - 1);
+                    return;
                 }
-                let mut b = pass.desc.slots[n];
-                if n == 0
-                    && let Some(t) = v
-                {
-                    b = Some(SlotBinding {
-                        texture: t,
-                        sampler: b.and_then(|b| b.sampler),
+                Err(e) => {
+                    let label = self.passes[i].label.clone();
+                    self.abandon_direct(&format!("{label}: {}", e.0));
+                }
+            }
+        }
+        self.texture_layout(ctx, key);
+        let groups = {
+            let slots = self.pass_slots(i);
+            let (bgl, _) = &self.texture_layouts[&key];
+            let label = &self.passes[i].label;
+            let mut groups = Vec::with_capacity(slots.len());
+            for v in &slots {
+                let samplers: Vec<wgpu::Sampler> = v
+                    .iter()
+                    .map(|s| {
+                        if s.volume {
+                            ctx.volume_sampler(s.sampler)
+                        } else {
+                            ctx.sampler(s.sampler)
+                        }
+                    })
+                    .collect();
+                let mut entries = Vec::with_capacity(v.len() * 2);
+                for (s, sampler) in v.iter().zip(&samplers) {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 2 * s.slot,
+                        resource: wgpu::BindingResource::TextureView(s.view),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 2 * s.slot + 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     });
                 }
-                let volume = volume_mask & (1 << n) != 0;
-                views.push((n as u32, self.view_and_sampler(ctx, b, hazard, volume)));
+                groups.push(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: bgl,
+                    entries: &entries,
+                }));
+                ctx.note_resources(1);
             }
-            let mut entries = Vec::with_capacity(views.len() * 2);
-            for (n, (view, sampler)) in &views {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 2 * n,
-                    resource: wgpu::BindingResource::TextureView(view),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 2 * n + 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                });
-            }
-            groups.push(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&pass.label),
-                layout: bgl,
-                entries: &entries,
-            }));
-            ctx.note_resources(1);
-        }
-        self.passes[i].bind_groups = groups;
-        self.passes[i].variant = self.passes[i]
-            .variant
-            .min(self.passes[i].bind_groups.len() - 1);
+            groups
+        };
+        let p = &mut self.passes[i];
+        p.bind_groups = groups;
+        p.variant = p.variant.min(p.variants - 1);
     }
 
     /// Adds passes to the built scene (layers created after load, e.g. SceneScript
@@ -1997,6 +2353,11 @@ impl RenderScene {
             ops: Vec::new(),
             scene_size: self.scene_size,
             pass_base: self.passes.len() as u32,
+            direct: match self.wgpu_reason {
+                None => Ok(()),
+                Some(r) => Err(r),
+            },
+            direct_modules: Vec::new(),
             live: Some(self),
         };
         let r = f(&mut b);
@@ -2039,11 +2400,190 @@ impl RenderScene {
             }
             return;
         }
-        if self.bundles_stale {
-            self.build_segments();
-            self.build_bundles(ctx);
+        if self.bundles_stale || self.direct.as_ref().is_some_and(|d| !d.has_program()) {
+            self.rebuild_frame(ctx);
             self.bundles_stale = false;
         }
+    }
+
+    /// Segments, then the bundles (wgpu path) or the recorded frame (direct path).
+    fn rebuild_frame(&mut self, ctx: &GpuContext) {
+        self.build_segments();
+        if self.direct.is_none() {
+            self.build_bundles(ctx);
+            return;
+        }
+        if let Err(why) = self.build_program(ctx) {
+            self.abandon_direct(&why);
+            // Builds the bundles through `rebuild_frame` again, on the wgpu path.
+            if let Err(e) = self.ensure_wgpu(ctx) {
+                tracing::error!(target: "lumenwall_render", "back to wgpu: {e}");
+            }
+        }
+    }
+
+    /// The direct frame of the current segments.
+    fn build_program(&mut self, ctx: &GpuContext) -> std::result::Result<(), String> {
+        let Some(mut d) = self.direct.take() else {
+            return Ok(());
+        };
+        let r = self
+            .direct_steps()
+            .and_then(|steps| d.build_program(ctx, &steps).map_err(|e| e.0));
+        self.direct = Some(d);
+        r
+    }
+
+    /// The segments as the direct path records them.
+    fn direct_steps(&self) -> std::result::Result<Vec<Step<'_>>, String> {
+        let mut steps = Vec::with_capacity(self.segments.len());
+        for seg in &self.segments {
+            match seg {
+                Segment::Copy { src, dst } => {
+                    let (s, d) = (self.targets.get(*src), self.targets.get(*dst));
+                    let (sw, sh) = s.size();
+                    let (dw, dh) = d.size();
+                    steps.push(Step::Copy {
+                        src: s.texture(),
+                        dst: d.texture(),
+                        size: (sw.min(dw), sh.min(dh)),
+                    });
+                }
+                Segment::Render {
+                    target,
+                    clear,
+                    depth,
+                    items,
+                } => {
+                    let rt = self.targets.get(*target);
+                    let mut sampled: Vec<&wgpu::Texture> = Vec::new();
+                    let mut draws = Vec::with_capacity(items.len());
+                    for item in items {
+                        let Item::Pass(p) = *item else {
+                            return Err("render bundle on the direct path".into());
+                        };
+                        for v in self.pass_slots(p) {
+                            for s in v {
+                                if let Some(t) = s.target {
+                                    let t = self.targets.get(t).texture();
+                                    if !sampled.contains(&t) {
+                                        sampled.push(t);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(d) = self.direct_draw(p)? {
+                            draws.push(d);
+                        }
+                    }
+                    steps.push(Step::Render {
+                        target: rt.texture(),
+                        clear: *clear,
+                        depth: depth.map(|(d, c)| (&self.depths[d].texture, &self.depths[d].view, c)),
+                        sampled,
+                        draws,
+                    });
+                }
+            }
+        }
+        Ok(steps)
+    }
+
+    /// The draw of pass `p` (what [`Self::record`] does on the wgpu path); `None` for a mesh
+    /// without indices.
+    fn direct_draw(&self, p: usize) -> std::result::Result<Option<DrawStep<'_>>, String> {
+        let pass = &self.passes[p];
+        let pipeline = pass
+            .direct_pipeline
+            .ok_or_else(|| format!("{}: no wgpu-hal pipeline", pass.label))?;
+        let dynbuf = self.dynbuf.buffer();
+        let vertex_offset = u64::from(self.dynbuf.vertex_offset());
+        let mut vertex: Vec<(&wgpu::Buffer, u64)> = Vec::new();
+        let mut index = None;
+        let call = match pass.desc.geometry {
+            Geometry::Vertices(v) => {
+                vertex.push((dynbuf, vertex_offset));
+                DrawCall::Vertices {
+                    first: v.first,
+                    count: v.count,
+                }
+            }
+            Geometry::Indexed { vertices, indices } => {
+                let ib = self
+                    .index_buffer
+                    .as_ref()
+                    .ok_or_else(|| format!("{}: no index buffer", pass.label))?;
+                vertex.push((dynbuf, vertex_offset));
+                index = Some((ib, wgpu::IndexFormat::Uint16));
+                DrawCall::Indexed {
+                    first: indices.first,
+                    count: indices.count,
+                    base: vertices.first as i32,
+                }
+            }
+            Geometry::Skinned {
+                vertices,
+                indices,
+                skin,
+            } => {
+                let ib = self
+                    .index_buffer
+                    .as_ref()
+                    .ok_or_else(|| format!("{}: no index buffer", pass.label))?;
+                let sb = self
+                    .skin_buffer
+                    .as_ref()
+                    .ok_or_else(|| format!("{}: no skin buffer", pass.label))?;
+                // Both buffers start at the mesh: its indices are relative to its first vertex.
+                vertex.push((
+                    dynbuf,
+                    vertex_offset + u64::from(vertices.first * VERTEX_SIZE),
+                ));
+                vertex.push((sb, u64::from(skin.first * SKIN_VERTEX_SIZE)));
+                index = Some((ib, wgpu::IndexFormat::Uint16));
+                DrawCall::Indexed {
+                    first: indices.first,
+                    count: indices.count,
+                    base: 0,
+                }
+            }
+            Geometry::Stream(s) => {
+                let st = self
+                    .streams
+                    .get(s.0 as usize)
+                    .ok_or_else(|| format!("{}: unknown stream", pass.label))?;
+                vertex.push((&st.vertices, 0));
+                index = Some((&st.indices, wgpu::IndexFormat::Uint32));
+                DrawCall::Stream(s.0)
+            }
+            Geometry::Mesh(m) => {
+                let mesh = self
+                    .meshes
+                    .get(m.0 as usize)
+                    .ok_or_else(|| format!("{}: unknown mesh", pass.label))?;
+                if mesh.index_count == 0 {
+                    return Ok(None);
+                }
+                vertex.push((&mesh.vertices, 0));
+                index = Some((&mesh.indices, wgpu::IndexFormat::Uint16));
+                DrawCall::Indexed {
+                    first: 0,
+                    count: mesh.index_count,
+                    base: 0,
+                }
+            }
+        };
+        for &(_, int) in &pass.unfed {
+            vertex.push((&self.default_attrs, if int { 16 } else { 0 }));
+        }
+        Ok(Some(DrawStep {
+            pass: p as u32,
+            pipeline,
+            uniform_offset: pass.uniform.map_or(0, |u| u.offset),
+            vertex,
+            index,
+            call,
+        }))
     }
 
     fn build_segments(&mut self) {
@@ -2135,9 +2675,13 @@ impl RenderScene {
             },
             _ => None,
         };
-        r.pipeline(&pass.pipeline);
+        let (Some(pipeline), Some(group)) = (&pass.pipeline, pass.bind_groups.get(pass.variant))
+        else {
+            return;
+        };
+        r.pipeline(pipeline);
         r.bind_group(0, &self.uniform_bg, &[pass.uniform.map_or(0, |u| u.offset)]);
-        r.bind_group(1, &pass.bind_groups[pass.variant], &[]);
+        r.bind_group(1, group, &[]);
         if let Some(s) = stream {
             r.vertex_buffer(0, s.vertices.slice(..));
         } else if let Some(m) = mesh {
@@ -2332,7 +2876,7 @@ impl RenderScene {
         let Some(p) = self.passes.get_mut(pass.0 as usize) else {
             return;
         };
-        let v = variant.min(p.bind_groups.len().saturating_sub(1));
+        let v = variant.min(p.variants.saturating_sub(1));
         if p.variant == v {
             return;
         }
@@ -2366,17 +2910,90 @@ impl RenderScene {
             }
         }
         if changed {
-            self.build_segments();
-            self.build_bundles(ctx);
+            self.rebuild_frame(ctx);
             self.bundles_stale = false;
             self.dirty = true;
         }
     }
 
     /// Something outside the uniform buffer changed (video frame written into
-    /// a texture, thumbnail loaded…).
+    /// a texture, thumbnail loaded…). Call it after every write into one of the scene's
+    /// textures through the queue (`GpuTexture::write_level0`): a scene recorded directly in
+    /// Vulkan then puts its textures back in their sampled state before the next frame.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.textures_written = true;
+    }
+
+    /// Whether the scene records its frames directly in Vulkan ([`crate::hal`]).
+    #[must_use]
+    pub fn records_direct(&self) -> bool {
+        self.direct.is_some()
+    }
+
+    /// Why the scene records through wgpu (`None` when it records directly in Vulkan).
+    #[must_use]
+    pub fn wgpu_reason(&self) -> Option<WgpuReason> {
+        self.wgpu_reason
+    }
+
+    /// Counters of the direct path (`None` on the wgpu path).
+    #[must_use]
+    pub fn direct_stats(&self) -> Option<crate::hal::DirectStats> {
+        self.direct.as_ref().map(DirectGraph::stats)
+    }
+
+    /// Sets up the direct path of a new scene (its wgpu-hal modules and uniform bind group).
+    fn start_direct(
+        &mut self,
+        ctx: &GpuContext,
+        allowed: std::result::Result<(), WgpuReason>,
+        modules: Vec<(usize, naga::Module, naga::valid::ModuleInfo)>,
+    ) {
+        let made = allowed.and_then(|()| {
+            let fail = |e: crate::hal::Unsupported| {
+                tracing::warn!(target: "lumenwall_render::direct", "recording through wgpu: {}", e.0);
+                WgpuReason::Unsupported
+            };
+            let mut d = DirectGraph::new(ctx).map_err(fail)?;
+            for (id, module, info) in modules {
+                d.add_module(id, module, info).map_err(fail)?;
+            }
+            d.set_uniform_group(
+                self.dynbuf.buffer(),
+                self.dynbuf.binding_size(),
+                frame_globals::SIZE,
+            )
+            .map_err(fail)?;
+            Ok(d)
+        });
+        match made {
+            Ok(d) => self.direct = Some(d),
+            Err(r) => self.wgpu_reason = Some(r),
+        }
+    }
+
+    /// Debug log of the path a built scene took.
+    fn log_recording(&self) {
+        match &self.direct {
+            Some(d) => {
+                let s = d.stats();
+                tracing::debug!(
+                    target: "lumenwall_render::direct",
+                    "recording directly in Vulkan: {} passes, {} render passes, {} draws, {} pipelines, {} image barriers",
+                    self.passes.len(),
+                    s.render_passes,
+                    s.draws,
+                    s.pipelines,
+                    s.barriers
+                );
+            }
+            None => tracing::debug!(
+                target: "lumenwall_render::direct",
+                "recording through wgpu ({:?})",
+                self.wgpu_reason
+            ),
+        }
     }
 
     /// Whether the next frame would differ from the last one. When `false`,
@@ -2397,8 +3014,27 @@ impl RenderScene {
         self.accumulates
     }
 
-    /// Upload the dirty uniforms (one `write_buffer`) and record the frame.
+    /// Upload the dirty uniforms and record the frame into `encoder`. A scene recorded
+    /// directly in Vulkan submits `encoder`'s commands so far (with the frame's uploads) and its
+    /// frame here, and gives the caller a fresh encoder for what follows (composition): use
+    /// [`Self::encode_frame`] to submit everything at once instead.
     pub fn encode(&mut self, ctx: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
+        let commands = self.encode_frame(ctx, encoder);
+        if !commands.is_empty() {
+            ctx.queue().submit(commands);
+        }
+    }
+
+    /// [`Self::encode`] without its submission. On the wgpu path the frame goes into `encoder`
+    /// and nothing is returned. On the direct path `encoder` (the caller's commands so far, then
+    /// the frame's uploads) and the scene's Vulkan frame are returned, in submission order, and
+    /// `encoder` is replaced with a fresh one for the commands that follow (composition):
+    /// `queue.submit(frame.into_iter().chain([encoder.finish()]))`.
+    pub fn encode_frame(
+        &mut self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> FrameCommands {
         let t0 = Instant::now();
         self.refresh(ctx);
         // The previous frame was submitted: its staging chunks come back once the GPU is done.
@@ -2424,8 +3060,41 @@ impl RenderScene {
         } else {
             self.settle_left = self.settle_left.saturating_sub(1);
         }
-        self.record_segments(encoder, None);
+        let commands = match &self.direct {
+            None => {
+                self.record_segments(encoder, None);
+                FrameCommands::default()
+            }
+            Some(d) => {
+                if std::mem::take(&mut self.textures_written) {
+                    // Textures written through the queue are in `COPY_DST` for wgpu-core: back
+                    // to their sampled state before the frame samples them.
+                    crate::hal::restore_textures(
+                        encoder,
+                        self.textures.iter().map(GpuTexture::texture),
+                    );
+                }
+                let next = ctx
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("lumenwall.frame"),
+                    });
+                let before = std::mem::replace(encoder, next).finish();
+                let frame = d.record(
+                    ctx.device(),
+                    &FrameView {
+                        passes: &self.passes,
+                        streams: &self.streams,
+                    },
+                    None,
+                );
+                FrameCommands {
+                    buffers: [Some(before), Some(frame)],
+                }
+            }
+        };
         self.last_encode = t0.elapsed();
+        commands
     }
 
     /// Records the frame's segments; with `queries`, timestamps around each one (indices `2i`
@@ -2520,6 +3189,60 @@ impl RenderScene {
             return None;
         }
         self.refresh(ctx);
+        let ms: Vec<f64> = match &self.direct {
+            Some(d) => {
+                self.dynbuf.flush(ctx.queue());
+                let uploads = ctx
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("lumenwall.profile"),
+                    })
+                    .finish();
+                d.profile(
+                    ctx,
+                    &FrameView {
+                        passes: &self.passes,
+                        streams: &self.streams,
+                    },
+                    uploads,
+                )?
+            }
+            None => self.profile_wgpu(ctx)?,
+        };
+        let mut out = Vec::with_capacity(self.segments.len());
+        for (seg, ms) in self.segments.iter().zip(ms) {
+            let (target, passes, first) = match seg {
+                Segment::Copy { dst, .. } => (*dst, 0, "copy".to_owned()),
+                Segment::Render { target, items, .. } => {
+                    let ids: Vec<usize> = items
+                        .iter()
+                        .flat_map(|i| match i {
+                            Item::Pass(p) => vec![*p],
+                            Item::Bundle(b) => {
+                                self.bundle_runs.get(*b).cloned().unwrap_or_default()
+                            }
+                        })
+                        .collect();
+                    let first = ids
+                        .first()
+                        .map_or_else(String::new, |&p| self.passes[p].label.clone());
+                    (*target, ids.len(), first)
+                }
+            };
+            let rt = self.targets.get(target);
+            out.push(SegmentTime {
+                target: rt.label().to_owned(),
+                size: rt.size(),
+                passes,
+                first_pass: first,
+                ms,
+            });
+        }
+        Some(out)
+    }
+
+    /// GPU milliseconds of each segment of one frame recorded through wgpu.
+    fn profile_wgpu(&mut self, ctx: &GpuContext) -> Option<Vec<f64>> {
         let device = ctx.device();
         let count = 2 * self.segments.len() as u32;
         let set = device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -2556,48 +3279,24 @@ impl RenderScene {
             bytemuck::cast_slice::<u8, u64>(&data).to_vec()
         };
         read.unmap();
-        let mut out = Vec::with_capacity(self.segments.len());
-        for (si, seg) in self.segments.iter().enumerate() {
-            let ms = ticks[2 * si + 1].saturating_sub(ticks[2 * si]) as f64 * period;
-            let (target, passes, first) = match seg {
-                Segment::Copy { dst, .. } => (*dst, 0, "copy".to_owned()),
-                Segment::Render { target, items, .. } => {
-                    let ids: Vec<usize> = items
-                        .iter()
-                        .flat_map(|i| match i {
-                            Item::Pass(p) => vec![*p],
-                            Item::Bundle(b) => {
-                                self.bundle_runs.get(*b).cloned().unwrap_or_default()
-                            }
-                        })
-                        .collect();
-                    let first = ids
-                        .first()
-                        .map_or_else(String::new, |&p| self.passes[p].label.clone());
-                    (*target, ids.len(), first)
-                }
-            };
-            let rt = self.targets.get(target);
-            out.push(SegmentTime {
-                target: rt.label().to_owned(),
-                size: rt.size(),
-                passes,
-                first_pass: first,
-                ms,
-            });
-        }
-        Some(out)
+        Some(
+            ticks
+                .chunks(2)
+                .map(|t| t[1].saturating_sub(t[0]) as f64 * period)
+                .collect(),
+        )
     }
 
-    /// Encode and submit in one command buffer (convenience).
+    /// Encode and submit (convenience): one submission on either path.
     pub fn render(&mut self, ctx: &GpuContext) -> wgpu::SubmissionIndex {
         let mut encoder = ctx
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("lumenwall.frame"),
             });
-        self.encode(ctx, &mut encoder);
-        ctx.queue().submit(std::iter::once(encoder.finish()))
+        let frame = self.encode_frame(ctx, &mut encoder);
+        ctx.queue()
+            .submit(frame.into_iter().chain(std::iter::once(encoder.finish())))
     }
 
     /// CPU time of the last [`Self::encode`].
