@@ -348,7 +348,10 @@ instead of 0.19–0.21 ms (before presentation; the final desktop bench measures
 is wgpu-core's two command buffers per render pass (part E's probe: +5 MiB for 65 command buffers per frame).
 
 Visual: headless renders on both paths (2560×1440, particles off, frames 0 and 44) are byte-identical PNGs on the
-8 scenes of part A and on the installed default projects, 3D scenes with depth buffers and meshes included
-(arsenal, audiophile, fantasticcar, techno, demon_core, dna_fragment, neon_sunset, ricepod, retro). No Vulkan
+8 scenes of part A and on 15 of the 16 installed default scenes, 3D scenes with depth buffers and meshes
+included (arsenal, audiophile, beach, deep_space, demon_core, dino_run, dna_fragment, eagleflag, fantasticcar,
+neon_sunset, razer_vortex, retro, ricepod, shimmering_particles, techno). razer_bedroom differs in one
+520×476-pixel region on every run, on either path alike (wgpu against wgpu: 2.46 % of the pixels, direct against
+direct: 2.44 %, same region; identical elsewhere): that part of the scene is not deterministic. No Vulkan
 validation layer is installed on the measuring PC: not run. Linux records through the same code (Vulkan); not
 measured there.
