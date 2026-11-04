@@ -30,6 +30,7 @@ pub mod headless;
 pub mod image;
 pub mod loader;
 pub mod math;
+pub mod schedule;
 pub mod shader;
 pub mod stats;
 pub mod surface;

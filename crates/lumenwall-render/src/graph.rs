@@ -739,7 +739,9 @@ impl<'c> SceneBuilder<'c> {
     pub fn build(mut self) -> Result<RenderScene> {
         let ctx = self.ctx;
         let device = ctx.device();
-        // GPU memory of the render targets, transient ones sharing textures.
+        // Fewer render passes (chains first, scene draws together), then GPU memory of the
+        // render targets, transient ones sharing textures over the new lifetimes.
+        self.reorder_ops();
         let alias = self.alias_plan();
         self.targets.materialize(ctx, &alias.shares, &alias.sizes);
 
@@ -889,6 +891,115 @@ impl<'c> SceneBuilder<'c> {
         Ok(scene)
     }
 
+    /// Render targets a pass samples: bound in a slot its shader declares (a material may
+    /// name `_rt_FullFrameBuffer` for a slot the compiled combination never samples; the
+    /// graph does not bind it, so it is no dependency), or among its slot-0 variants.
+    fn sampled_targets<'a>(&'a self, rec: &'a PassRecord) -> impl Iterator<Item = RtId> + 'a {
+        let mask = self
+            .shaders
+            .get(rec.desc.shader.0 as usize)
+            .map_or(0, |s| s.interface().slots);
+        let slot0 = mask & 1 != 0;
+        rec.desc
+            .slots
+            .iter()
+            .enumerate()
+            .filter(move |(n, _)| mask & (1 << n) != 0)
+            .filter_map(|(_, b)| b.map(|b| b.texture))
+            .chain(
+                rec.desc
+                    .slot0_variants
+                    .iter()
+                    .copied()
+                    .filter(move |_| slot0),
+            )
+            .filter_map(|t| match t {
+                TextureRef::Target(r) => Some(r),
+                _ => None,
+            })
+    }
+
+    /// What each frame operation reads and writes (targets only).
+    fn op_accesses(&self) -> Vec<crate::schedule::OpAccess> {
+        self.ops
+            .iter()
+            .map(|op| match *op {
+                Op::Clear { target, .. } => crate::schedule::OpAccess {
+                    reads: Vec::new(),
+                    writes: Some(target.0),
+                },
+                Op::Copy { src, dst } => crate::schedule::OpAccess {
+                    reads: vec![src.0],
+                    writes: Some(dst.0),
+                },
+                Op::Draw(p) => {
+                    let Some(rec) =
+                        p.0.checked_sub(self.pass_base)
+                            .and_then(|l| self.passes.get(l as usize))
+                    else {
+                        return crate::schedule::OpAccess::default();
+                    };
+                    crate::schedule::OpAccess {
+                        reads: self.sampled_targets(rec).map(|r| r.0).collect(),
+                        writes: Some(rec.desc.target.0),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Reorders the frame operations of a new scene whose owner marked transient targets
+    /// ([`crate::schedule`]): chains first, draws into the other targets (the scene) together.
+    fn reorder_ops(&mut self) {
+        if self.live.is_some() || !self.targets.has_transient() || self.ops.len() < 3 {
+            return;
+        }
+        // `LUMENWALL_REORDER_BUDGET_MIB` (measurements; 0 keeps the spec order).
+        let budget_mib = std::env::var("LUMENWALL_REORDER_BUDGET_MIB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(REORDER_BUDGET_MIB);
+        if budget_mib == 0 {
+            return;
+        }
+        let accesses = self.op_accesses();
+        let targets = &self.targets;
+        if tracing::enabled!(target: "lumenwall_render::schedule", tracing::Level::TRACE) {
+            for (i, a) in accesses.iter().enumerate() {
+                let reads_batched: Vec<&str> = a
+                    .reads
+                    .iter()
+                    .filter(|&&t| !targets.is_transient(RtId(t)))
+                    .map(|&t| targets.get(RtId(t)).label())
+                    .collect();
+                if !reads_batched.is_empty() {
+                    let label = match self.ops[i] {
+                        Op::Draw(p) => {
+                            p.0.checked_sub(self.pass_base)
+                                .and_then(|l| self.passes.get(l as usize))
+                                .map_or("?", |r| r.desc.label.as_str())
+                        }
+                        _ => "clear/copy",
+                    };
+                    tracing::trace!(target: "lumenwall_render::schedule", "op {i} ({label}) reads {reads_batched:?}");
+                }
+            }
+        }
+        let order = crate::schedule::schedule(
+            &accesses,
+            |t| !targets.is_transient(RtId(t)),
+            |t| {
+                let id = RtId(t);
+                targets.is_transient(id).then(|| {
+                    let (w, h) = targets.get(id).size();
+                    u64::from(w) * u64::from(h) * 4
+                })
+            },
+            budget_mib << 20,
+        );
+        self.ops = order.into_iter().map(|i| self.ops[i]).collect();
+    }
+
     /// Which transient targets share a texture ([`plan_aliasing`] over the frame operations).
     /// Only a deferred pool (a new scene) is planned; an extension allocates as it goes.
     fn alias_plan(&self) -> AliasPlan {
@@ -912,16 +1023,8 @@ impl<'c> SceneBuilder<'c> {
                         continue;
                     };
                     let d = &rec.desc;
-                    for t in d
-                        .slots
-                        .iter()
-                        .flatten()
-                        .map(|b| b.texture)
-                        .chain(d.slot0_variants.iter().copied())
-                    {
-                        if let TextureRef::Target(r) = t {
-                            accesses.push((i, r, Access::Read));
-                        }
+                    for r in self.sampled_targets(rec) {
+                        accesses.push((i, r, Access::Read));
                     }
                     let write = if d.blend.reads_destination() || d.write_mask != WriteMask::All {
                         Access::Read
@@ -1287,6 +1390,10 @@ pub struct RenderScene {
     /// The frame order changed: shared targets get their own textures before the next frame.
     unshare_pending: bool,
 }
+
+/// Memory of the transient targets that deferred scene draws may keep alive when the frame is
+/// reordered ([`crate::schedule`]).
+pub const REORDER_BUDGET_MIB: u64 = 32;
 
 /// Default number of extra frames rendered after the last change when the
 /// graph accumulates across frames (translucent/additive passes into targets
@@ -1773,12 +1880,23 @@ impl RenderScene {
     fn hazard_for(&mut self, ctx: &GpuContext, i: usize) {
         let desc = &self.passes[i].desc;
         let target = desc.target;
+        // Only slots the shader samples (the others are not bound).
+        let mask = self
+            .interfaces
+            .get(self.passes[i].shader.0 as usize)
+            .map_or(0, |iface| iface.slots);
         let samples_target = desc
             .slots
             .iter()
-            .flatten()
-            .map(|b| b.texture)
-            .chain(desc.slot0_variants.iter().copied())
+            .enumerate()
+            .filter(|(n, _)| mask & (1 << n) != 0)
+            .filter_map(|(_, b)| b.map(|b| b.texture))
+            .chain(
+                desc.slot0_variants
+                    .iter()
+                    .copied()
+                    .filter(|_| mask & 1 != 0),
+            )
             .any(|t| t == TextureRef::Target(target));
         let scratch = if samples_target {
             let size = self.targets.get(target).size();

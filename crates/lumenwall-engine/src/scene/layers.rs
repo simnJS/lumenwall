@@ -51,6 +51,8 @@ pub(crate) struct RuntimeLayers {
     shaders: Box<dyn ShaderProvider>,
     textures: TextureCache,
     opts: SceneOptions,
+    /// Scale of the image composites and effect targets of the scene (`prepare_image`).
+    chain_scale: f32,
     root: ScopeId,
     full: RtId,
     /// Frame operations before the first object (the scene clear).
@@ -96,6 +98,7 @@ impl RuntimeLayers {
         shaders: Box<dyn ShaderProvider>,
         textures: TextureCache,
         opts: SceneOptions,
+        chain_scale: f32,
         root: ScopeId,
         full: RtId,
         ops: &[Op],
@@ -114,6 +117,7 @@ impl RuntimeLayers {
             shaders: Box::new(crate::shaders::Memoized::new(shaders)),
             textures,
             opts,
+            chain_scale,
             root,
             full,
             prefix: ops[..first].to_vec(),
@@ -457,7 +461,7 @@ impl SceneRuntime {
         idx: ObjectIndex,
         text_config: Option<&Json>,
     ) -> Result<Parked, String> {
-        let (size, root, full) = (self.size, l.root, l.full);
+        let (size, root, full, chain_scale) = (self.size, l.root, l.full, l.chain_scale);
         let build = &self.build;
         let fonts = &mut self.fonts;
         let RuntimeLayers {
@@ -492,6 +496,7 @@ impl SceneRuntime {
                 root,
                 full,
                 size,
+                chain_scale,
                 opts,
                 None,
             )?

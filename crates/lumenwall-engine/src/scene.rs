@@ -92,6 +92,12 @@ fn target_aliasing_disabled() -> bool {
     std::env::var_os("LUMENWALL_NO_TARGET_ALIASING").is_some_and(|v| v != "0")
 }
 
+/// `LUMENWALL_FULL_SIZE_CHAINS=1`: image composites and effect targets at the scene's own size (the
+/// scene target still follows the output): sharper fine detail, more GPU time and memory.
+fn full_size_chains_forced() -> bool {
+    std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS").is_some_and(|v| v != "0")
+}
+
 /// Displayed pixels per scene pixel of a scene of logical size `logical` shown on `display`
 /// (the larger of the two axis ratios, so neither axis is rendered below its displayed
 /// resolution), at most 1. Every render target of the scene is rendered at that scale of the
@@ -545,6 +551,14 @@ pub fn build_scene(
     // Every target at the size the scene is displayed at (`render_scale`).
     let scale = render_scale(logical, opts.display);
     let rendered = scaled_actual(logical, scale);
+    // Image composites and effect targets follow the same scale unless the scene's native
+    // resolution is asked for (`LUMENWALL_FULL_SIZE_CHAINS=1`, read here only: the place an
+    // engine setting will feed).
+    let chain_scale = if full_size_chains_forced() {
+        1.0
+    } else {
+        scale
+    };
     if rendered != logical {
         tracing::debug!(
             "scene {}x{} rendered at {}x{} (displayed size)",
@@ -625,6 +639,7 @@ pub fn build_scene(
                     root,
                     st.full,
                     size,
+                    chain_scale,
                     opts,
                     model.as_ref(),
                 ) {
@@ -707,6 +722,7 @@ pub fn build_scene(
                         root,
                         st.full,
                         size,
+                        chain_scale,
                         opts,
                         None,
                     )
@@ -1024,6 +1040,7 @@ pub fn build_scene(
                 .unwrap_or_else(crate::shaders::default_provider),
             std::mem::take(&mut textures),
             opts.clone(),
+            chain_scale,
             root,
             st.full,
             b.ops(),
@@ -1332,6 +1349,7 @@ fn prepare_image(
     root: ScopeId,
     scene_target: RtId,
     scene_size: Vec2,
+    chain_scale: f32,
     opts: &SceneOptions,
     puppet: Option<&PuppetModel>,
 ) -> Result<Option<PendingImage>, String> {
@@ -1470,12 +1488,7 @@ fn prepare_image(
     // for an image the scene enlarges (its world scale at load).
     let world_scale = project.world_transform(idx, build).scale;
     let magnify = world_scale.x.abs().max(world_scale.y.abs()).max(1.0);
-    let image_scale = if std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS").is_some() {
-        1.0
-    } else {
-        (render_scale(scene_logical_size(scene_size.x, scene_size.y), opts.display) * magnify)
-            .min(1.0)
-    };
+    let image_scale = (chain_scale * magnify).min(1.0);
     let composites = b.targets.create_composites_scaled(
         ctx,
         i64::from(id),

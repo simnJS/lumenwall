@@ -242,6 +242,7 @@ pub fn render_headless(
     let mut changed_frames = 0u32;
     // CPU time of the scene update and of the graph encode (the rest: composition, submit).
     let mut split = (Duration::ZERO, Duration::ZERO);
+    let mut finish_submit = (Duration::ZERO, Duration::ZERO);
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
     for i in 0..opts.frames {
@@ -313,7 +314,13 @@ pub fn render_headless(
         if let Some(t) = &mut timer {
             t.end(&mut enc);
         }
-        ctx.queue().submit(std::iter::once(enc.finish()));
+        let t_finish0 = start.elapsed();
+        let commands = enc.finish();
+        let t_finish1 = start.elapsed();
+        ctx.queue().submit(std::iter::once(commands));
+        let t_submit = start.elapsed();
+        finish_submit.0 += t_finish1 - t_finish0;
+        finish_submit.1 += t_submit - t_finish1;
         if let Some(t) = &mut timer {
             t.after_submit();
         }
@@ -378,13 +385,15 @@ pub fn render_headless(
     report.live_particles = rt.live_particles();
     report.stats = rt.stats;
     tracing::debug!(
-        "{changed_frames}/{} frame(s) needed a redraw (animated: {}); CPU per frame: update {:.3} ms, encode {:.3} ms, rest {:.3} ms",
+        "{changed_frames}/{} frame(s) needed a redraw (animated: {}); CPU per frame: update {:.3} ms, encode {:.3} ms, rest {:.3} ms (finish {:.3}, submit {:.3})",
         opts.frames,
         rt.animated,
         split.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
         split.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
         (cpu.saturating_sub(split.0 + split.1)).as_secs_f64() * 1000.0
             / f64::from(opts.frames.max(1)),
+        finish_submit.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+        finish_submit.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
     );
     if let Some((s, tick)) = rt.script_stats() {
         tracing::info!(

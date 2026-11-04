@@ -375,6 +375,12 @@ impl RenderTargetPool {
         }
     }
 
+    /// Whether any target was marked transient (the owner allows the frame to be restructured).
+    #[must_use]
+    pub fn has_transient(&self) -> bool {
+        !self.transient.is_empty()
+    }
+
     #[must_use]
     pub fn is_transient(&self, id: RtId) -> bool {
         self.transient.contains(&id)
