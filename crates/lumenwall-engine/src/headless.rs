@@ -249,11 +249,8 @@ pub fn render_headless(
     // CPU time of the scene update and of the graph encode (the rest: composition, submit).
     let mut split = (Duration::ZERO, Duration::ZERO);
     let mut finish_submit = (Duration::ZERO, Duration::ZERO);
-    // Direct Vulkan recording: (record, submit) inside the encode time.
-    let mut direct = (Duration::ZERO, Duration::ZERO);
-    // `LUMENWALL_SINGLE_SUBMIT=1` (measurements): the scene's command buffers and the
-    // composition in one submission (`RenderScene::encode_frame`) instead of `encode`'s own.
-    let single_submit = std::env::var_os("LUMENWALL_SINGLE_SUBMIT").is_some_and(|v| v != "0");
+    // Direct Vulkan recording: the recording inside the encode time.
+    let mut direct_record = Duration::ZERO;
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
     let paced_from = Instant::now();
@@ -320,15 +317,10 @@ pub fn render_headless(
         }
         let t_update = start.elapsed();
         changed_frames += u32::from(rt.scene.needs_redraw());
-        let before = if single_submit {
-            rt.scene.encode_frame(&ctx, &mut enc)
-        } else {
-            rt.scene.encode(&ctx, &mut enc);
-            lumenwall_render::FrameCommands::default()
-        };
-        let d = rt.scene.last_direct_times();
-        direct.0 += d.record;
-        direct.1 += d.submit;
+        // As the engine does: the scene's command buffers (direct Vulkan path) and the
+        // composition go in one submission.
+        let before = rt.scene.encode_frame(&ctx, &mut enc);
+        direct_record += rt.scene.last_direct_times().record;
         let t_encode = start.elapsed();
         uv = composer.update(&ctx, out.size(), rt.logical);
         compositor.encode(
@@ -424,11 +416,10 @@ pub fn render_headless(
         finish_submit.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
     );
     if rt.scene.records_direct() {
-        // Inside "encode": the Vulkan recording and the submission of the uploads and the frame.
+        // Inside "encode": the Vulkan recording of the frame.
         tracing::debug!(
-            "direct Vulkan recording per frame: record {:.3} ms, submit {:.3} ms ({} render passes)",
-            direct.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
-            direct.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+            "direct Vulkan recording per frame: record {:.3} ms ({} render passes)",
+            direct_record.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
             rt.scene.counts().render_passes,
         );
     }
