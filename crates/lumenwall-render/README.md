@@ -63,6 +63,18 @@ keeps the instance, to create another device with other options without enumerat
 again: lumenwall-engine recreates the device with video decode queues
 (`ContextOptions::video_decode`, `ctx.video_decode_requested()`) when a video replaces a scene.
 
+GPU choice with several monitors: one device for every output, on the adapter that presents the
+first output (`into_context` filters on its surface, then ranks Vulkan before DX12 and keeps the
+driver order between GPUs, the discrete one first in practice). The later outputs reuse that device;
+one whose surface the adapter cannot present gets `SurfaceUnsupported` (lumenwall-engine: the start
+fails when it is there at start-up, a hot-plugged one is only logged). On Windows a window on a
+monitor driven by another adapter is expected to stay presentable, as on hybrid-GPU laptops (DWM
+copies the frame across adapters). One device per adapter is rejected: each scene would be rendered
+once per GPU, the integrated one at full cost, with a second driver's threads and memory.
+Cross-adapter presentation is not measured: the Windows test PC (two 2560×1440 monitors) turned out to
+have both on its RTX 4080 SUPER (`EnumDisplayDevices`), and its static second monitor came from the
+engine (lumenwall-engine `scene_present_due`), not from the adapter.
+
 `loader::adapter_manifest_glob(adapter)` names the Vulkan driver of an adapter as a
 `VK_LOADER_DRIVERS_SELECT` glob of its Linux manifest (`*nvidia*`, `*radeon*`, `*intel*`, …,
 from `VkPhysicalDeviceDriverProperties::driverID`); lumenwall-engine remembers it to restrict
