@@ -49,6 +49,7 @@ pub mod fullscreen;
 pub mod geometry;
 pub mod mouse;
 pub mod uv;
+pub mod vulkan_registry;
 pub mod win_logic;
 
 mod error;

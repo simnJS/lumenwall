@@ -562,7 +562,9 @@ impl Engine {
                     return Ok((first_surface, ctx));
                 }
                 Err(e) if i + 1 < order.len() => {
-                    tracing::warn!("no {backends:?} adapter for the outputs ({e}); trying the next backend");
+                    tracing::warn!(
+                        "no {backends:?} adapter for the outputs ({e}); trying the next backend"
+                    );
                     last_error = e;
                 }
                 Err(e) => last_error = e,
