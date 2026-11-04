@@ -151,6 +151,15 @@ pub struct WindowState {
     pub cloaked: bool,
     /// Result of [`window_ignorable`].
     pub ignorable: bool,
+    /// The window is the foreground window or shares its root owner ([`is_active_window`]).
+    pub active: bool,
+}
+
+/// Whether `hwnd` is "the active window": the foreground window itself, or a window with the same root owner
+/// (`GetAncestor(GA_ROOTOWNER)`), so a game whose foreground window is an owned or child window (launcher,
+/// splash, dialog, overlay) still counts. `fg` and `fg_root_owner` are 0 when there is no foreground window.
+pub fn is_active_window(hwnd: isize, root_owner: isize, fg: isize, fg_root_owner: isize) -> bool {
+    fg != 0 && (hwnd == fg || (root_owner != 0 && root_owner == fg_root_owner))
 }
 
 /// Result of `SHQueryUserNotificationState`.
@@ -198,12 +207,19 @@ pub struct MonitorGeom {
 /// * `QUNS_RUNNING_D3D_FULL_SCREEN`, `QUNS_PRESENTATION_MODE`, `QUNS_BUSY` → `FULLSCREEN` on the monitor of
 ///   the foreground window (all monitors when unknown);
 /// * `QUNS_NOT_PRESENT` → `LOCKED` everywhere.
+///
+/// With `only_active`, a window covering a monitor yields `FULLSCREEN` only while it is active
+/// ([`WindowState::active`]); a background one only hides the wallpaper (`OCCLUDED` with `covered_pause`).
+/// The notification states are tied to the foreground window already; with `only_active` they never pause
+/// everything when the foreground monitor is unknown.
+#[allow(clippy::too_many_arguments)]
 pub fn decide_pause(
     monitors: &[MonitorGeom],
     windows: &[WindowState],
     notification: NotificationState,
     foreground_monitor: Option<usize>,
     fullscreen_enabled: bool,
+    only_active: bool,
     covered_pause: bool,
     out: &mut [PauseReasons],
 ) {
@@ -220,7 +236,7 @@ pub fn decide_pause(
                     *r |= PauseReasons::OCCLUDED;
                 }
             } else if w.rect.contains_rect(&m.rect) {
-                if fullscreen_enabled {
+                if fullscreen_enabled && (!only_active || w.active) {
                     *r |= PauseReasons::FULLSCREEN;
                 } else if covered_pause {
                     *r |= PauseReasons::OCCLUDED;
@@ -243,6 +259,7 @@ pub fn decide_pause(
         {
             match foreground_monitor.and_then(|i| out.get_mut(i)) {
                 Some(r) => *r |= PauseReasons::FULLSCREEN,
+                None if only_active => {}
                 None => {
                     for r in out.iter_mut() {
                         *r |= PauseReasons::FULLSCREEN;
@@ -420,6 +437,14 @@ mod tests {
             maximized: false,
             cloaked: false,
             ignorable: false,
+            active: false,
+        }
+    }
+
+    fn active(rect: Rect) -> WindowState {
+        WindowState {
+            active: true,
+            ..win(rect)
         }
     }
 
@@ -430,7 +455,19 @@ mod tests {
         covered: bool,
     ) -> [PauseReasons; 2] {
         let mut out = [PauseReasons::NONE; 2];
-        decide_pause(&[M0, M1], windows, n, fg, true, covered, &mut out);
+        decide_pause(&[M0, M1], windows, n, fg, true, false, covered, &mut out);
+        out
+    }
+
+    /// Same with `only_active` on.
+    fn decide_active(
+        windows: &[WindowState],
+        n: NotificationState,
+        fg: Option<usize>,
+        covered: bool,
+    ) -> [PauseReasons; 2] {
+        let mut out = [PauseReasons::NONE; 2];
+        decide_pause(&[M0, M1], windows, n, fg, true, true, covered, &mut out);
         out
     }
 
@@ -520,10 +557,100 @@ mod tests {
             NotificationState::D3dFullScreen,
             Some(1),
             false,
+            false,
             true,
             &mut out,
         );
         assert_eq!(out, [PauseReasons::NONE, PauseReasons::OCCLUDED]);
+    }
+
+    #[test]
+    fn only_active_off_ignores_the_active_flag() {
+        assert_eq!(
+            decide(&[win(M1.rect)], NotificationState::Normal, None, true),
+            [PauseReasons::NONE, PauseReasons::FULLSCREEN]
+        );
+        assert_eq!(
+            decide(&[active(M1.rect)], NotificationState::Normal, Some(1), true),
+            [PauseReasons::NONE, PauseReasons::FULLSCREEN]
+        );
+    }
+
+    #[test]
+    fn only_active_foreground_fullscreen_pauses() {
+        assert_eq!(
+            decide_active(&[active(M1.rect)], NotificationState::Normal, Some(1), true),
+            [PauseReasons::NONE, PauseReasons::FULLSCREEN]
+        );
+    }
+
+    #[test]
+    fn only_active_background_fullscreen_does_not_pause() {
+        // Fullscreen game on M1 behind a normal foreground window on M0.
+        let out = decide_active(
+            &[active(Rect::new(100, 100, 800, 600)), win(M1.rect)],
+            NotificationState::Normal,
+            Some(0),
+            false,
+        );
+        assert_eq!(out, [PauseReasons::NONE; 2]);
+        // It still hides the wallpaper: occlusion keeps its own switch.
+        let out = decide_active(&[win(M1.rect)], NotificationState::Normal, Some(0), true);
+        assert_eq!(out, [PauseReasons::NONE, PauseReasons::OCCLUDED]);
+    }
+
+    #[test]
+    fn only_active_follows_the_foreground_change() {
+        let n = NotificationState::Normal;
+        let mut game = win(M1.rect);
+        assert_eq!(
+            decide_active(&[game], n, None, false),
+            [PauseReasons::NONE; 2]
+        );
+        game.active = true;
+        assert_eq!(
+            decide_active(&[game], n, Some(1), false),
+            [PauseReasons::NONE, PauseReasons::FULLSCREEN]
+        );
+        game.active = false;
+        assert_eq!(
+            decide_active(&[game], n, Some(0), false),
+            [PauseReasons::NONE; 2]
+        );
+    }
+
+    #[test]
+    fn active_window_uses_the_root_owner() {
+        // Foreground is an owned dialog (20) of the game (10).
+        assert!(is_active_window(20, 10, 20, 10));
+        assert!(is_active_window(10, 10, 20, 10), "the game window itself");
+        assert!(!is_active_window(11, 11, 20, 10), "unrelated window");
+        assert!(!is_active_window(10, 10, 0, 0), "no foreground window");
+        assert!(
+            !is_active_window(10, 0, 20, 0),
+            "unknown owners never match"
+        );
+    }
+
+    #[test]
+    fn only_active_notification_states() {
+        assert_eq!(
+            decide_active(&[], NotificationState::D3dFullScreen, Some(1), true),
+            [PauseReasons::NONE, PauseReasons::FULLSCREEN]
+        );
+        assert_eq!(
+            decide_active(&[], NotificationState::PresentationMode, Some(0), true),
+            [PauseReasons::FULLSCREEN, PauseReasons::NONE]
+        );
+        // Unknown foreground monitor: nothing is active, nothing pauses.
+        assert_eq!(
+            decide_active(&[], NotificationState::Busy, None, true),
+            [PauseReasons::NONE; 2]
+        );
+        assert_eq!(
+            decide_active(&[], NotificationState::NotPresent, None, true),
+            [PauseReasons::LOCKED; 2]
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ s.request_frame(id);  /* render */  s.pre_present(id);  /* present */
 | Scale | fractional-scale + viewporter (integer fallback) | 1.0 | PerMonitorV2, DPI/96 | winit |
 | Hot-plug | yes | RandR notify | `WM_DISPLAYCHANGE`, Explorer restart (`TaskbarCreated`) | — |
 | Pacing | frame callbacks + fps cap | timer | high-resolution waitable timer | timer |
-| Fullscreen | wlr-foreign-toplevel (only-active, app-id filter) | root children cache + `_NET_ACTIVE_WINDOW`/`_NET_WM_STATE`; GNOME: Shell extension (optional) | `SetWinEventHook` + `DWMWA_CLOAKED` + `SHQueryUserNotificationState` | none (debug) |
+| Fullscreen | wlr-foreign-toplevel (only-active, app-id filter) | root children cache + `_NET_ACTIVE_WINDOW`/`_NET_WM_STATE`; GNOME: Shell extension (optional) | `SetWinEventHook` + `DWMWA_CLOAKED` + `SHQueryUserNotificationState`; only-active: the foreground window or a window with the same `GA_ROOTOWNER` (re-evaluated on `EVENT_SYSTEM_FOREGROUND`), a background fullscreen window only counts as `OCCLUDED` | none (debug) |
 | Maximised (`MAXIMIZED`) | — (covered surfaces stop getting frame callbacks) | `_NET_WM_STATE_MAXIMIZED_*` of windows over ≥ ½ an output (client inside WM frames); GNOME: Shell extension for Wayland windows | counted as covering (`OCCLUDED`) | — |
 | Covered / hidden | no frame callback for 500 ms | `VisibilityNotify` (no compositor); XWayland: Present frame timing (any window, Wayland-native included) | maximised / work-area-covering window | occluded, minimised |
 | Locked / screen off | via missing frame callbacks | MIT-SCREEN-SAVER, DPMS 1.2; XWayland: Present frame timing | WTS lock, `GUID_CONSOLE_DISPLAY_STATE` | — |

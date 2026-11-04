@@ -109,7 +109,7 @@ pub(crate) struct CliSchema {
     #[arg(long = "no-fullscreen-pause", help_heading = PERFORMANCE)]
     no_fullscreen_pause: bool,
 
-    /// Wayland: only pause for fullscreen windows that are active.
+    /// Wayland and Windows: only pause for fullscreen windows that are active (the foreground window).
     #[arg(long = "fullscreen-pause-only-active", help_heading = PERFORMANCE)]
     fullscreen_pause_only_active: bool,
 

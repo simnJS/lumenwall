@@ -66,9 +66,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND,
     EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EnumWindows,
-    FindWindowExW, FindWindowW, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetCursorPos,
-    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HTTRANSPARENT,
-    IsIconic, IsWindowVisible, IsZoomed, LWA_ALPHA, MSG, MWMO_INPUTAVAILABLE,
+    FindWindowExW, FindWindowW, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    GetCursorPos, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+    HTTRANSPARENT, IsIconic, IsWindowVisible, IsZoomed, LWA_ALPHA, MSG, MWMO_INPUTAVAILABLE,
     MsgWaitForMultipleObjectsEx, OBJID_WINDOW, PBT_POWERSETTINGCHANGE, PM_REMOVE, PeekMessageW,
     QS_ALLINPUT, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
     RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
@@ -89,7 +89,8 @@ use crate::sched::{FrameSlot, min_deadline, pause_transition};
 use crate::types::EventQueue;
 use crate::win_logic::{
     DesktopParent, MonitorGeom, NotificationState, TopLevel, WindowState, child_rect,
-    choose_desktop_parent, decide_pause, is_desktop_click, monitor_name, window_ignorable,
+    choose_desktop_parent, decide_pause, is_active_window, is_desktop_click, monitor_name,
+    window_ignorable,
 };
 use crate::{
     BackendKind, Config, Event, OutputId, OutputInfo, PauseReasons, PlatformError, PointerButton,
@@ -677,8 +678,17 @@ impl Win32Backend {
             );
         }
         self.windows.clear();
+        // SAFETY: simple queries on window handles.
+        let (fg, fg_root) = unsafe {
+            let fg = GetForegroundWindow();
+            if fg.is_invalid() {
+                (0, 0)
+            } else {
+                (raw(fg), raw(GetAncestor(fg, GA_ROOTOWNER)))
+            }
+        };
         for &h in &self.hwnds {
-            if let Some(w) = window_state(hwnd(h)) {
+            if let Some(w) = window_state(hwnd(h), fg, fg_root) {
                 self.windows.push(w);
             }
         }
@@ -712,6 +722,7 @@ impl Win32Backend {
             notification,
             fg_monitor,
             self.config.fullscreen.enabled,
+            self.config.fullscreen.only_active,
             self.config.pause_when_covered,
             &mut self.reasons,
         );
@@ -1035,7 +1046,7 @@ impl WallpaperSurface for Win32Backend {
 // ---------------------------------------------------------------------------------------------------------
 // OS snapshots
 
-fn window_state(h: HWND) -> Option<WindowState> {
+fn window_state(h: HWND, fg: isize, fg_root_owner: isize) -> Option<WindowState> {
     // SAFETY: read-only queries on a window handle; failures are tolerated.
     unsafe {
         if !IsWindowVisible(h).as_bool() {
@@ -1068,6 +1079,7 @@ fn window_state(h: HWND) -> Option<WindowState> {
             maximized: IsZoomed(h).as_bool(),
             cloaked: cloaked != 0,
             ignorable: window_ignorable(class.as_str(), ex_style),
+            active: is_active_window(raw(h), raw(GetAncestor(h, GA_ROOTOWNER)), fg, fg_root_owner),
         })
     }
 }
