@@ -355,11 +355,13 @@ Function StartAsUser
   Exch $0
   Push $1
   System::Call 'shell32::IsUserAnAdmin()i.r1'
+  SetDetailsPrint none
   ${If} $1 <> 0
     Exec '"$WINDIR\explorer.exe" "$0"'
   ${Else}
     Exec '"$0"'
   ${EndIf}
+  SetDetailsPrint lastused
   Pop $1
   Pop $0
 FunctionEnd
@@ -423,8 +425,11 @@ Section "-Lumenwall"
   StrCpy $0 ""
   ${If} ${FileExists} "$INSTDIR\lumenwall-ui.exe"
     DetailPrint "$(StoppingEngine)"
-    ; Exit 0: an engine was running and has stopped (3: none was running).
+    ; Exit 0: an engine was running and has stopped (3: none was running). Its command
+    ; line stays out of the window ("Stopping the engine..." is the status).
+    SetDetailsPrint none
     ExecWait '"$INSTDIR\lumenwall-ui.exe" --stop-engine' $0
+    SetDetailsPrint lastused
     ${If} $0 == 0
       StrCpy $EngineWasRunning 1
     ${EndIf}
@@ -512,7 +517,9 @@ FunctionEnd
 Section "Uninstall"
   SetShellVarContext current
   ${If} ${FileExists} "$INSTDIR\lumenwall-ui.exe"
+    SetDetailsPrint none
     ExecWait '"$INSTDIR\lumenwall-ui.exe" --stop-engine'
+    SetDetailsPrint lastused
   ${EndIf}
   ; What still runs from the folder: the tray icon and the window (ended at once), the
   ; web host and the engine (after 5 s).
