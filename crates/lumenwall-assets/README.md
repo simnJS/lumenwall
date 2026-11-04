@@ -20,6 +20,10 @@ Per-wallpaper virtual file system and Steam / assets folder discovery.
 
 Tests: `tests/vfs.rs` (F1/F2 through the VFS, mount order, adapters, thumbnail, shaders, textures), `tests/steam.rs` (fake home folders, `libraryfolders.vdf`), `tests/real_data.rs` (`--ignored`: Snap Steam install, reference wallpaper, assets).
 
+## Performance
+
+- `Vfs::generation()`: an id unique in the process, renewed by every change of the mounts. The engine reports it as the shader file system's identity (`lumenwall_shader::ShaderFs::identity`), so a scene load reads each shader unit and include once: 873 → 44 VFS reads for the 156 passes of 3463520581, whose shaders come from the assets folder on disk (≈ 230 µs per read on Windows). Scene build 474 → 157 ms (median, see `lumenwall-shader`'s README).
+
 ## Deviations
 
 Reference bugs not reproduced:

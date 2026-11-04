@@ -313,11 +313,29 @@ impl fmt::Debug for WallpaperVfsOptions {
 }
 
 /// Ordered list of mount points of one wallpaper (§4.1).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Vfs {
     mounts: Vec<Mount>,
     media: MediaThumbnailAdapter,
     pkg_open_mode: OpenMode,
+    generation: u64,
+}
+
+/// A value no other VFS of the process has had.
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Default for Vfs {
+    fn default() -> Self {
+        Self {
+            mounts: Vec::new(),
+            media: MediaThumbnailAdapter::default(),
+            pkg_open_mode: OpenMode::default(),
+            generation: next_generation(),
+        }
+    }
 }
 
 impl Vfs {
@@ -326,9 +344,18 @@ impl Vfs {
         Self::default()
     }
 
+    /// Identity of what this VFS serves: unique in the process, and renewed by every
+    /// change of its mounts. Readers may keep what they read under one generation
+    /// (shader units and includes during a scene load) instead of reading it again;
+    /// files of folder mounts are assumed not to change meanwhile.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Sets the artwork source used when `$mediaThumbnail` is mounted.
     pub fn set_media_source(&mut self, source: Option<Arc<dyn MediaArtSource>>) {
         self.media = MediaThumbnailAdapter::new(source);
+        self.generation = next_generation();
     }
 
     /// Sets how `.pkg` archives mounted afterwards are loaded.
@@ -356,6 +383,7 @@ impl Vfs {
             root: root.to_owned(),
             adapter,
         });
+        self.generation = next_generation();
     }
 
     fn create_adapter(&self, source: &Path) -> Result<Adapter, AssetError> {
@@ -437,6 +465,7 @@ impl Vfs {
                 pkg.release_mapping();
             }
         }
+        self.generation = next_generation();
     }
 
     /// Lookup of §4.7 on a normalized query; returns the mount and the path relative
