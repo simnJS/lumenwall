@@ -226,6 +226,12 @@ pub enum Message {
     Preview(PreviewMode),
     Open(String),
     ClearScreen(String),
+    /// Plays a Wallpaper Engine playlist on a screen (output, playlist name).
+    StartPlaylist(String, String),
+    /// Next (`true`) or previous item of the playlist on a screen.
+    PlaylistStep(String, bool),
+    /// Keeps the wallpaper the screen shows, without its playlist.
+    StopPlaylist(String),
     Shot(window::Screenshot),
     Noop,
 }
@@ -430,6 +436,16 @@ impl App {
             .filter(|(_, o)| showing.contains(&o.id))
             .map(|(i, _)| i + 1)
             .collect()
+    }
+
+    /// How `output` fits its wallpaper now, else the scaling chosen for new ones.
+    fn scaling_on(&self, output: &str) -> Scaling {
+        self.daemon
+            .state
+            .as_ref()
+            .and_then(|s| s.outputs.iter().find(|o| o.output == output))
+            .filter(|o| o.wallpaper.is_some())
+            .map_or(self.cfg.scaling, |o| o.scaling)
     }
 
     pub fn wallpaper_on(&self, output: &str) -> Option<&Wallpaper> {
@@ -940,6 +956,10 @@ impl App {
                 } else if page == Page::Library && self.page != Page::Library {
                     self.panel = motion::panel_at(self.selected.is_some());
                 }
+                if page == Page::Screens && self.page != Page::Screens {
+                    // Playlists made in Wallpaper Engine meanwhile.
+                    self.daemon.fetch_playlists();
+                }
                 self.page = page;
                 self.viewport = None;
             }
@@ -1186,6 +1206,25 @@ impl App {
                 }
             }
             Message::ClearScreen(id) => self.daemon.clear(Some(id)),
+            Message::StartPlaylist(output, name) => {
+                let scaling = self.scaling_on(&output);
+                self.daemon.apply_playlist(Some(output), name, scaling);
+            }
+            Message::PlaylistStep(output, forward) => {
+                self.daemon.playlist_step(Some(output), forward);
+            }
+            Message::StopPlaylist(output) => {
+                let shown = self.daemon.state.as_ref().and_then(|s| {
+                    s.outputs
+                        .iter()
+                        .find(|o| o.output == output)
+                        .and_then(|o| o.wallpaper.clone())
+                });
+                if let Some(dir) = shown {
+                    let scaling = self.scaling_on(&output);
+                    self.daemon.apply(Some(output), dir, scaling);
+                }
+            }
             Message::Shot(shot) => {
                 if let Some((path, _, _)) = &self.screenshot {
                     let img = image::RgbaImage::from_raw(
