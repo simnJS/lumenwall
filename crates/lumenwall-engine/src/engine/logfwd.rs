@@ -74,10 +74,17 @@ struct Fields {
     rest: String,
 }
 
+/// Fields that tracing-log adds to a `log` record (`log.target`, `log.file`…): the target is
+/// already the event's own, the rest the daemon's formatter does not show either.
+fn is_log_metadata(field: &Field) -> bool {
+    field.name().starts_with("log.")
+}
+
 impl Visit for Fields {
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "message" {
             self.message.push_str(value);
+        } else if is_log_metadata(field) {
         } else {
             let _ = write!(self.rest, " {}={value:?}", field.name());
         }
@@ -86,6 +93,7 @@ impl Visit for Fields {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             let _ = write!(self.message, "{value:?}");
+        } else if is_log_metadata(field) {
         } else {
             let _ = write!(self.rest, " {}={value:?}", field.name());
         }

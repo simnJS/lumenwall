@@ -35,12 +35,16 @@ pub(super) fn available() -> bool {
 /// started by a daemon, runs the engine and returns the process exit code; otherwise returns
 /// `None`, and the daemon runs its engine in processes of its own on Windows (an executable
 /// that never calls this keeps the engine in the daemon).
-pub fn run_engine_host() -> Option<ExitCode> {
+///
+/// `install_logger` makes the given subscriber the process's global one (the engine process
+/// sends its records to the daemon through it); `main` also routes the `log` crate's records
+/// (wgpu, naga) to it, as for the daemon's own subscriber.
+pub fn run_engine_host(install_logger: impl FnOnce(tracing::Dispatch)) -> Option<ExitCode> {
     if std::env::args_os().nth(1).as_deref() != Some(OsStr::new(HOST_ARG)) {
         AVAILABLE.store(true, Ordering::Relaxed);
         return None;
     }
-    Some(host_main())
+    Some(host_main(install_logger))
 }
 
 /// Writes one message to the daemon. Never logs (the logger writes through it).
@@ -52,7 +56,7 @@ fn send(msg: &FromHost) -> bool {
         .is_ok()
 }
 
-fn host_main() -> ExitCode {
+fn host_main(install_logger: impl FnOnce(tracing::Dispatch)) -> ExitCode {
     let mut first = String::new();
     if std::io::stdin().read_line(&mut first).is_err() {
         return ExitCode::from(2);
@@ -60,7 +64,7 @@ fn host_main() -> ExitCode {
     let Ok(ToHost::Init(init)) = ToHost::decode(&first) else {
         return ExitCode::from(2);
     };
-    let _ = tracing::subscriber::set_global_default(Forwarder::new(
+    install_logger(tracing::Dispatch::new(Forwarder::new(
         init.log_level,
         Box::new(|level, target, message| {
             send(&FromHost::Log {
@@ -69,7 +73,7 @@ fn host_main() -> ExitCode {
                 message,
             });
         }),
-    ));
+    )));
     // Release builds abort on panic: say why before the process ends.
     std::panic::set_hook(Box::new(|info| {
         send(&FromHost::Log {
