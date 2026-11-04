@@ -155,9 +155,10 @@ fn embedded_extension() -> Option<String> {
     None
 }
 
-/// Whether the dialog opens by itself.
+/// Whether the dialog opens by itself. Never for a copy the Windows installer put in
+/// place: it already asked about the shortcut and the start with Windows.
 pub fn should_prompt(report: &Report, prefs: &Prefs, embedded_extension: Option<&str>) -> bool {
-    if report.development || !report.needs_setup() {
+    if report.development || report.uninstaller.is_some() || !report.needs_setup() {
         return false;
     }
     if !prefs.prompted {
@@ -1096,6 +1097,14 @@ pub(crate) mod tests {
             ..fresh.clone()
         };
         assert!(!should_prompt(&dev, &prefs, Some("2")));
+        let installer = Report {
+            uninstaller: Some(PathBuf::from("uninstall.exe")),
+            ..fresh.clone()
+        };
+        assert!(
+            !should_prompt(&installer, &prefs, Some("2")),
+            "the installer asked"
+        );
         prefs.prompted = true;
         assert!(!should_prompt(&fresh, &prefs, Some("2")), "answered once");
         // A newer extension asks again, once per version.

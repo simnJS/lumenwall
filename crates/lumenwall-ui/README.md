@@ -37,7 +37,7 @@ The catalog lives here behind `catalog::Discovery` until `lumenwall-assets` / `l
 
 ## Installation dialog
 
-Released programs are often started from a downloaded folder. At the first start the app checks, on a worker thread, what is in place for the current user and, if something is missing, opens a dialog that lists it; each item can be ticked off, and nothing is written before "Set up" is clicked (no keyboard shortcut does it). "Not now" is remembered (`ui.json`: `"setup": {"prompted": true}`); the dialog comes back only when the app carries a newer GNOME extension than the installed one, once per version. Settings › Installation shows the same items with Repair and Uninstall. The dialog never opens by itself in development builds, screenshots or demo runs (`--setup` forces it).
+Released programs are often started from a downloaded folder. At the first start the app checks, on a worker thread, what is in place for the current user and, if something is missing, opens a dialog that lists it; each item can be ticked off, and nothing is written before "Set up" is clicked (no keyboard shortcut does it). "Not now" is remembered (`ui.json`: `"setup": {"prompted": true}`); the dialog comes back only when the app carries a newer GNOME extension than the installed one, once per version. Settings › Installation shows the same items with Repair and Uninstall. The dialog never opens by itself in development builds, screenshots or demo runs, nor for a copy made by the Windows installer, which already asked (`--setup` forces it).
 
 | Item | Linux | Windows |
 |---|---|---|
