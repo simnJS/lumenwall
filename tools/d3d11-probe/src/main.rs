@@ -216,8 +216,12 @@ pub trait Backend: Sized {
     /// Device + swap chain on `window`: the backend, the time it took, the adapter's name.
     fn create(window: &sys::Window) -> Result<(Self, f64, String)>;
     /// Textures (freed from the workload once uploaded), targets, shaders, states.
-    fn load(&mut self, w: &mut plan::Workload, cache: &shaders::BytecodeCache)
-    -> Result<LoadTimes>;
+    fn load(
+        &mut self,
+        w: &mut plan::Workload,
+        cache: &shaders::BytecodeCache,
+        mark: &mut dyn FnMut(&str),
+    ) -> Result<LoadTimes>;
     /// One frame: constants, every render pass, the copy to the swap chain, `Present`.
     fn frame(&mut self, w: &plan::Workload, time: f32) -> Result<()>;
 }
@@ -267,7 +271,17 @@ fn run<B: Backend>(args: &Args) -> Result<common::Report> {
     r.shared_device = s.shared;
     r.dedicated_device = s.dedicated;
 
-    let times = backend.load(&mut w, &cache)?;
+    let stage = |name: &str| {
+        if let Ok(s) = counters.collect() {
+            println!(
+                "STAGE {name} shared_mib={:.2} dedicated_mib={:.1}",
+                common::mib(s.shared),
+                common::mib(s.dedicated)
+            );
+        }
+    };
+    stage("device");
+    let times = backend.load(&mut w, &cache, &mut |n| stage(n))?;
     r.upload_ms = times.upload_ms;
     r.targets_ms = times.targets_ms;
     r.shaders_ms = times.shaders_ms;
@@ -282,6 +296,9 @@ fn run<B: Backend>(args: &Args) -> Result<common::Report> {
         window.pump();
         backend.frame(&w, start.elapsed().as_secs_f32())?;
         frames += 1;
+        if frames == 1 || frames == 30 {
+            stage(&format!("frame{frames}"));
+        }
         let elapsed = start.elapsed().as_secs_f64();
         if window_start.is_none() && elapsed >= args.warmup {
             counters.collect()?;

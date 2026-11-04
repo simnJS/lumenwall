@@ -63,7 +63,11 @@ struct DrawState {
     program: usize,
     target: usize,
     vb: ID3D11Buffer,
-    cb: ID3D11Buffer,
+    cb: Option<ID3D11Buffer>,
+    /// `cb=big`: first constant (16-byte unit) and byte offset of this draw in the big buffer.
+    big_first: u32,
+    big_off: usize,
+    big_count: u32,
     data: Vec<u8>,
     srvs: Vec<Option<ID3D11ShaderResourceView>>,
 }
@@ -82,6 +86,11 @@ pub struct D3d11 {
     draws: Vec<DrawState>,
     present: Option<DrawState>,
     frame_cb: Option<ID3D11Buffer>,
+    variant: Variant,
+    big: Option<ID3D11Buffer>,
+    big_data: Vec<u8>,
+    big_cursor: std::cell::Cell<usize>,
+    vb_cache: std::cell::RefCell<std::collections::HashMap<(usize, u32, u32), ID3D11Buffer>>,
     frame_data: Vec<u8>,
     sampler: Option<ID3D11SamplerState>,
 }
@@ -167,6 +176,11 @@ impl Backend for D3d11 {
                     draws: Vec::new(),
                     present: None,
                     frame_cb: None,
+                    variant: Variant::from_env(),
+                    big: None,
+                    big_data: Vec::new(),
+                    big_cursor: std::cell::Cell::new(0),
+                    vb_cache: Default::default(),
                     frame_data: Vec::new(),
                     sampler: None,
                 },
@@ -176,7 +190,12 @@ impl Backend for D3d11 {
         }
     }
 
-    fn load(&mut self, w: &mut Workload, cache: &BytecodeCache) -> Result<LoadTimes> {
+    fn load(
+        &mut self,
+        w: &mut Workload,
+        cache: &BytecodeCache,
+        mark: &mut dyn FnMut(&str),
+    ) -> Result<LoadTimes> {
         let mut times = LoadTimes::default();
         // SAFETY: Direct3D 11 resource creation with valid descriptors; initial data slices
         // outlive the calls.
@@ -198,6 +217,7 @@ impl Backend for D3d11 {
                 codes.push(code);
             }
             times.shaders_ms = t.elapsed().as_secs_f64() * 1000.0 - times.compile_ms;
+            mark("shaders");
 
             // State objects, shader objects, input layouts.
             let t = Instant::now();
@@ -306,6 +326,7 @@ impl Backend for D3d11 {
             self.ctx
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             times.pipelines_ms = t.elapsed().as_secs_f64() * 1000.0;
+            mark("states");
 
             // Textures: the real files, immutable, one subresource per mip.
             let t = Instant::now();
@@ -385,6 +406,7 @@ impl Backend for D3d11 {
             self.blank = blank_srv;
             self.wait_idle();
             times.upload_ms = t.elapsed().as_secs_f64() * 1000.0;
+            mark("textures");
 
             // Render targets.
             let t = Instant::now();
@@ -421,6 +443,7 @@ impl Backend for D3d11 {
                 self.target_srv.push(srv.ok_or_else(|| anyhow!("srv"))?);
             }
             times.targets_ms = t.elapsed().as_secs_f64() * 1000.0;
+            mark("targets");
 
             // Per-draw constant buffers, vertex buffers, SRV tables; the frame block.
             let t = Instant::now();
@@ -447,8 +470,14 @@ impl Backend for D3d11 {
                 .unwrap_or(16);
             self.frame_data = vec![0; frame_bytes as usize];
             self.frame_cb = Some(self.dynamic_cb(frame_bytes)?);
+            if self.variant.cb == CbMode::Big {
+                let total = self.big_cursor.get().max(256);
+                self.big_data = vec![0; total];
+                self.big = Some(self.dynamic_cb(total as u32)?);
+            }
             times.pipelines_ms += t.elapsed().as_secs_f64() * 1000.0;
             self.wait_idle();
+            mark("draws");
         }
         Ok(times)
     }
@@ -463,6 +492,20 @@ impl Backend for D3d11 {
                 .ok_or_else(|| anyhow!("not loaded"))?;
             fill_frame(&mut self.frame_data, time);
             Self::upload(ctx, frame_cb, &self.frame_data)?;
+            let ctx1 = ctx.cast::<ID3D11DeviceContext1>().ok();
+            if self.variant.cb == CbMode::Big
+                && let Some(big) = &self.big
+            {
+                for d in self.draws.iter_mut().chain(self.present.iter_mut()) {
+                    if let Some(o) = self.programs[d.program].time_offset
+                        && let Some(dst) = d.data.get_mut(o..o + 4)
+                    {
+                        dst.copy_from_slice(&time.to_le_bytes());
+                    }
+                    self.big_data[d.big_off..d.big_off + d.data.len()].copy_from_slice(&d.data);
+                }
+                Self::upload(ctx, big, &self.big_data)?;
+            }
             ctx.PSSetSamplers(
                 0,
                 Some(&std::array::from_fn::<_, 8, _>(|_| self.sampler.clone())),
@@ -503,8 +546,14 @@ impl Backend for D3d11 {
                 {
                     dst.copy_from_slice(&time.to_le_bytes());
                 }
-                Self::upload(ctx, &d.cb, &d.data)?;
-                Self::draw(ctx, p, d, frame_cb);
+                match (&d.cb, self.variant.cb) {
+                    (Some(cb), CbMode::Dynamic) => Self::upload(ctx, cb, &d.data)?,
+                    (Some(cb), CbMode::Default) => {
+                        ctx.UpdateSubresource(cb, 0, None, d.data.as_ptr().cast(), 0, 0);
+                    }
+                    _ => {}
+                }
+                Self::draw(ctx, ctx1.as_ref(), p, d, frame_cb, self.big.as_ref());
             }
             // The scene target to the swap chain.
             ctx.PSSetShaderResources(0, Some(&[const { None }; 8]));
@@ -512,7 +561,7 @@ impl Backend for D3d11 {
             ctx.RSSetViewports(Some(&[vp(OUTPUT.0, OUTPUT.1)]));
             if let Some(d) = &mut self.present {
                 let p = &self.programs[d.program];
-                Self::draw(ctx, p, d, frame_cb);
+                Self::draw(ctx, ctx1.as_ref(), p, d, frame_cb, self.big.as_ref());
             }
             self.swap.Present(0, DXGI_PRESENT(0)).ok()?;
         }
@@ -552,16 +601,36 @@ impl D3d11 {
         Ok(())
     }
 
-    unsafe fn draw(ctx: &ID3D11DeviceContext, p: &Program, d: &DrawState, frame_cb: &ID3D11Buffer) {
+    unsafe fn draw(
+        ctx: &ID3D11DeviceContext,
+        ctx1: Option<&ID3D11DeviceContext1>,
+        p: &Program,
+        d: &DrawState,
+        frame_cb: &ID3D11Buffer,
+        big: Option<&ID3D11Buffer>,
+    ) {
         // SAFETY: the objects belong to the device of `ctx`.
         unsafe {
             ctx.IASetInputLayout(&p.layout);
             ctx.IASetVertexBuffers(0, 1, Some(&Some(d.vb.clone())), Some(&p.stride), Some(&0));
             ctx.VSSetShader(&p.vs, None);
             ctx.PSSetShader(&p.ps, None);
-            let cbs = [Some(d.cb.clone()), Some(frame_cb.clone())];
-            ctx.VSSetConstantBuffers(0, Some(&cbs));
-            ctx.PSSetConstantBuffers(0, Some(&cbs));
+            match (&d.cb, big, ctx1) {
+                (Some(cb), _, _) => {
+                    let cbs = [Some(cb.clone()), Some(frame_cb.clone())];
+                    ctx.VSSetConstantBuffers(0, Some(&cbs));
+                    ctx.PSSetConstantBuffers(0, Some(&cbs));
+                }
+                (None, Some(big), Some(c1)) => {
+                    let (first, count) = (d.big_first, d.big_count);
+                    c1.VSSetConstantBuffers1(0, 1, Some(&Some(big.clone())), Some(&first), Some(&count));
+                    c1.PSSetConstantBuffers1(0, 1, Some(&Some(big.clone())), Some(&first), Some(&count));
+                    let f = [Some(frame_cb.clone())];
+                    ctx.VSSetConstantBuffers(1, Some(&f));
+                    ctx.PSSetConstantBuffers(1, Some(&f));
+                }
+                _ => {}
+            }
             ctx.PSSetShaderResources(0, Some(&d.srvs));
             ctx.Draw(4, 0);
         }
@@ -587,9 +656,14 @@ impl D3d11 {
             SysMemPitch: 0,
             SysMemSlicePitch: 0,
         };
+        let vkey = (program, coverage.0.to_bits(), coverage.1.to_bits());
+        if self.variant.shared_vb {
+            vb = self.vb_cache.borrow().get(&vkey).cloned();
+        }
         // SAFETY: valid descriptors; `vdata` outlives the call.
-        unsafe {
-            self.device.CreateBuffer(
+        if vb.is_none() {
+            unsafe {
+                self.device.CreateBuffer(
                 &D3D11_BUFFER_DESC {
                     ByteWidth: vdata.len() as u32,
                     Usage: D3D11_USAGE_IMMUTABLE,
@@ -601,7 +675,45 @@ impl D3d11 {
                 Some(&init),
                 Some(&mut vb),
             )?;
+            }
+            if let Some(b) = &vb {
+                self.vb_cache.borrow_mut().insert(vkey, b.clone());
+            }
         }
+        let (cb, big_first, big_off, big_count) = match self.variant.cb {
+            CbMode::Big => {
+                let off = self.big_cursor.get();
+                let size = (p.cb_bytes as usize).div_ceil(256) * 256;
+                self.big_cursor.set(off + size);
+                (None, (off / 16) as u32, off, (size / 16) as u32)
+            }
+            CbMode::Dynamic => (
+                // SAFETY: valid descriptor.
+                Some(unsafe { self.dynamic_cb(p.cb_bytes)? }),
+                0,
+                0,
+                0,
+            ),
+            CbMode::Default => {
+                let mut b = None;
+                // SAFETY: valid descriptor.
+                unsafe {
+                    self.device.CreateBuffer(
+                        &D3D11_BUFFER_DESC {
+                            ByteWidth: p.cb_bytes,
+                            Usage: D3D11_USAGE_DEFAULT,
+                            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                            CPUAccessFlags: 0,
+                            MiscFlags: 0,
+                            StructureByteStride: 0,
+                        },
+                        None,
+                        Some(&mut b),
+                    )?;
+                }
+                (b, 0, 0, 0)
+            }
+        };
         let mut srvs: Vec<Option<ID3D11ShaderResourceView>> =
             vec![self.blank.clone(); p.slots.max(1)];
         for (slot, src) in slots {
@@ -620,8 +732,10 @@ impl D3d11 {
             program,
             target,
             vb: vb.ok_or_else(|| anyhow!("vertex buffer"))?,
-            // SAFETY: valid descriptor.
-            cb: unsafe { self.dynamic_cb(p.cb_bytes)? },
+            cb,
+            big_first,
+            big_off,
+            big_count,
             data,
             srvs,
         })
@@ -661,6 +775,41 @@ impl D3d11 {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
+        }
+    }
+}
+
+/// Experiment switches for the shared-memory bisection (`PROBE_VARIANT=cb=big,vb=shared`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CbMode {
+    /// One `DYNAMIC` buffer per draw, `Map` with `WRITE_DISCARD` (default).
+    Dynamic,
+    /// One `DEFAULT` buffer per draw, `UpdateSubresource`.
+    Default,
+    /// One big `DYNAMIC` buffer, one `Map` per frame, `VSSetConstantBuffers1` offsets (D3D11.1).
+    Big,
+}
+
+#[derive(Clone, Copy)]
+struct Variant {
+    cb: CbMode,
+    /// One immutable vertex buffer per (program, coverage) instead of one per draw.
+    shared_vb: bool,
+}
+
+impl Variant {
+    fn from_env() -> Self {
+        let v = std::env::var("PROBE_VARIANT").unwrap_or_default();
+        let has = |s: &str| v.split(',').any(|p| p == s);
+        Self {
+            cb: if has("cb=big") {
+                CbMode::Big
+            } else if has("cb=default") {
+                CbMode::Default
+            } else {
+                CbMode::Dynamic
+            },
+            shared_vb: has("vb=shared"),
         }
     }
 }

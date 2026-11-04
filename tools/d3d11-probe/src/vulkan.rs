@@ -189,7 +189,12 @@ impl Backend for Vulkan {
         ))
     }
 
-    fn load(&mut self, w: &mut Workload, _cache: &BytecodeCache) -> Result<LoadTimes> {
+    fn load(
+        &mut self,
+        w: &mut Workload,
+        _cache: &BytecodeCache,
+        mark: &mut dyn FnMut(&str),
+    ) -> Result<LoadTimes> {
         let mut times = LoadTimes::default();
         let dev = &self.device;
 
@@ -284,6 +289,7 @@ impl Backend for Vulkan {
             });
         }
         times.shaders_ms = t.elapsed().as_secs_f64() * 1000.0;
+        mark("shaders");
 
         // Textures: the real files, one `write_texture` per mip.
         let t = Instant::now();
@@ -373,6 +379,7 @@ impl Backend for Vulkan {
         self.queue.submit([]);
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         times.upload_ms = t.elapsed().as_secs_f64() * 1000.0;
+        mark("textures");
 
         // Render targets.
         let t = Instant::now();
@@ -396,6 +403,7 @@ impl Backend for Vulkan {
                 .push(tex.create_view(&wgpu::TextureViewDescriptor::default()));
         }
         times.targets_ms = t.elapsed().as_secs_f64() * 1000.0;
+        mark("targets");
 
         // Pipelines, buffers and bind groups.
         let t = Instant::now();
@@ -453,6 +461,7 @@ impl Backend for Vulkan {
         self.queue.submit([]);
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         times.pipelines_ms = t.elapsed().as_secs_f64() * 1000.0;
+        mark("draws");
         Ok(times)
     }
 

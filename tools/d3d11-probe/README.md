@@ -134,7 +134,7 @@ cold). `late_frames` (frames more than 5 ms late) was 0 for every run except Vul
 - **Shared GPU memory: D3D11 does not quite reach "under 3 MiB", but it nearly does.** 3.16–3.21
   MiB against 17.18 MiB for the same workload on Vulkan (−14 MiB, −81 %), and against Wallpaper
   Engine's 3 MiB (a rounded figure). The bare device + flip swap chain costs 0.72 MiB (Nora's
-  0.7); the 2.4–2.5 MiB that come on top appear while the workload is loaded and drawn. Cause not
+  0.7); the 2.4–2.5 MiB on top are explained in "Bisection" below. Original hypotheses, kept: not
   pinned down (candidates: the 153 dynamic constant buffers and their `WRITE_DISCARD` renaming,
   the 156 vertex buffers, command-stream memory of the driver for 86 render passes); it is the
   next thing to bisect before deciding, since the person's requirement is strictly below WE.
@@ -150,5 +150,61 @@ cold). `late_frames` (frames more than 5 ms late) was 0 for every run except Vul
 - Shader feasibility is not a blocker: 33 of 33 programs of the two scenes compile to SM 5.0
   (with the sampler rewrite above).
 
-Scene 3018340632 (21 programs): _pending, the GPU lock was held by another agent when the second
-scene was due._
+### Scene 3018340632 (21 programs, 23 draws), same conditions, default design
+
+| Backend | Run | Shared | Dedicated | Private | Working set | CPU | GPU 3D | Device + swap chain | Textures | Shader objects | Pipelines / states |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| D3D11 | 1 | 3.01 MiB | 176.5 MiB | 261.9 MiB | 75.5 MiB | 2.58 % | 1.40 % | 244.5 ms | 24.6 ms | 2.5 ms | 6.8 ms |
+| D3D11 | 2 | 3.02 MiB | 176.5 MiB | 258.1 MiB | 73.3 MiB | 1.80 % | 1.48 % | 280.9 ms | 21.0 ms | 1.7 ms | 3.3 ms |
+| D3D11 | 3 | 3.01 MiB | 176.5 MiB | 258.5 MiB | 73.2 MiB | 3.67 % | 1.28 % | 280.1 ms | 17.0 ms | 1.6 ms | 3.7 ms |
+| Vulkan | 1 | 16.68 MiB | 259.4 MiB | 314.3 MiB | 145.9 MiB | 3.59 % | 1.46 % | 471.7 ms | 42.1 ms | 13.8 ms | 208.6 ms |
+| Vulkan | 2 | 16.68 MiB | 259.4 MiB | 291.9 MiB | 111.4 MiB | 3.20 % | 1.47 % | 274.3 ms | 26.8 ms | 3.7 ms | 7.9 ms |
+| Vulkan | 3 | 16.68 MiB | 259.4 MiB | 295.3 MiB | 111.4 MiB | 3.59 % | 1.44 % | 567.6 ms | 29.6 ms | 4.6 ms | 7.3 ms |
+
+Same picture: shared 3.01–3.02 against 16.68 MiB (−82 %), dedicated −32 %, private −12 %,
+working set −35 %, CPU lower in every pair, GPU 3D equal within the noise, device creation 245–281
+against 272–568 ms. Wallpaper Engine's figures for this scene are in docs/benchmarks.
+
+### Bisection of the shared memory above the device
+
+`bisect.ps1`, scene 3463520581, D3D11 only, one run per variant (4 s warm-up + 8 s), game still
+running. `PROBE_VARIANT` switches one thing at a time; `STAGE` lines read the process's shared
+memory after each load step.
+
+| Variant | After device | After textures | After frame 1 | **After 30 frames** | End of window |
+|---|---|---|---|---|---|
+| default (153 dynamic CBs, VB per draw) | 0.72 | 13.14 | 13.18 | 3.17 | 3.17 |
+| `cb=default` (DEFAULT CBs, `UpdateSubresource`) | 0.72 | 13.14 | 13.18 | 3.17 | 3.21 |
+| `cb=big` (one big dynamic CB, `VSSetConstantBuffers1` offsets) | 0.72 | 13.14 | 13.23 | 2.91 | 2.91 |
+| `vb=shared` (one vertex buffer per program and coverage) | 0.72 | 13.14 | 13.18 | 3.04 | 3.04 |
+| `cb=big` + `vb=shared` | 0.72 | 16.02 | 16.10 | **2.74** | 2.74 |
+
+(MiB.) What it shows:
+- Creating the 153 constant buffers or 156 vertex buffers costs nothing visible by itself (states
+  and draws stages are flat at 0.72 / 13.14): the extra shared memory is what the driver keeps once
+  frames run, and it scales with the number of buffer objects. Shared constant buffer: −0.26 MiB;
+  shared vertex buffers: −0.13 MiB; both: −0.43 MiB, i.e. 2.7 MiB over a 0.72 MiB device.
+- `UpdateSubresource` does not help (3.17–3.21): the dynamic `WRITE_DISCARD` buffers are not the
+  cause.
+- **The loading peak is 13–16 MiB of shared memory** (immutable texture creation stages the
+  63 MiB of pixels through system memory); it is released within the first 30 frames. The counter
+  Wallpaper Engine's 3 MiB comes from is read at steady state, so is ours, but a Task Manager
+  reading during the first seconds of a load would show the peak.
+- Not tested: fewer render passes (86 against the engine's 65) and quads from `SV_VertexID` with
+  no vertex buffer (needs shader changes). Merging passes needs the engine's render graph.
+
+Confirmation of the best design, `cb=big,vb=shared`, scene 3463520581, 3 interleaved runs against
+Vulkan (`run-matrix.ps1`): D3D11 shared **2.87 / 3.10 / 2.86 MiB** (mean 2.94), dedicated 284.5,
+private 428–436, working set 64–69 MiB, CPU 0.8–4.2 %, GPU 3D 1.1–2.1 %, device 199–211 ms;
+Vulkan 17.18 MiB, 436.7 dedicated, 480–483 private, 120 working set, CPU 6.9–7.8 %, GPU 3D
+1.8–2.6 %, device 237–249 ms.
+
+**Conclusion.** Direct3D 11 brings the shared GPU memory from 15–17 MiB to about 3 MiB. With one
+shared constant buffer and shared vertex buffers it sits at 2.74–3.10 MiB over six runs (mean
+about 2.9): **under Wallpaper Engine's 3 MiB on average, not robustly "strictly under"** — one run
+in three is above 3.0, and the figures move by ±0.15 MiB with the system's other activity. Any
+D3D11 renderer should be designed with few buffer objects (per-frame arenas with offsets), and the
+margin is small enough that the person should decide knowing it is "equal to WE, within the
+measurement noise", not a clear win on that metric. On every other metric it is clearly lower
+than Vulkan: dedicated −35 %, working set −50 %, CPU about −60 %, device creation and upload about
+−15 % and −45 %, with equal GPU 3D time within the noise of the game running beside it.
