@@ -259,6 +259,13 @@ impl GpuContext {
         {
             wanted |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
         }
+        // Windows: D3D11 shared textures of the web host imported into Vulkan (lumenwall-engine
+        // `web`), instead of a copy through system memory. Same rule: the feature only unlocks
+        // the import call.
+        #[cfg(windows)]
+        {
+            wanted |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32;
+        }
         let features = available & wanted;
         let caps = GpuCaps {
             bc: features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
