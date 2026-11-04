@@ -1012,10 +1012,15 @@ fn steady_state_frames() {
     )
     .unwrap();
     let mut scene = s.b.build().unwrap();
-    assert!(
-        scene.counts().bundles >= 1,
-        "frozen passes are pre-recorded"
-    );
+    // Frozen passes are pre-recorded: in render bundles on the wgpu path, in the whole recorded
+    // frame on the direct Vulkan path (both draws of the image).
+    match scene.direct_stats() {
+        Some(d) => assert_eq!(d.draws, 2, "both draws pre-recorded (direct path)"),
+        None => assert!(
+            scene.counts().bundles >= 1,
+            "frozen passes are pre-recorded"
+        ),
+    }
     let mut timer = GpuTimer::new(ctx);
     let audio16 = [0.0; 16];
     let audio32 = [0.0; 32];
@@ -1048,6 +1053,7 @@ fn steady_state_frames() {
     render(&mut scene, &mut timer, 0.25);
     let resources = ctx.resources_created();
     let memory = ctx.memory().bytes();
+    let direct_objects = scene_objects(&scene);
     for i in 0..10 {
         render(&mut scene, &mut timer, 0.25 + i as f32 * 0.01);
         ctx.wait_idle();
@@ -1059,6 +1065,11 @@ fn steady_state_frames() {
         ctx.resources_created(),
         resources,
         "no GPU object created per frame"
+    );
+    assert_eq!(
+        scene_objects(&scene),
+        direct_objects,
+        "no wgpu-hal object created per frame (direct path)"
     );
     assert_eq!(ctx.memory().bytes(), memory);
     let d = read(ctx, &scene, &s.st);
