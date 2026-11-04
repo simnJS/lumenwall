@@ -115,8 +115,14 @@ fn agent() -> &'static ureq::Agent {
 
 /// Is `url` one we may fetch? HTTPS on Steam's hosts, or the configured mock.
 pub fn allowed(url: &str) -> bool {
-    if let Some(mock) = BASE.get() {
-        return url.starts_with(mock.as_str()) && url[mock.len()..].starts_with('/');
+    allowed_with(url, BASE.get().map(String::as_str))
+}
+
+/// [`allowed`] with the mock base passed in, so tests do not depend on the process-wide
+/// [`BASE`] another test may set at any time.
+fn allowed_with(url: &str, mock: Option<&str>) -> bool {
+    if let Some(mock) = mock {
+        return url.starts_with(mock) && url[mock.len()..].starts_with('/');
     }
     let Ok(uri) = url.parse::<ureq::http::Uri>() else {
         return false;
@@ -364,11 +370,9 @@ mod tests {
 
     #[test]
     fn only_steam_hosts_over_https() {
-        // The mock base is never set in this test binary's allow-list check here
-        // unless another test set it; skip then.
-        if BASE.get().is_some() {
-            return;
-        }
+        // Checked without the process-wide mock base, which the mock server test sets
+        // concurrently.
+        let allowed = |url| allowed_with(url, None);
         assert!(allowed("https://images.steamusercontent.com/ugc/1/abc/"));
         assert!(allowed("https://shared.akamai.steamstatic.com/x.jpg"));
         assert!(allowed(
@@ -381,6 +385,18 @@ mod tests {
         assert!(!allowed("https://other.akamaihd.net/x"));
         assert!(!allowed("https://images.steamusercontent.com:8443/x"));
         assert!(!allowed("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn only_the_mock_when_one_is_set() {
+        let mock = Some("http://127.0.0.1:21000");
+        assert!(allowed_with("http://127.0.0.1:21000/x.gif", mock));
+        assert!(!allowed_with("http://127.0.0.1:210001/x.gif", mock));
+        assert!(!allowed_with("http://127.0.0.1:21000", mock));
+        assert!(!allowed_with(
+            "https://images.steamusercontent.com/ugc/1/abc/",
+            mock
+        ));
     }
 
     #[test]
