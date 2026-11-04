@@ -130,22 +130,42 @@ pub fn normalize_item(raw: &str, style: PathStyle) -> Option<PathBuf> {
         return None;
     }
     let s = raw.strip_prefix(r"\\?\").unwrap_or(raw);
-    let path = match style {
-        PathStyle::Windows => PathBuf::from(s),
+    match style {
+        PathStyle::Windows => Some(lexical_normalize(Path::new(s))),
         PathStyle::Posix => {
             let s = s.replace('\\', "/");
             let s = match s.char_indices().nth(1) {
                 Some((i, ':')) => &s[i + 1..],
                 _ => &s[..],
             };
-            if s.starts_with('/') {
-                PathBuf::from(s)
-            } else {
-                PathBuf::from(format!("/{s}"))
-            }
+            Some(PathBuf::from(posix_normalize(s)))
         }
-    };
-    Some(lexical_normalize(&path))
+    }
+}
+
+/// Resolves `.` and `..` in a POSIX path given as text, rooted at `/`; `..` never climbs above
+/// the root. Works on the string rather than on `Path` so that the result uses `/` whatever the
+/// host OS (on a Windows host `Path` would turn `/a/b` into `\a\b`).
+fn posix_normalize(s: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in s.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            name => parts.push(name),
+        }
+    }
+    let mut out = String::new();
+    for part in &parts {
+        out.push('/');
+        out.push_str(part);
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
 }
 
 /// Resolves `.` and `..` without touching the file system; `..` never climbs above the root.
@@ -498,6 +518,16 @@ mod tests {
         assert_eq!(n("relative/dir"), Some("/relative/dir".into()));
         assert_eq!(n("/x/../../y"), Some("/y".into()));
         assert_eq!(n(""), None);
+    }
+
+    #[test]
+    fn posix_normalization_never_uses_the_host_separator() {
+        // On a Windows host `Path` would render these with `\`.
+        let n = |s: &str| normalize_item(s, PathStyle::Posix).unwrap();
+        assert_eq!(n(r"C:\a\b").to_str(), Some("/a/b"));
+        assert_eq!(n("C:").to_str(), Some("/"));
+        assert_eq!(n("/").to_str(), Some("/"));
+        assert_eq!(n("a//b/").to_str(), Some("/a/b"));
     }
 
     #[test]
