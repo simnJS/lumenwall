@@ -46,9 +46,9 @@ pub use context::{ContextOptions, GpuCaps, GpuContext, GpuInstance};
 pub use dynbuf::{FrameInputs, UniformSlot};
 pub use error::{RenderError, Result};
 pub use graph::{
-    DEPTH_FORMAT, DepthState, Extension, FrameCommands, Geometry, MeshAttribute, MeshId, MeshLayout, Op, PassDesc,
-    PassId, RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding, StreamAttribute, StreamId,
-    StreamLayout, TextureId, TextureRef,
+    DEPTH_FORMAT, DepthState, Extension, FrameCommands, Geometry, MeshAttribute, MeshId,
+    MeshLayout, Op, PassDesc, PassId, RenderScene, SceneBuilder, ShaderId, SkinRange, SlotBinding,
+    StreamAttribute, StreamId, StreamLayout, TextureId, TextureRef,
 };
 pub use hal::{Recording, WgpuReason};
 pub use headless::HeadlessOutput;

@@ -572,8 +572,8 @@ impl<'c> SceneBuilder<'c> {
     /// `LUMENWALL_DIRECT_VULKAN=0`). Call before adding shaders: [`Recording::Auto`] set later
     /// cannot make shaders already added usable by the direct path.
     pub fn set_recording(&mut self, recording: Recording) {
-        self.direct = crate::hal::choose(recording, self.ctx.adapter().get_info().backend)
-            .and(self.direct);
+        self.direct =
+            crate::hal::choose(recording, self.ctx.adapter().get_info().backend).and(self.direct);
         if self.direct.is_err() {
             self.direct_modules.clear();
         }
@@ -1158,7 +1158,9 @@ impl<'c> SceneBuilder<'c> {
         }
         // Direct path: wgpu-hal modules of the new shaders, uniform group over a new buffer.
         if let (Some(_), Err(r)) = (&scene.direct, self.direct) {
-            scene.abandon_direct(&format!("a shader added to the scene cannot be prepared ({r:?})"));
+            scene.abandon_direct(&format!(
+                "a shader added to the scene cannot be prepared ({r:?})"
+            ));
         }
         if let Some(d) = &mut scene.direct {
             let mut failed = None;
@@ -2158,6 +2160,8 @@ impl RenderScene {
     }
 
     /// Every texture the scene owns (targets, textures, depth buffers).
+    // wgpu handles hash and compare by their resource id, which never changes.
+    #[allow(clippy::mutable_key_type)]
     fn owned_textures(&self) -> HashSet<wgpu::Texture> {
         let mut owned: HashSet<wgpu::Texture> = self
             .targets
@@ -2178,6 +2182,7 @@ impl RenderScene {
     pub fn rebuild_bindings(&mut self, ctx: &GpuContext) -> Result<()> {
         // Direct path: the GPU finishes the recorded frames before what they use is replaced.
         if self.direct.is_some() {
+            #[allow(clippy::mutable_key_type)] // Keys compared by resource id.
             let owned = self.owned_textures();
             if let Some(d) = &mut self.direct {
                 d.idle(&|t| owned.contains(t));
@@ -2479,7 +2484,8 @@ impl RenderScene {
                     steps.push(Step::Render {
                         target: rt.texture(),
                         clear: *clear,
-                        depth: depth.map(|(d, c)| (&self.depths[d].texture, &self.depths[d].view, c)),
+                        depth: depth
+                            .map(|(d, c)| (&self.depths[d].texture, &self.depths[d].view, c)),
                         sampled,
                         draws,
                     });

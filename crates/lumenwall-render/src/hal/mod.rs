@@ -131,8 +131,15 @@ pub(crate) struct SlotView<'a> {
 /// How a draw is issued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawCall {
-    Vertices { first: u32, count: u32 },
-    Indexed { first: u32, count: u32, base: i32 },
+    Vertices {
+        first: u32,
+        count: u32,
+    },
+    Indexed {
+        first: u32,
+        count: u32,
+        base: i32,
+    },
     /// Index count of a vertex stream, read every frame.
     Stream(u32),
 }
@@ -319,7 +326,8 @@ pub(crate) struct DirectGraph {
     /// Replaced bind groups: destroyed once the GPU is idle.
     dead_groups: Vec<hv::BindGroup>,
     render_passes: HashMap<(bool, Option<bool>), vk::RenderPass>,
-    framebuffers: HashMap<(vk::RenderPass, vk::ImageView, vk::ImageView, u32, u32), vk::Framebuffer>,
+    framebuffers:
+        HashMap<(vk::RenderPass, vk::ImageView, vk::ImageView, u32, u32), vk::Framebuffer>,
     program: Program,
     /// Every wgpu object something recorded since the last [`Self::idle`] may use (the
     /// recorded frames hold no wgpu-core reference).
@@ -1011,6 +1019,8 @@ impl DirectGraph {
 
     /// Replaces the recorded frame with `steps` (the scene's segments, in order), and adopts
     /// the textures it uses for the first time.
+    // wgpu handles hash and compare by their resource id, which never changes.
+    #[allow(clippy::mutable_key_type)]
     pub(crate) fn build_program(&mut self, ctx: &GpuContext, steps: &[Step<'_>]) -> Res<()> {
         #[cfg(test)]
         if faults::programs() {
@@ -1252,7 +1262,8 @@ impl DirectGraph {
         state: &dyn FrameState,
         queries: Option<vk::QueryPool>,
     ) -> wgpu::CommandBuffer {
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         // SAFETY: the closure records into the encoder's open command buffer and never ends it,
         // the wgpu encoder is untouched meanwhile, and every handle recorded belongs to this
         // device and outlives the GPU's use of the command buffer (`keep`, `idle`): the
@@ -1309,8 +1320,7 @@ impl DirectGraph {
                             vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
                         )];
                     let memory: &[vk::MemoryBarrier<'_>] = if *global { &memory } else { &[] };
-                    let all = &self.program.barriers
-                        [*first as usize..(*first + *count) as usize];
+                    let all = &self.program.barriers[*first as usize..(*first + *count) as usize];
                     let mut buf = [vk::ImageMemoryBarrier::default(); BARRIER_BATCH];
                     let mut chunks = all.chunks(BARRIER_BATCH).peekable();
                     if chunks.peek().is_none() {
@@ -1673,15 +1683,14 @@ impl Drop for DirectGraph {
         let mut n = 0i64;
         let samplers: Vec<hv::Sampler> = self.samplers.drain().map(|(_, s)| s).collect();
         let modules: Vec<hv::ShaderModule> = self.modules.drain(..).flatten().collect();
-        let pipelines: Vec<hv::RenderPipeline> =
-            self.pipelines.drain(..).map(|(p, _)| p).collect();
+        let pipelines: Vec<hv::RenderPipeline> = self.pipelines.drain(..).map(|(p, _)| p).collect();
         let groups: Vec<hv::BindGroup> = self
             .pass_groups
             .drain(..)
             .flatten()
             .chain(self.uniform_group.take())
             .collect();
-        let layouts: Vec<Layout> = self.layouts.drain(..).collect();
+        let layouts: Vec<Layout> = std::mem::take(&mut self.layouts);
         let views: Vec<hv::TextureView> = self.views.drain().map(|(_, v)| v).collect();
         n += (samplers.len() + modules.len() + pipelines.len() + groups.len() + views.len()) as i64;
         n += 2 * layouts.len() as i64;

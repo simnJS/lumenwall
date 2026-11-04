@@ -109,7 +109,10 @@ pub fn read_texture_rgba8(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<V
             depth_or_array_layers: 1,
         },
     );
-    if texture.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING) {
+    if texture
+        .usage()
+        .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+    {
         // Back to the sampled state: a scene recorded directly in Vulkan expects its targets
         // there between frames (crate::hal), and the wgpu path does not mind.
         encoder.transition_resources(
