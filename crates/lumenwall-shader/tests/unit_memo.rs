@@ -245,3 +245,48 @@ fn passes_load_in_parallel_with_the_memo() {
         assert_eq!(p.key, *c.prepare(&fs, r).unwrap().key().as_bytes());
     }
 }
+
+#[test]
+fn equal_requests_return_the_same_pass() {
+    let c = ShaderCompiler::new(CompileOptions::default(), None);
+    let fs = CountingFs::new(Some(6), &files());
+    let reference = ShaderCompiler::new(CompileOptions::default(), None);
+    let plain = CountingFs::new(None, &files());
+    let shown = |p: &lumenwall_shader::PassShader| {
+        format!(
+            "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+            p.key,
+            p.vertex_params,
+            p.fragment_params,
+            p.vertex_combos,
+            p.fragment_combos,
+            p.warnings
+        )
+    };
+    let mut keys = Vec::new();
+    for (shader, combos) in requests() {
+        let req = PassRequest {
+            shader,
+            combos: &combos,
+        };
+        let got = c.load_pass(&fs, &req).unwrap();
+        let want = reference.load_pass(&plain, &req).unwrap();
+        assert_eq!(shown(&got), shown(&want), "{shader} {combos:?}");
+        keys.push(got.key);
+    }
+    // a/0 and a/1 differ, a/0 asked twice is one program.
+    assert_ne!(keys[0], keys[1]);
+    assert_eq!(keys[0], keys[3]);
+    assert_eq!(fs.total_reads(), 5);
+    // Another identity loads its own passes.
+    let other = CountingFs::new(Some(8), &files());
+    c.load_pass(
+        &other,
+        &PassRequest {
+            shader: "a",
+            combos: &combos(0),
+        },
+    )
+    .unwrap();
+    assert_eq!(other.total_reads(), 3);
+}

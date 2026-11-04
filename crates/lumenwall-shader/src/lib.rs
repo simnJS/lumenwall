@@ -188,6 +188,9 @@ struct UnitMemo {
     units: HashMap<String, Result<Arc<we::ScannedUnit>, ShaderError>>,
     /// Raw files by VFS path (units, includes, compatibility files), absent ones too.
     files: HashMap<String, Option<Arc<[u8]>>>,
+    /// Loaded passes by shader and combos: a pass equal to an earlier one of the same file
+    /// set is neither assembled nor hashed again.
+    passes: HashMap<(String, PassCombos), Result<PassShader, ShaderError>>,
 }
 
 /// File access that keeps every file read under one identity in a [`UnitMemo`].
@@ -268,17 +271,8 @@ impl ShaderCompiler {
         let Some(id) = fs.identity() else {
             return scan(fs);
         };
-        {
-            let mut m = self.units.lock().unwrap_or_else(|e| e.into_inner());
-            if m.fs != Some(id) {
-                *m = UnitMemo {
-                    fs: Some(id),
-                    ..UnitMemo::default()
-                };
-            }
-            if let Some(u) = m.units.get(rel) {
-                return u.clone();
-            }
+        if let Some(u) = self.memo_for(id).units.get(rel) {
+            return u.clone();
         }
         // Not under the lock: other threads keep loading passes meanwhile.
         let unit = scan(&MemoFs {
@@ -286,10 +280,7 @@ impl ShaderCompiler {
             id,
             memo: &self.units,
         });
-        let mut m = self.units.lock().unwrap_or_else(|e| e.into_inner());
-        if m.fs == Some(id) {
-            m.units.insert(rel.to_owned(), unit.clone());
-        }
+        self.memo_for(id).units.insert(rel.to_owned(), unit.clone());
         unit
     }
 
@@ -388,13 +379,36 @@ impl ShaderCompiler {
         })
     }
 
+    /// [`Self::prepare`] then [`Self::compile`]. With a file set identity, a request equal to
+    /// an earlier one (same shader and combos) returns that pass again.
     pub fn load_pass(
         &self,
         fs: &dyn ShaderFs,
         req: &PassRequest,
     ) -> Result<PassShader, ShaderError> {
-        let p = self.prepare(fs, req)?;
-        self.compile(p)
+        let Some(id) = fs.identity() else {
+            return self.prepare(fs, req).and_then(|p| self.compile(p));
+        };
+        let key = (req.shader.to_owned(), req.combos.clone());
+        if let Some(p) = self.memo_for(id).passes.get(&key) {
+            return p.clone();
+        }
+        let pass = self.prepare(fs, req).and_then(|p| self.compile(p));
+        let mut m = self.memo_for(id);
+        m.passes.insert(key, pass.clone());
+        pass
+    }
+
+    /// The memo of the file set `id`, emptied first when it held another one.
+    fn memo_for(&self, id: u64) -> std::sync::MutexGuard<'_, UnitMemo> {
+        let mut m = self.units.lock().unwrap_or_else(|e| e.into_inner());
+        if m.fs != Some(id) {
+            *m = UnitMemo {
+                fs: Some(id),
+                ..UnitMemo::default()
+            };
+        }
+        m
     }
 
     /// Loads many passes in parallel (rayon). Results are in request order.
