@@ -247,3 +247,32 @@ byte-identical.
 | Process memory, Vulkan on NVIDIA/Windows | every `VkDeviceMemory` is committed private memory (protect 0x404, never resident): +64.1 MiB private for a 64 MiB texture, 545 of 715 MiB private on 3463520581, 200 of 356 on 3018340632 (main). Rust heap after load 3.6 / 2.0 MiB live (peak 12 / 33 MiB while loading, returned); process heap 20 / 16 MiB committed with 5 / 2.6 MiB free, `HeapCompact` recovers nothing |
 | Working set | made of load-time pages: `K32EmptyWorkingSet` after 40 frames (8–11 ms, first frame after +2–5 ms) → 19 MiB (3018340632) and 49 MiB (3463520581) 330 frames later, headless (part C) |
 | Threads at 30 fps (main, `GetThreadTimes`, game running) | 3018340632: render thread 2.65 % of a core (update 72 µs + encode/submit 644 µs per frame), one NVIDIA driver thread 0.70 %; 3463520581: 6.85 % (update 119 µs + encode/submit 1983 µs), driver thread 2.34 %, 12 other threads ≈ 0. With the content update at 20–60 µs, the process CPU is the render thread's encode and submit plus that driver thread, which follows what is submitted |
+
+## Windows, part C: daemon at rest and wallpaper switch (measured by part C)
+
+Release builds, off the desktop (the daemon with `--no-config --silent --fps 30` in a 480×270 window
+below the monitors, private IPC endpoint and `LOCALAPPDATA`, below-normal priority, a game running:
+absolute times are pessimistic), Windows 11, RTX 4080 SUPER + AMD iGPU without monitor. Base: main
+b4d1db6 (engine in the daemon). Details in `crates/lumenwall-engine/README.md`, "Measurements".
+Wallpaper Engine (desktop bench): empty 3.1 MiB private, 16.7 MiB working set; command → first GPU
+activity 462 ms (3463520581), 331 ms (3018340632).
+
+| Change | Before | After |
+|---|---|---|
+| Engine in a process of its own on Windows (the daemon never loads the GPU driver; the process ends on `clear`, is reused between two wallpapers, tied to the daemon by a job object) | empty daemon after a scene and `clear`: 62–81 MiB private, 84–120 MiB working set, 10–14 threads, `nvoglv64` and 4 other NVIDIA modules mapped | 6.3–7.0 MiB private, working set 2.3 MiB, no GPU module |
+| Log file queue of 1024 lines instead of tracing-appender's 128 000 (preallocated) | 6.29 MiB private | 2.28 MiB |
+| Windows heaps trimmed (`HeapOptimizeResources` + `HeapCompact`) after an unload and when the engine process ends | 3.14 MiB after 7 switches from empty and 6 between wallpapers | 2.40 MiB |
+| One GPU backend per instance (Vulkan, Direct3D 12 only as a fallback; `LUMENWALL_GPU_BACKEND`) | adapter + device 294–605 ms (DX12 enumeration) | instance + device 148–177 ms (cold driver, new process) |
+| Vulkan loader restricted to the adapter's driver, AMD's implicit layer off | `amdvlk64` mapped, `AMD\VkCache` created | NVIDIA modules only |
+| GPU opened alongside the platform, swap chain alongside the scene build | first start, process → renderer ready (3018340632) 702–772 ms | 446–507 ms |
+
+| Situation (with parts A and B merged) | Result |
+|---|---|
+| Empty daemon after a scene and `clear` | **2.23 MiB private, 1.97 MiB working set**, 0.0 wake-ups/s (2.35 / 2.08 MiB after 13 mixed switches) |
+| Command → first frame between two wallpapers (same engine process) | **202–241 ms** (3463520581), **231–269 ms** (3018340632); first GPU activity 45–120 ms |
+| Command → first frame from empty | 511–645 ms (3463520581), 504–548 ms (3018340632); first GPU activity 279–344 ms and 287–377 ms |
+
+From empty, the first frame waits for a new process, a cold Vulkan driver and NVIDIA's first swap
+chain of a device (≈ 0.2 s): about 0.45 s before any scene work. Only a device kept open would
+remove it, and a device keeps the driver in memory (≥ 30 MiB private): the empty daemon and the
+switch from empty are traded against each other.
