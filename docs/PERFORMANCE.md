@@ -355,3 +355,7 @@ neon_sunset, razer_vortex, retro, ricepod, shimmering_particles, techno). razer_
 direct: 2.44 %, same region; identical elsewhere): that part of the scene is not deterministic. No Vulkan
 validation layer is installed on the measuring PC: not run. Linux records through the same code (Vulkan); not
 measured there.
+
+For the final desktop bench: a release build of main with this part records every Vulkan scene directly; the same
+binary with `LUMENWALL_DIRECT_VULKAN=0` in the engine's environment (`bench-vs-we -LumenwallEnv`) records through
+wgpu, for a before/after on the desktop without a second build.
