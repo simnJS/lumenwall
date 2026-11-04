@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -28,6 +28,9 @@ pub struct PlaylistSettings {
     pub update_on_pause: bool,
     /// `videosequence`: read but unused.
     pub video_sequence: bool,
+    /// `transition`: Wallpaper Engine blends one item into the next. Read; Lumenwall cuts
+    /// from one item to the next for now (a transition needs rendering in the engine).
+    pub transition: bool,
 }
 
 impl Default for PlaylistSettings {
@@ -38,6 +41,7 @@ impl Default for PlaylistSettings {
             random: false,
             update_on_pause: false,
             video_sequence: false,
+            transition: false,
         }
     }
 }
@@ -61,6 +65,9 @@ impl PlaylistSettings {
         }
         if let Some(b) = settings.get("videosequence").and_then(Value::as_bool) {
             out.video_sequence = b;
+        }
+        if let Some(b) = settings.get("transition").and_then(Value::as_bool) {
+            out.transition = b;
         }
         out
     }
@@ -282,13 +289,16 @@ pub fn parse_playlists(
 }
 
 type ConfigSource = dyn Fn() -> Result<String, ServiceError> + Send + Sync;
+type Loaded = Result<Arc<BTreeMap<String, Playlist>>, PlaylistError>;
 
-/// [`PlaylistCatalog`] reading Wallpaper Engine's `config.json` on first use, once.
+/// [`PlaylistCatalog`] reading Wallpaper Engine's `config.json` on first use, then again
+/// only when a client lists the playlists ([`PlaylistCatalog::list`]), so that playlists
+/// made in Wallpaper Engine meanwhile show up.
 pub struct WeConfigCatalog {
     source: Box<ConfigSource>,
     probe: Box<dyn PathProbe>,
     style: PathStyle,
-    loaded: OnceLock<Result<Arc<BTreeMap<String, Playlist>>, PlaylistError>>,
+    loaded: Mutex<Option<Loaded>>,
 }
 
 impl WeConfigCatalog {
@@ -303,25 +313,36 @@ impl WeConfigCatalog {
             source: Box::new(source),
             probe: Box::new(probe),
             style,
-            loaded: OnceLock::new(),
+            loaded: Mutex::new(None),
         }
     }
 
-    fn playlists(&self) -> Result<&Arc<BTreeMap<String, Playlist>>, PlaylistError> {
-        self.loaded
-            .get_or_init(|| {
-                let json = (self.source)().map_err(|e| PlaylistError::Read(e.to_string()))?;
-                match parse_playlists(&json, self.style, self.probe.as_ref()) {
-                    // Invalid JSON is logged and yields no playlist (spec 07 §17.1).
-                    Err(PlaylistError::InvalidJson(message)) => {
-                        tracing::error!("invalid Wallpaper Engine configuration: {message}");
-                        Ok(Arc::default())
-                    }
-                    other => other.map(Arc::new),
-                }
-            })
-            .as_ref()
-            .map_err(Clone::clone)
+    fn load(&self) -> Loaded {
+        let json = (self.source)().map_err(|e| PlaylistError::Read(e.to_string()))?;
+        match parse_playlists(&json, self.style, self.probe.as_ref()) {
+            // Invalid JSON is logged and yields no playlist (spec 07 §17.1).
+            Err(PlaylistError::InvalidJson(message)) => {
+                tracing::error!("invalid Wallpaper Engine configuration: {message}");
+                Ok(Arc::default())
+            }
+            other => other.map(Arc::new),
+        }
+    }
+
+    fn loaded(&self) -> std::sync::MutexGuard<'_, Option<Loaded>> {
+        self.loaded.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The playlists read so far (reads them the first time).
+    fn playlists(&self) -> Loaded {
+        self.loaded().get_or_insert_with(|| self.load()).clone()
+    }
+
+    /// Reads the configuration again.
+    pub fn refresh(&self) -> Loaded {
+        let fresh = self.load();
+        *self.loaded() = Some(fresh.clone());
+        fresh
     }
 
     /// The named playlist.
@@ -340,6 +361,14 @@ impl WeConfigCatalog {
 impl PlaylistCatalog for WeConfigCatalog {
     fn first_wallpaper(&self, name: &str) -> Result<PathBuf, ServiceError> {
         Ok(self.playlist(name)?.items[0].clone())
+    }
+
+    fn playlist(&self, name: &str) -> Result<Playlist, ServiceError> {
+        Ok(WeConfigCatalog::playlist(self, name)?)
+    }
+
+    fn list(&self) -> Result<Vec<Playlist>, ServiceError> {
+        Ok(self.refresh()?.values().cloned().collect())
     }
 }
 
@@ -375,55 +404,103 @@ fn shuffle(order: &mut [usize], rng: &mut impl Shuffle) {
     }
 }
 
-/// Advances one playlist on its timer (spec 07 §17.4).
+/// Runs one playlist for one target (spec 07 §17.4): its timer, the order of its items,
+/// the items that failed, and what the target shows.
+///
+/// Time is passed in by the caller (`now`), so the runner is driven by a fake clock in tests;
+/// the caller sleeps until [`deadline`](Self::deadline) instead of polling.
 #[derive(Debug)]
 pub struct PlaylistRunner<R> {
     playlist: Playlist,
     order: Vec<usize>,
     position: usize,
+    /// The target shows a wallpaper that is not an item (until the first change).
+    outside: bool,
+    shown: PathBuf,
     failed: Vec<bool>,
     deadline: Instant,
+    /// Since when the target is paused.
+    paused_since: Option<Instant>,
     rng: R,
 }
 
 impl<R: Shuffle> PlaylistRunner<R> {
-    /// Starts at the item currently shown (`current`), else at the first one.
+    /// Starts at the item currently shown (`current`), else at the first one. A `current`
+    /// that is not an item stays shown until the first change.
     pub fn new(playlist: Playlist, current: Option<&Path>, now: Instant, mut rng: R) -> Self {
         let count = playlist.items.len();
         let mut order: Vec<usize> = (0..count).collect();
+        let mut found = current.and_then(|c| order.iter().position(|&i| playlist.items[i] == c));
         if playlist.settings.random {
             shuffle(&mut order, &mut rng);
+            // lumenwall: the first round starts with the wallpaper shown, so that it shows
+            // every item (the reference starts in the middle of its shuffled order and skips
+            // the items before it until the next round).
+            if let Some(item) = found {
+                let at = order.iter().position(|&i| i == item).unwrap_or(0);
+                order.swap(0, at);
+                found = Some(0);
+            }
         }
-        let position = current
-            .and_then(|c| order.iter().position(|&i| playlist.items[i] == c))
-            .unwrap_or(0);
+        let position = found.unwrap_or(0);
+        let shown = current.map_or_else(|| playlist.items[order[0]].clone(), Path::to_path_buf);
         let deadline = now + playlist.settings.delay;
         Self {
             failed: vec![false; count],
+            outside: current.is_some() && found.is_none(),
+            shown,
             playlist,
             order,
             position,
             deadline,
+            paused_since: None,
             rng,
         }
     }
 
-    /// Only timer playlists with at least two items ever change.
+    pub fn playlist(&self) -> &Playlist {
+        &self.playlist
+    }
+
+    /// Only timer playlists with at least two items change by themselves.
     pub fn is_active(&self) -> bool {
         self.playlist.settings.timer && self.playlist.items.len() >= 2
     }
 
-    /// When [`advance`](Self::advance) has work to do; `None` if never.
+    /// When [`advance`](Self::advance) has work to do; `None` if never, or not before the
+    /// pause ends (paused time does not count unless `updateonpause`).
     pub fn deadline(&self) -> Option<Instant> {
-        self.is_active().then_some(self.deadline)
+        let waiting = self.paused_since.is_some() && !self.playlist.settings.update_on_pause;
+        (self.is_active() && !waiting).then_some(self.deadline)
     }
 
-    /// Item at the current position.
+    /// What the target shows.
     pub fn current(&self) -> &Path {
-        &self.playlist.items[self.order[self.position]]
+        &self.shown
     }
 
-    /// Call when a fullscreen pause ends: unless `updateonpause`, the pause does not count.
+    /// Index in the playlist's items of what the target shows, `None` when it is not an item.
+    pub fn current_item(&self) -> Option<usize> {
+        if self.outside {
+            return None;
+        }
+        self.playlist.items.iter().position(|p| *p == self.shown)
+    }
+
+    /// The target's outputs paused (fullscreen window, locked session, hidden, user pause)
+    /// or resumed at `now`. Calls for an unchanged state are ignored.
+    pub fn set_paused(&mut self, paused: bool, now: Instant) {
+        match (paused, self.paused_since) {
+            (true, None) => self.paused_since = Some(now),
+            (false, Some(since)) => {
+                self.paused_since = None;
+                self.pause_ended(now.saturating_duration_since(since));
+            }
+            _ => {}
+        }
+    }
+
+    /// Call when a pause ends: unless `updateonpause`, the pause does not count.
     pub fn pause_ended(&mut self, paused_for: Duration) {
         if !self.playlist.settings.update_on_pause {
             self.deadline += paused_for;
@@ -437,18 +514,54 @@ impl<R: Shuffle> PlaylistRunner<R> {
     pub fn advance(
         &mut self,
         now: Instant,
+        precheck: impl FnMut(&Path) -> bool,
+        load: impl FnMut(&Path) -> bool,
+    ) -> Option<PathBuf> {
+        match self.deadline() {
+            Some(deadline) if now >= deadline => self.step(now, true, precheck, load),
+            _ => None,
+        }
+    }
+
+    /// Next (`forward`) or previous usable item now, whatever the mode (Lumenwall's next and
+    /// previous commands); the timer starts again. Same contract as [`advance`](Self::advance).
+    pub fn step(
+        &mut self,
+        now: Instant,
+        forward: bool,
         mut precheck: impl FnMut(&Path) -> bool,
         mut load: impl FnMut(&Path) -> bool,
     ) -> Option<PathBuf> {
-        if !self.is_active() || now < self.deadline {
+        let count = self.order.len();
+        if count < 2 && !self.outside {
             return None;
         }
+        // A new delay in every case (§17.4 step 6); a pause going on counts from now.
         self.deadline = now + self.playlist.settings.delay;
-        let count = self.order.len();
-        self.position = (self.position + 1) % count;
-        if self.position == 0 && self.playlist.settings.random {
-            shuffle(&mut self.order, &mut self.rng);
+        if self.paused_since.is_some() {
+            self.paused_since = Some(now);
         }
+        let move_on = |runner: &mut Self| {
+            if std::mem::take(&mut runner.outside) {
+                // lumenwall: from a wallpaper outside the playlist, the first change shows
+                // the start of the order (the reference starts at the second item).
+                runner.position = if forward { 0 } else { count - 1 };
+            } else if forward {
+                runner.position = (runner.position + 1) % count;
+                if runner.position == 0 && runner.playlist.settings.random {
+                    let last = runner.order[count - 1];
+                    shuffle(&mut runner.order, &mut runner.rng);
+                    // lumenwall: a new round never starts with the item that ended the last
+                    // one (the reference can show it twice in a row).
+                    if runner.order[0] == last {
+                        runner.order.swap(0, count - 1);
+                    }
+                }
+            } else {
+                runner.position = (runner.position + count - 1) % count;
+            }
+        };
+        move_on(self);
         let mut tries = 0;
         let item = loop {
             if tries >= count {
@@ -463,11 +576,12 @@ impl<R: Shuffle> PlaylistRunner<R> {
                 tracing::warn!(item = %self.playlist.items[item].display(), "playlist item has no valid project.json");
                 self.failed[item] = true;
             }
-            self.position = (self.position + 1) % count;
+            move_on(self);
             tries += 1;
         };
         let path = &self.playlist.items[item];
         if load(path) {
+            self.shown = path.clone();
             Some(path.clone())
         } else {
             tracing::warn!(item = %path.display(), "cannot load playlist item");
@@ -475,6 +589,17 @@ impl<R: Shuffle> PlaylistRunner<R> {
             None
         }
     }
+}
+
+/// Spec 07 §17.4 step 3: `project.json` readable, with `type` and `file`.
+pub fn project_is_usable(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("project.json")) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&text).is_ok_and(|v| {
+        v.get("type").and_then(Value::as_str).is_some()
+            && v.get("file").and_then(Value::as_str).is_some()
+    })
 }
 
 #[cfg(test)]
@@ -773,5 +898,281 @@ mod tests {
             t += minutes(1);
             runner.advance(t, |_| true, |_| true).unwrap(); // wraps and reshuffles
         }
+    }
+
+    /// A WE `config.json` playlist, as the runner gets it from the catalog.
+    fn from_config(settings: &str, count: usize) -> Playlist {
+        let items: Vec<String> = (0..count).map(|i| format!("\"C:\\\\w\\\\{i}\"")).collect();
+        let json = format!(
+            r#"{{"steamuser":{{"general":{{"playlists":[
+                {{"name":"p","items":[{}],"settings":{settings}}}]}}}}}}"#,
+            items.join(",")
+        );
+        let entries: Vec<(String, PathKind)> = (0..count)
+            .map(|i| (format!("/w/{i}"), PathKind::Directory))
+            .collect();
+        let fs = FakeFs(
+            entries
+                .into_iter()
+                .map(|(p, k)| (PathBuf::from(p), k))
+                .collect(),
+        );
+        parse_playlists(&json, PathStyle::Posix, &fs)
+            .unwrap()
+            .remove("p")
+            .unwrap()
+    }
+
+    fn shown(runner: &PlaylistRunner<SplitMix64>) -> String {
+        runner.current().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn timer_mode_from_config_follows_the_delay() {
+        let p = from_config(
+            r#"{"clock":"clock24","delay":15,"mode":"timer","order":"sorted",
+                "transition":true,"updateonpause":false,"videosequence":false}"#,
+            3,
+        );
+        assert!(p.settings.timer && !p.settings.random && p.settings.transition);
+        assert_eq!(p.settings.delay, minutes(15));
+        let t0 = Instant::now();
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(7));
+        assert_eq!(shown(&runner), "/w/0");
+        assert_eq!(runner.current_item(), Some(0));
+        let mut t = t0;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            assert_eq!(runner.deadline(), Some(t + minutes(15)));
+            assert_eq!(runner.advance(t + minutes(14), |_| true, |_| true), None);
+            t += minutes(15);
+            seen.push(runner.advance(t, |_| true, |_| true).unwrap());
+        }
+        // `sorted` (and anything but `random`) plays in the playlist's order, then loops.
+        let seen: Vec<_> = seen
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(seen, ["/w/1", "/w/2", "/w/0", "/w/1"]);
+        assert_eq!(runner.current_item(), Some(1));
+    }
+
+    #[test]
+    fn random_mode_from_config_shuffles_each_round() {
+        let p = from_config(r#"{"delay":1,"mode":"timer","order":"random"}"#, 6);
+        assert!(p.settings.random);
+        let t0 = Instant::now();
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(3));
+        let mut t = t0;
+        let mut rounds = Vec::new();
+        for _ in 0..3 {
+            let mut round = vec![shown(&runner)];
+            for _ in 0..5 {
+                t += minutes(1);
+                round.push(
+                    runner
+                        .advance(t, |_| true, |_| true)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            let mut sorted = round.clone();
+            sorted.sort();
+            assert_eq!(sorted, ["/w/0", "/w/1", "/w/2", "/w/3", "/w/4", "/w/5"]);
+            rounds.push(round);
+            t += minutes(1);
+            runner.advance(t, |_| true, |_| true).unwrap();
+        }
+        // A new shuffle each round (fixed seed: deterministic).
+        assert!(rounds.windows(2).any(|w| w[0] != w[1]), "{rounds:?}");
+    }
+
+    #[test]
+    fn random_rounds_start_with_the_wallpaper_shown_and_never_repeat_at_the_seam() {
+        for seed in 0..50 {
+            let p = from_config(r#"{"delay":1,"order":"random"}"#, 4);
+            let t0 = Instant::now();
+            let mut runner = PlaylistRunner::new(p, Some(Path::new("/w/2")), t0, SplitMix64(seed));
+            let mut t = t0;
+            let mut seen = vec![shown(&runner)];
+            for _ in 0..11 {
+                t += minutes(1);
+                seen.push(
+                    runner
+                        .advance(t, |_| true, |_| true)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            for round in seen.chunks(4) {
+                let mut sorted = round.to_vec();
+                sorted.sort();
+                assert_eq!(
+                    sorted,
+                    ["/w/0", "/w/1", "/w/2", "/w/3"],
+                    "seed {seed}: {seen:?}"
+                );
+            }
+            assert_eq!(seen[0], "/w/2");
+            assert!(
+                seen.windows(2).all(|w| w[0] != w[1]),
+                "seed {seed}: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_modes_from_config_never_change_by_themselves() {
+        // Spec 07 §17.3: only `timer` changes; next and previous still work.
+        let p = from_config(r#"{"delay":1,"mode":"never-heard-of"}"#, 3);
+        assert!(!p.settings.timer);
+        let t0 = Instant::now();
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(1));
+        assert_eq!(runner.deadline(), None);
+        assert_eq!(runner.advance(t0 + minutes(600), |_| true, |_| true), None);
+        let back = runner.step(t0 + minutes(601), false, |_| true, |_| true);
+        assert_eq!(back, Some(PathBuf::from("/w/2")));
+        assert_eq!(runner.deadline(), None);
+    }
+
+    #[test]
+    fn next_and_previous_restart_the_timer() {
+        let p = from_config(r#"{"delay":10}"#, 3);
+        let t0 = Instant::now();
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(1));
+        let t = t0 + minutes(4);
+        assert_eq!(
+            runner.step(t, true, |_| true, |_| true),
+            Some(PathBuf::from("/w/1"))
+        );
+        assert_eq!(runner.deadline(), Some(t + minutes(10)));
+        assert_eq!(
+            runner.step(t, false, |_| true, |_| true),
+            Some(PathBuf::from("/w/0"))
+        );
+        assert_eq!(
+            runner.step(t, false, |_| true, |_| true),
+            Some(PathBuf::from("/w/2"))
+        );
+        // Backwards skips failed items too.
+        assert_eq!(
+            runner.step(t, false, |p| p != Path::new("/w/1"), |_| true),
+            Some(PathBuf::from("/w/0"))
+        );
+        // The timer then goes on from the new item.
+        assert_eq!(
+            runner.advance(t + minutes(10), |_| true, |_| true),
+            Some(PathBuf::from("/w/2"))
+        );
+        let single = from_config(r#"{"delay":10}"#, 1);
+        let mut runner = PlaylistRunner::new(single, None, t0, SplitMix64(1));
+        assert_eq!(runner.step(t, true, |_| true, |_| true), None);
+    }
+
+    #[test]
+    fn paused_time_does_not_count_unless_update_on_pause() {
+        let t0 = Instant::now();
+        let p = from_config(r#"{"delay":10,"updateonpause":false}"#, 2);
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(1));
+        runner.set_paused(true, t0 + minutes(4));
+        // Nothing to wake up for while paused.
+        assert_eq!(runner.deadline(), None);
+        assert_eq!(runner.advance(t0 + minutes(30), |_| true, |_| true), None);
+        runner.set_paused(true, t0 + minutes(5)); // same state: ignored
+        runner.set_paused(false, t0 + minutes(34));
+        // 4 minutes played, 6 to go.
+        assert_eq!(runner.deadline(), Some(t0 + minutes(40)));
+        assert_eq!(runner.advance(t0 + minutes(39), |_| true, |_| true), None);
+        assert_eq!(
+            runner.advance(t0 + minutes(40), |_| true, |_| true),
+            Some(PathBuf::from("/w/1"))
+        );
+
+        // A manual change during a pause: the new delay counts from the change.
+        runner.set_paused(true, t0 + minutes(41));
+        runner.step(t0 + minutes(45), true, |_| true, |_| true);
+        runner.set_paused(false, t0 + minutes(50));
+        assert_eq!(runner.deadline(), Some(t0 + minutes(60)));
+
+        let p = from_config(r#"{"delay":10,"updateonpause":true}"#, 2);
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(1));
+        runner.set_paused(true, t0 + minutes(4));
+        assert_eq!(runner.deadline(), Some(t0 + minutes(10)));
+        // It changes while paused.
+        assert_eq!(
+            runner.advance(t0 + minutes(10), |_| true, |_| true),
+            Some(PathBuf::from("/w/1"))
+        );
+        runner.set_paused(false, t0 + minutes(30));
+        assert_eq!(runner.deadline(), Some(t0 + minutes(20)));
+    }
+
+    #[test]
+    fn a_wallpaper_outside_the_playlist_stays_until_the_first_change() {
+        let t0 = Instant::now();
+        let p = from_config(r#"{"delay":1}"#, 3);
+        let mut runner = PlaylistRunner::new(p, Some(Path::new("/elsewhere")), t0, SplitMix64(1));
+        assert_eq!(shown(&runner), "/elsewhere");
+        assert_eq!(runner.current_item(), None);
+        assert_eq!(
+            runner.advance(t0 + minutes(1), |_| true, |_| true),
+            Some(PathBuf::from("/w/0"))
+        );
+        assert_eq!(runner.current_item(), Some(0));
+        // Starting backwards goes to the end.
+        let p = from_config(r#"{"delay":1}"#, 3);
+        let mut runner = PlaylistRunner::new(p, Some(Path::new("/elsewhere")), t0, SplitMix64(1));
+        assert_eq!(
+            runner.step(t0, false, |_| true, |_| true),
+            Some(PathBuf::from("/w/2"))
+        );
+        // A load failure keeps what is shown.
+        let p = from_config(r#"{"delay":1}"#, 2);
+        let mut runner = PlaylistRunner::new(p, None, t0, SplitMix64(1));
+        assert_eq!(runner.advance(t0 + minutes(1), |_| true, |_| false), None);
+        assert_eq!(shown(&runner), "/w/0");
+    }
+
+    #[test]
+    fn catalog_refresh_reads_new_playlists() {
+        let text = Arc::new(Mutex::new(
+            r#"{"steamuser":{"general":{"playlists":[{"name":"a","items":["/w/x"]}]}}}"#.to_owned(),
+        ));
+        let source = text.clone();
+        let catalog = WeConfigCatalog::new(
+            move || Ok(source.lock().unwrap().clone()),
+            FakeFs::with(&[("/w/x", PathKind::Directory), ("/w/y", PathKind::Directory)]),
+            PathStyle::Posix,
+        );
+        let names = |list: Vec<Playlist>| list.into_iter().map(|p| p.name).collect::<Vec<_>>();
+        assert_eq!(names(catalog.list().unwrap()), ["a"]);
+        *text.lock().unwrap() = r#"{"steamuser":{"general":{"playlists":[
+            {"name":"a","items":["/w/x"]},{"name":"b","items":["/w/y"],
+             "settings":{"transition":true}}]}}}"#
+            .to_owned();
+        // Plans keep what was read until a client lists the playlists again.
+        assert!(PlaylistCatalog::playlist(&catalog, "b").is_err());
+        assert_eq!(names(catalog.list().unwrap()), ["a", "b"]);
+        let b = PlaylistCatalog::playlist(&catalog, "b").unwrap();
+        assert!(b.settings.transition);
+        assert_eq!(catalog.first_wallpaper("b").unwrap(), PathBuf::from("/w/y"));
+    }
+
+    #[test]
+    fn usable_projects_need_type_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!project_is_usable(dir.path()));
+        std::fs::write(dir.path().join("project.json"), r#"{"type":"scene"}"#).unwrap();
+        assert!(!project_is_usable(dir.path()));
+        std::fs::write(
+            dir.path().join("project.json"),
+            r#"{"type":"scene","file":"scene.json"}"#,
+        )
+        .unwrap();
+        assert!(project_is_usable(dir.path()));
+        std::fs::write(dir.path().join("project.json"), "{").unwrap();
+        assert!(!project_is_usable(dir.path()));
     }
 }

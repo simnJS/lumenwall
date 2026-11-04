@@ -289,6 +289,42 @@ impl Client {
         }
     }
 
+    /// Wallpaper Engine playlists (see [`Request::ListPlaylists`]).
+    pub fn playlists(&self) -> Result<Vec<Playlist>, Error> {
+        match self.call(Request::ListPlaylists)? {
+            Response::Playlists { playlists } => Ok(playlists),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// Plays a playlist on `output`, or on every output (see [`Request::ApplyPlaylist`]).
+    pub fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        scaling: Scaling,
+    ) -> Result<(), Error> {
+        self.call_done(Request::ApplyPlaylist {
+            output: output.map(str::to_owned),
+            name: name.to_owned(),
+            scaling,
+        })
+    }
+
+    /// Next playlist item on `output`, or on every playing playlist.
+    pub fn playlist_next(&self, output: Option<&str>) -> Result<(), Error> {
+        self.call_done(Request::PlaylistNext {
+            output: output.map(str::to_owned),
+        })
+    }
+
+    /// Previous playlist item on `output`, or on every playing playlist.
+    pub fn playlist_previous(&self, output: Option<&str>) -> Result<(), Error> {
+        self.call_done(Request::PlaylistPrevious {
+            output: output.map(str::to_owned),
+        })
+    }
+
     pub fn subscribe(&self, topics: &[Topic]) -> Result<(), Error> {
         self.call_done(Request::Subscribe {
             topics: topics.to_vec(),

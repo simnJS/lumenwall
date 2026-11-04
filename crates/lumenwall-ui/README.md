@@ -64,6 +64,10 @@ Only the Workshop page talks to the network, only while it is displayed, only to
 
 Update checks ask `api.github.com` at most every 12 hours (at start or when the window gets focus, only if due; "Check now" in the Settings), with the same generic User-Agent and nothing else; downloads happen only when the user clicks "Update and restart". Off in the Settings (`"updates": {"auto_check": false}` in `ui.json`), with `LUMENWALL_NO_UPDATE=1`, and automatically for package-managed copies. Details in [`crates/lumenwall-update`](../lumenwall-update/README.md).
 
+## Playlists
+
+Each tile of the Screens page lists the Wallpaper Engine playlists the daemon reads (fetched again when the page opens, so playlists made in Wallpaper Engine meanwhile show up); choosing one plays it on that screen (`apply_playlist`, saved by the daemon). A screen that plays a playlist shows its name, the item shown ("3 of 7"), how it changes (every N minutes, random order, or only with Next), and Previous / Next / Stop the playlist (Stop keeps the wallpaper shown, through `apply`). A daemon without playlists gets no controls; one that cannot read Wallpaper Engine's settings says why.
+
 ## Sound
 
 The status bar holds the global volume. The details panel's Customize section adds a level and a mute button for the selected wallpaper (global × wallpaper, saved by the daemon in `[wallpaper-audio]`), shown only when the wallpaper can make sound (a scene with sound objects, a video with an audio track or that could not be read, any web wallpaper) and the daemon keeps such levels (`state.wallpaper_audio`). Slider steps queued while dragging are merged: only the latest position is sent.

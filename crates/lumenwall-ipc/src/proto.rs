@@ -121,6 +121,32 @@ pub enum Request {
         settings: Settings,
     },
     GetStats,
+    /// Wallpaper Engine playlists the daemon can play (read from Wallpaper Engine's
+    /// `config.json`, re-read on each request). Daemons before playlists answer
+    /// [`ErrorCode::InvalidRequest`]; they also leave [`OutputState::playlist`] out.
+    ListPlaylists,
+    /// Plays the playlist `name` on `output`, or on every output when `output` is `None`;
+    /// saved like [`Request::Apply`]. The first item shows at once, the next ones follow the
+    /// playlist's settings. A playlist already playing there carries on where it is.
+    /// Stopping a playlist is an [`Request::Apply`] of the wallpaper to keep.
+    ApplyPlaylist {
+        #[serde(default)]
+        output: Option<String>,
+        name: String,
+        #[serde(default)]
+        scaling: Scaling,
+    },
+    /// Shows the next item of the playlist playing on `output` now (every playing playlist
+    /// when `output` is `None`); its timer starts again.
+    PlaylistNext {
+        #[serde(default)]
+        output: Option<String>,
+    },
+    /// Like [`Request::PlaylistNext`], backwards.
+    PlaylistPrevious {
+        #[serde(default)]
+        output: Option<String>,
+    },
     Subscribe {
         topics: Vec<Topic>,
     },
@@ -149,6 +175,10 @@ pub enum Response {
     },
     Settings(Settings),
     Stats(Stats),
+    /// Reply to [`Request::ListPlaylists`], sorted by name.
+    Playlists {
+        playlists: Vec<Playlist>,
+    },
 }
 
 /// Pushed to subscribed clients, tagged by `type`.
@@ -366,6 +396,85 @@ pub struct OutputState {
     /// Detail for [`WallpaperStatus::Error`] and [`WallpaperStatus::Unsupported`].
     #[serde(default)]
     pub message: Option<String>,
+    /// The playlist that drives this output, `None` when it shows a single wallpaper (and
+    /// from daemons without playlists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playlist: Option<PlaylistPosition>,
+}
+
+/// Where an output is in its playlist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistPosition {
+    pub name: String,
+    /// Index in [`Playlist::items`] of the wallpaper shown; `None` when the output shows a
+    /// wallpaper that is not in the playlist (until its first change).
+    #[serde(default)]
+    pub item: Option<u32>,
+    /// Number of items.
+    #[serde(default)]
+    pub count: u32,
+}
+
+/// A Wallpaper Engine playlist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Playlist {
+    pub name: String,
+    /// Wallpaper directories, in the playlist's order (missing ones left out).
+    #[serde(default)]
+    pub items: Vec<PathBuf>,
+    #[serde(default)]
+    pub settings: PlaylistSettings,
+}
+
+/// How a playlist changes wallpaper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaylistSettings {
+    pub mode: PlaylistMode,
+    /// Minutes between changes in [`PlaylistMode::Timer`].
+    pub delay_minutes: u32,
+    pub order: PlaylistOrder,
+    /// The timer keeps running while the wallpaper is paused (fullscreen window, locked
+    /// session, user pause); otherwise paused time does not count.
+    pub update_on_pause: bool,
+    /// Wallpaper Engine's transition between items. Lumenwall changes without one for now.
+    pub transition: bool,
+}
+
+impl Default for PlaylistSettings {
+    fn default() -> Self {
+        Self {
+            mode: PlaylistMode::Timer,
+            delay_minutes: 60,
+            order: PlaylistOrder::Sequential,
+            update_on_pause: false,
+            transition: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistMode {
+    /// Changes every [`PlaylistSettings::delay_minutes`].
+    #[default]
+    Timer,
+    /// Never changes by itself (only through [`Request::PlaylistNext`] and
+    /// [`Request::PlaylistPrevious`]): a Wallpaper Engine mode Lumenwall does not run yet.
+    Manual,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistOrder {
+    #[default]
+    Sequential,
+    /// Shuffled, every item once per round.
+    Random,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
