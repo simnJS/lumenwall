@@ -561,6 +561,31 @@ applies the fps and property changes live. Remove the file from `~/.config/autos
 | Covered output | paused (`OCCLUDED`), no frame |
 | Puppets, 3463520581 at 1920×1080 (16 skeletons, 78 bones, 58 attached objects), 600 frames, particles off | puppet work (clocks, blending, matrices, palettes, attachment chains) **8.5–9 µs CPU per frame**; whole frame CPU 0.37 vs 0.34–0.41 ms and GPU 0.77 vs 0.77–0.79 ms before/after (noise); no allocation per frame (`tests/puppet_alloc.rs`); 5 `BONECOUNT` variants of `genericimage4` compiled once (shader cache) |
 
+Windows 11, RTX 4080 SUPER + AMD iGPU without monitor, release builds, off the desktop: the
+daemon with `--no-config --silent --fps 30 -w 0x1600x480x270` (a window below the monitors),
+a private IPC endpoint and `LOCALAPPDATA`, at below-normal priority, while the PC was in use
+(a game running: absolute times are pessimistic). Counters: `NtQuerySystemInformation`
+(private bytes, working set, per-thread context switches over 10 s), `VirtualQueryEx`, the
+engine's own log lines. Base: main b4d1db6 (engine in the daemon). Wallpaper Engine, from the
+desktop bench (`docs/benchmarks/lumenwall-vs-wallpaper-engine.md`): empty 3.1 MiB private,
+16.7 MiB working set; command → first GPU activity 462 ms (3463520581), 331 ms (3018340632).
+
+| Situation | Base | Now |
+|---|---|---|
+| Empty daemon after a scene and `clear` | 62–81 MiB private, 84–120 MiB working set, 10–14 threads, 0.0–0.1 wake-ups/s; `nvoglv64`, `nvgpucomp64`, `nvspcap64`, `nvrtum64`, `nvapi64` still mapped | **2.23 MiB private, 1.97 MiB working set**, 8 threads, 0.0 wake-ups/s, no GPU module (`dxgi.dll` only, imported by wgpu); after 7 switches from empty and 6 between two wallpapers: 2.35 MiB, 2.08 MiB, 5 threads (`main`, `tracing-appender`, `lumenwall-playlists`, `lumenwall-ipc-accept`, a system pool thread), 0.0 wake-ups/s |
+| What made those MiB, one change at a time | — | engine process (the driver never loads in the daemon): 62–81 → 6.3–7.0 MiB; log queue 128 000 → 1024 lines: → 2.28 MiB; Windows heaps trimmed when the engine process ends: 3.14 → 2.40 MiB after the mixed switches above |
+| Vulkan modules of the process that renders | NVIDIA and AMD (`amdvlk64`, `AMD\VkCache` created), D3D12 drivers of both vendors (DX12 enumeration) | NVIDIA only (`nvoglv64` and the D3D12 parts NVIDIA's Vulkan presentation uses itself); no `amdvlk64` |
+| GPU opening | instance (Vulkan + DX12) 38–126 ms, adapter + device 294–605 ms | instance + device 148–177 ms (cold driver, new process), on a thread while the platform opens |
+| First start, process start → renderer ready (3018340632) | 702–772 ms | 446–507 ms |
+| Command → first GPU activity, from empty | 808 ms (3463520581), 719 ms (3018340632), desktop bench of 376a97d (off the desktop every switch after `clear` failed: winit) | 279–344 ms (3463520581, one run at 570), 287–377 ms (3018340632) |
+| Command → first frame, from empty | — | 625–753 ms (3463520581), 558–987 ms (3018340632): engine process running 43–95 ms after the command, platform 44–77 ms alongside the GPU 148–177 ms, then the swap chain 197–254 ms alongside the scene build (169–412 ms here) |
+| Command → first frame, between two wallpapers (same engine process) | — | 504–572 ms (3463520581), 237–248 ms (3018340632, one run at 493); first GPU activity 45–113 ms |
+
+From empty, the first frame waits for a new process, a cold Vulkan driver and NVIDIA's first
+swap chain of a device (≈ 0.2 s): about 0.45 s before any scene work, more than Wallpaper
+Engine's first GPU activity. Only a device kept open would remove it, and a device keeps the
+driver in memory (≥ 30 MiB private): the two goals are traded against each other.
+
 SceneScript (headless 1280×720, release, `render_png`; script time = `SceneScripts::tick`):
 
 | Wallpaper | Scripts | Script time per frame | Frames redrawn |
