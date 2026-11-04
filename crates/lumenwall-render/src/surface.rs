@@ -1,4 +1,4 @@
-//! Presentation surfaces (one per output): FIFO, opaque, never sRGB.
+//! Presentation surfaces (one per output): Mailbox on Windows, FIFO elsewhere, opaque, never sRGB.
 
 use crate::context::GpuContext;
 use crate::error::{RenderError, Result};
@@ -28,6 +28,46 @@ pub fn choose_surface_format(
         }
     }
     formats.first().map(|f| (*f, f.remove_srgb_suffix()))
+}
+
+/// Present mode among those the surface offers (`available`), for this platform (`windows`).
+/// Pure, for testing.
+///
+/// Windows: `Mailbox` when offered, never tearing. NVIDIA's Vulkan driver runs a FIFO swap chain
+/// through its own presentation queue: measured on an RTX 4080 SUPER (driver 621.01, 2560x1440,
+/// two images, bare Vulkan device), FIFO adds 26.8 MiB of shared GPU memory and 78 MiB of
+/// dedicated memory to the process, `Mailbox` 0.03 MiB and 60 MiB. A wallpaper paces its own
+/// frames (30 fps by default, below the refresh rate), so the display shows the same images: a
+/// frame that is not replaced before the next vertical blank is shown at that blank, as with
+/// FIFO. Elsewhere FIFO, whose behaviour with the compositors was measured (Wayland frame
+/// callbacks pace the frames there).
+///
+/// `LUMENWALL_PRESENT_MODE=fifo|mailbox|immediate` overrides it (measurements), when offered.
+#[must_use]
+pub fn choose_present_mode(
+    available: &[wgpu::PresentMode],
+    windows: bool,
+    forced: Option<wgpu::PresentMode>,
+) -> wgpu::PresentMode {
+    use wgpu::PresentMode as P;
+    if let Some(m) = forced.filter(|m| available.contains(m)) {
+        return m;
+    }
+    if windows && available.contains(&P::Mailbox) {
+        P::Mailbox
+    } else {
+        // Always supported (Vulkan and wgpu guarantee it).
+        P::Fifo
+    }
+}
+
+fn forced_present_mode() -> Option<wgpu::PresentMode> {
+    match std::env::var("LUMENWALL_PRESENT_MODE").ok()?.as_str() {
+        "fifo" => Some(wgpu::PresentMode::Fifo),
+        "mailbox" => Some(wgpu::PresentMode::Mailbox),
+        "immediate" => Some(wgpu::PresentMode::Immediate),
+        _ => None,
+    }
 }
 
 /// Frames queued ahead of the display: swap-chain images − 1. One: a wallpaper renders at most
@@ -99,7 +139,14 @@ impl OutputSurface {
         } else {
             vec![view_format]
         };
-        config.present_mode = wgpu::PresentMode::Fifo;
+        config.present_mode =
+            choose_present_mode(&caps.present_modes, cfg!(windows), forced_present_mode());
+        tracing::debug!(
+            target: "lumenwall_render",
+            "surface present mode {:?} (offered: {:?})",
+            config.present_mode,
+            caps.present_modes
+        );
         // Opaque output (spec 04 §11.6, Q11); the compositor writes alpha = 1 anyway.
         config.alpha_mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
             wgpu::CompositeAlphaMode::Opaque
@@ -175,6 +222,27 @@ impl OutputSurface {
 mod tests {
     use super::*;
     use wgpu::TextureFormat as F;
+
+    #[test]
+    fn present_mode() {
+        use wgpu::PresentMode as P;
+        let all = [P::Fifo, P::FifoRelaxed, P::Mailbox, P::Immediate];
+        // Windows: Mailbox when offered, never Immediate (tearing).
+        assert_eq!(choose_present_mode(&all, true, None), P::Mailbox);
+        assert_eq!(
+            choose_present_mode(&[P::Fifo, P::Immediate], true, None),
+            P::Fifo
+        );
+        // Elsewhere: FIFO.
+        assert_eq!(choose_present_mode(&all, false, None), P::Fifo);
+        // The override applies only when the surface offers it.
+        assert_eq!(choose_present_mode(&all, true, Some(P::Fifo)), P::Fifo);
+        assert_eq!(
+            choose_present_mode(&[P::Fifo], false, Some(P::Mailbox)),
+            P::Fifo
+        );
+        assert_eq!(choose_present_mode(&[], true, None), P::Fifo);
+    }
 
     #[test]
     fn never_srgb() {
