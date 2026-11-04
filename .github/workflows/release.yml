@@ -1,7 +1,9 @@
 # Lumenwall releases. Push a tag v<version> (the [workspace.package] version of
-# Cargo.toml): Linux and Windows archives are built, SHA256SUMS is written, every file
-# is signed with the minisign release key, checked exactly as the app checks updates,
-# and the GitHub release is published with generated notes.
+# Cargo.toml): Linux and Windows archives, the Debian package and the Windows installer
+# are built, install.sh is added, SHA256SUMS is written, every file is signed with the
+# minisign release key, checked exactly as the app checks updates (and the one-line
+# installer is tried on the signed files), and the GitHub release is published with
+# generated notes.
 # Procedure, key creation and checks: docs/RELEASING.md.
 # Third-party actions are pinned to a commit SHA (tag in the trailing comment).
 name: Release
@@ -121,6 +123,31 @@ jobs:
             --notices "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html" \
             --out dist
 
+      # System-wide package: /usr/bin, /usr/share; Depends from dpkg-shlibdeps,
+      # FFmpeg Recommends from the headers the engine was built with (pkg-config).
+      - name: Debian package
+        if: runner.os == 'Linux'
+        run: |
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          python3 packaging/release/deb.py \
+            --version "$VERSION" \
+            --bin-dir "target/$TARGET/release" \
+            --notices "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html" \
+            --out dist
+          dpkg-deb --info "dist/lumenwall-$VERSION-amd64.deb"
+          dpkg-deb --contents "dist/lumenwall-$VERSION-amd64.deb"
+
+      # Published as releases/latest/download/install.sh (added in "sign and publish").
+      - name: Check the one-line installer
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v shellcheck; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends shellcheck
+          fi
+          shellcheck --shell=sh --severity=warning packaging/linux/install.sh packaging/windows/build-installer.sh
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
@@ -128,9 +155,43 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # NSIS (zlib licence) runs on Linux: the installer is made from the Windows zip
+  # itself, so it holds exactly the files the archive and the updater have.
+  installer:
+    name: windows installer
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-pc-windows-msvc
+          path: windows
+      - name: Install NSIS
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends nsis p7zip-full
+          makensis -VERSION
+      # Fails on any makensis error, then checks the programs are inside (7z).
+      - name: Build the installer
+        run: |
+          packaging/windows/build-installer.sh "$VERSION" \
+            "windows/lumenwall-$VERSION-x86_64-pc-windows-msvc.zip" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-windows-installer
+          path: dist/lumenwall-*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: sign and publish
-    needs: [version, build]
+    needs: [version, build, installer]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # The only job that can write to the repository (create the release).
@@ -157,6 +218,10 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The same script in every release: releases/latest/download/install.sh.
+      - name: Add the one-line installer
+        run: cp packaging/linux/install.sh dist/install.sh
+
       - name: Sign
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -167,7 +232,40 @@ jobs:
         run: |
           target/debug/examples/release_sign verify --version "$VERSION" dist
           (cd dist && sha256sum --check --strict SHA256SUMS)
+          for f in "lumenwall-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "lumenwall-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "lumenwall-$VERSION-amd64.deb" \
+            "lumenwall-$VERSION-x86_64-windows-setup.exe" install.sh; do
+            if [[ ! -f "dist/$f" || ! -f "dist/$f.minisig" ]] || ! grep -q "  $f\$" dist/SHA256SUMS; then
+              echo "::error::$f, its signature or its SHA256SUMS line is missing"
+              exit 1
+            fi
+          done
           ls -l dist
+
+      # What `curl -fsSL .../install.sh | sh` does, on these signed files (served
+      # from disk), in a throw-away home: download, signature, checksum, install,
+      # uninstall.
+      - name: Try the one-line installer
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends minisign
+          srv="$RUNNER_TEMP/releases"
+          mkdir -p "$srv/latest" "$srv/download"
+          ln -s "$PWD/dist" "$srv/latest/download"
+          ln -s "$PWD/dist" "$srv/download/v$VERSION"
+          home=$(mktemp -d)
+          run() {
+            env -i HOME="$home" PATH=/usr/bin:/bin XDG_CURRENT_DESKTOP=none \
+              LUMENWALL_RELEASES_URL="file://$srv" sh dist/install.sh "$@"
+          }
+          run --require-signature
+          test -x "$home/.local/bin/lumenwall" && test -x "$home/.local/bin/lumenwall-ui"
+          grep -q "^Exec=\"$home/.local/bin/lumenwall-ui\"" "$home/.local/share/applications/lumenwall-ui.desktop"
+          grep -q "^Exec=\"$home/.local/bin/lumenwall-ui\" --background" "$home/.config/autostart/lumenwall.desktop"
+          test -f "$home/.local/share/icons/hicolor/scalable/apps/lumenwall.svg"
+          run --uninstall
+          test ! -e "$home/.local/bin/lumenwall-ui" && test ! -e "$home/.config/autostart/lumenwall.desktop"
 
       - name: Publish
         env:

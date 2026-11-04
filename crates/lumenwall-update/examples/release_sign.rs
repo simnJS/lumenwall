@@ -3,6 +3,7 @@
 //!
 //! ```sh
 //! release_sign sign   --version 0.2.0 dist/   # SHA256SUMS, and a .minisig for every file
+//!                                             # (lumenwall-0.2.0-* and install.sh)
 //! release_sign verify --version 0.2.0 dist/   # each archive exactly as the app checks it
 //! ```
 //!
@@ -26,6 +27,8 @@ use lumenwall_update::{
 };
 
 const TARGETS: [&str; 2] = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"];
+/// Assets with the same name in every release (`releases/latest/download/install.sh`).
+const UNVERSIONED: [&str; 1] = ["install.sh"];
 
 struct Args {
     command: String,
@@ -121,7 +124,10 @@ fn sign(a: &Args) -> Result<(), String> {
     let mut files = release_files(&a.dir)?;
     files.sort();
     let prefix = format!("lumenwall-{}-", a.version);
-    if let Some(bad) = files.iter().find(|f| !f.starts_with(&prefix)) {
+    if let Some(bad) = files
+        .iter()
+        .find(|f| !f.starts_with(&prefix) && !UNVERSIONED.contains(&f.as_str()))
+    {
         return Err(format!("{bad} does not belong to release {}", a.version));
     }
     let mut sums = String::new();
