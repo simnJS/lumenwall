@@ -36,7 +36,7 @@ pub fn choose_surface_format(
 /// Windows: `Mailbox` when offered, never tearing. NVIDIA's Vulkan driver runs a FIFO swap chain
 /// through its own presentation queue: measured on an RTX 4080 SUPER (driver 621.01, 2560x1440,
 /// two images, bare Vulkan device), FIFO adds 26.8 MiB of shared GPU memory and 78 MiB of
-/// dedicated memory to the process, `Mailbox` 0.03 MiB and 50 MiB. A wallpaper paces its own
+/// dedicated memory to the process, `Mailbox` 0.03 MiB and 60 MiB. A wallpaper paces its own
 /// frames (30 fps by default, below the refresh rate), so the display shows the same images: a
 /// frame that is not replaced before the next vertical blank is shown at that blank, as with
 /// FIFO. Elsewhere FIFO, whose behaviour with the compositors was measured (Wayland frame

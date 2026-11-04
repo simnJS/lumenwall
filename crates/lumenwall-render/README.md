@@ -20,7 +20,7 @@ No upstream code, fork or snippet was consulted.
 | Module | Content |
 |---|---|
 | `context` | `GpuInstance` (surfaces from raw-window-handle 0.6) → `GpuContext`: Vulkan on Linux, Vulkan then DX12 on Windows (adapter ranking `adapter_rank`), one device for every output, allocator blocks of 4–8 MiB (`MemoryHints::Manual`: resources above 8 MiB get memory of their exact size; on NVIDIA/Windows every reserved byte is also committed private memory; `LUMENWALL_GPU_BLOCKS`), `LUMENWALL_GPU_BACKEND=vulkan|dx12` for measurements, optional features `TEXTURE_COMPRESSION_BC`, `ADDRESS_MODE_CLAMP_TO_BORDER`, `DEPTH_CLIP_CONTROL`, `PIPELINE_CACHE`, timestamps, `VULKAN_EXTERNAL_MEMORY_DMA_BUF` (Unix) and `VULKAN_EXTERNAL_MEMORY_WIN32` (Windows): they unlock wgpu-hal's import of web frames (DMA-BUF, D3D11 shared textures); the extensions are enabled by wgpu whenever the driver has them, so they cost nothing. On-disk `PipelineCache` (Vulkan), shared sampler cache, GPU memory and resource counters, uncaptured GPU errors logged instead of aborting. |
-| `surface` | `OutputSurface`: `PresentMode::Fifo`, opaque alpha, two swap-chain images on Windows (frame latency 1; `LUMENWALL_FRAME_LATENCY`), never sRGB (non-sRGB view of an sRGB-only swap chain), occlusion/timeout → skip the frame, lost/outdated → reconfigure. |
+| `surface` | `OutputSurface`: `PresentMode::Mailbox` on Windows when offered (FIFO elsewhere and as the fallback; `LUMENWALL_PRESENT_MODE`), opaque alpha, two swap-chain images on Windows (frame latency 1; `LUMENWALL_FRAME_LATENCY`), never sRGB (non-sRGB view of an sRGB-only swap chain), occlusion/timeout → skip the frame, lost/outdated → reconfigure. |
 | `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; `VolumeUpload` (3D, uncompressed, all mips) → volume `GpuTexture` (`is_volume`, `depth`); sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. |
 | `targets` | `RenderTargetPool`: RGBA8 UNORM targets, deferred allocation in scene builders (`materialize` at build), nominal size reported to shaders for targets rendered at the displayed resolution (`create_scaled`, `RenderTarget::resolution`), render-graph aliasing of transient targets (`plan_aliasing`: same size, or flexible targets up to 1.5× larger), scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. |
 | `blend` | WE `blending` → `wgpu::BlendState` (§14), RGB-only write mask, culling, `FrontFace::Cw` (verified by test). |
@@ -153,6 +153,40 @@ if scene.needs_redraw() || output_changed {
   VRAM tracked: 108 MiB (146 MiB before the 1×1 shadow-atlas / bloom-B savings below), dominated by the 3440×1440 RGBA8 main texture and the full-size targets (scene, A/B, bloom A); BC textures shrink the texture share 4–8×. Pipelines + bundles build in 2–50 ms (driver cache warm/cold).
 
   The 2-CU iGPU exceeds 16 ms because the synthetic shaders are texture-rate bound (≈ 50 full-resolution taps per pixel per frame); engine overhead is the CPU column. The real cost must be re-measured once `lumenwall-shader` translates the wallpaper's own effect shaders; BC main textures would also cut the base-pass bandwidth.
+
+### Windows: shared GPU memory and presentation (NVIDIA)
+
+"Shared GPU memory" (Task Manager, `GPU Process Memory` counters) is the system memory a
+process has on the GPU's books. Measured on the Windows test PC (RTX 4080 SUPER, driver
+621.01, resizable BAR on, 2560×1440, 30 fps) with a probe outside the repository that reads the
+process's own counters and `VK_EXT_memory_budget` after each step (both agree to the KiB):
+
+| Step | Shared | Dedicated |
+|---|---|---|
+| Vulkan instance | 0.27 MiB | 0.02 MiB |
+| Vulkan device, one queue (bare `ash` device or wgpu's: the same; any queue family, priority or API version) | +12.1–12.6 MiB | +8.7 MiB (bare), +18.7 MiB (wgpu) |
+| FIFO swap chain, 2 images (`OutputSurface` before this change) | **+26.8 MiB** (+23.9 at creation, +2.5 at the first present) | +78 MiB |
+| Mailbox swap chain, 2 images | **+0.03 MiB** | +60 MiB |
+| D3D11 device + DXGI flip swap chain, for comparison (what Wallpaper Engine uses) | 0.7 MiB in all | 40.8 MiB |
+| D3D12 device + direct queue + DXGI swap chain | 26.4 MiB in all (the queue alone 15.3) | 48.5 MiB |
+
+wgpu's own buffers add nothing there: with resizable BAR its upload and staging buffers
+(`MAP_WRITE`) live in device-local, host-visible memory (dedicated). Only buffers mapped for
+reading land in system memory, and the allocator then keeps a 4 MiB block of that memory type for
+the life of the device: `GpuTimer` did that for 48 bytes (+4.0 MiB, kept after the timer is
+dropped); its buffers are now also mappable for writing (`readback_usage`,
+`MAPPABLE_PRIMARY_BUFFERS`) and share the upload buffers' block.
+
+NVIDIA's Vulkan driver presents a FIFO swap chain through its own Direct3D 12 presentation queue:
+besides the memory, it costs ≈ 0.69 ms of the process's 3D-engine time per presented frame
+(probe, clear + present at 30 fps: 0.737 ms per frame in FIFO, 0.045 ms in Mailbox) and 190–230 ms
+to create (Mailbox: 16 ms). `OutputSurface` asks for Mailbox on Windows: the wallpaper paces its own
+frames below the refresh rate, so every frame is still shown at the next vertical blank, without
+tearing (Direct3D 12 backend: `Present(0, 0)` on a flip-model swap chain, no tearing either).
+
+The floor left is the Vulkan device itself, 12.4–12.9 MiB on this driver, against 0.7 MiB for a
+Direct3D 11 device with its swap chain: under Wallpaper Engine's 3 MiB only with a Direct3D 11
+renderer.
 
 ## Decisions on the open questions of spec 04
 

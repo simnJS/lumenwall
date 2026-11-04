@@ -610,6 +610,20 @@ mod tests {
     }
 
     #[test]
+    fn readback_buffers_stay_out_of_system_memory_when_possible() {
+        use wgpu::BufferUsages as U;
+        let read = U::MAP_READ | U::COPY_DST;
+        // Without the feature wgpu only accepts MAP_READ | COPY_DST.
+        assert_eq!(readback_usage(GpuCaps::default()), read);
+        // With it, MAP_WRITE sends the buffer to the upload buffers' memory type.
+        let caps = GpuCaps {
+            mappable_primary_buffers: true,
+            ..GpuCaps::default()
+        };
+        assert_eq!(readback_usage(caps), read | U::MAP_WRITE);
+    }
+
+    #[test]
     fn memory_tokens_release_on_drop() {
         let m = MemoryCounter::default();
         let a = m.track(100);
