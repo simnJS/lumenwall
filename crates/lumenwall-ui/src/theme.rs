@@ -674,6 +674,37 @@ pub fn swatch(c: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// A dialog over the window (elevation 3).
+pub fn dialog(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(t.raised.into()),
+        text_color: Some(t.text),
+        border: Border {
+            color: t.border,
+            width: 1.0,
+            radius: radius::L.into(),
+        },
+        shadow: elevation(3, t),
+        ..Default::default()
+    }
+}
+
+/// Dims the window behind a dialog.
+pub fn modal_backdrop(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(
+            Color {
+                a: if t.dark { 0.55 } else { 0.32 },
+                ..Color::BLACK
+            }
+            .into(),
+        ),
+        ..Default::default()
+    }
+}
+
 pub fn ghost_drag(theme: &Theme) -> container::Style {
     let t = tokens(theme);
     container::Style {

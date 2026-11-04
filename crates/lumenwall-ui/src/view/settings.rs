@@ -24,6 +24,7 @@ impl App {
             self.engine_section(t),
             self.audio_section(t),
             self.startup_section(t),
+            self.install_section(t),
             self.workshop_section(t),
             self.library_section(t),
             self.appearance_section(t),

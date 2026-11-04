@@ -47,6 +47,8 @@ pub struct Launch {
     pub lang: Option<LangPref>,
     /// Benchmark: animate visible previews even without window focus.
     pub bench_animate: bool,
+    /// `--setup`: open the installation dialog even if everything is in place.
+    pub setup: bool,
     /// Minimum wait before the screenshot (to let a scripted change land).
     pub screenshot_delay: Option<Duration>,
     /// `Some(None)`: behave as if no Steam Web API key was saved; `Some(Some(k))`:
@@ -141,6 +143,8 @@ pub struct App {
     pub ws: crate::workshop::state::WorkshopState,
     pub chrome: crate::chrome::Chrome,
     pub updater: crate::updater::Updater,
+    /// Installation on this computer (`setup/`).
+    pub setup: crate::setup::SetupState,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +152,8 @@ pub enum Message {
     Ws(crate::workshop::state::WsMsg),
     /// Update checks, download, installation (`updater.rs`).
     Updater(crate::updater::Msg),
+    /// First-run dialog and the Installation settings (`setup/`).
+    Setup(crate::setup::Msg),
     Scan(Arc<ScanEvent>),
     Thumb(ThumbEvent),
     Daemon(DaemonEvent),
@@ -253,6 +259,9 @@ impl App {
         let window = cfg
             .window
             .map_or(Size::new(1360.0, 860.0), |[w, h]| Size::new(w, h));
+        // The installation dialog opens by itself only for a real session.
+        let setup_auto =
+            launch.screenshot.is_none() && launch.discovery.is_none() && launch.endpoint.is_none();
         let mut app = Self {
             lang,
             page: launch.page.unwrap_or(Page::Library),
@@ -309,6 +318,7 @@ impl App {
             ws: crate::workshop::state::WorkshopState::new(&cfg),
             chrome: crate::chrome::Chrome::default(),
             updater: crate::updater::Updater::new(),
+            setup: crate::setup::SetupState::new(launch.setup, setup_auto),
             cfg,
         };
         // Engine stats are wanted while the window exists; the daemon samples
@@ -325,7 +335,8 @@ impl App {
             Message::ReduceMotion,
         );
         let updates = app.updater_start();
-        (app, Task::batch([scan, theme, motion, updates]))
+        let setup = app.setup_start();
+        (app, Task::batch([scan, theme, motion, updates, setup]))
     }
 
     pub fn own_rss(&self) -> Option<u64> {
@@ -821,6 +832,7 @@ impl App {
             Message::Frame => {}
             Message::Ws(m) => return self.ws_update(m),
             Message::Updater(m) => return self.updater_update(m),
+            Message::Setup(m) => return self.setup_update(m),
             Message::Housekeeping(now) => {
                 self.expire_toasts(now);
                 let ws_task = self.ws_housekeeping(now);
@@ -1206,6 +1218,13 @@ impl App {
 
     fn on_key(&mut self, key: keyboard::Key, mods: keyboard::Modifiers) -> Task<Message> {
         use keyboard::key::Named;
+        // The installation dialog takes the keyboard while it is open.
+        if let Some(m) = self.setup_key(&key) {
+            return self.setup_update(m);
+        }
+        if self.setup_dialog_open() {
+            return Task::none();
+        }
         match key.as_ref() {
             keyboard::Key::Character("f") if mods.command() && self.page != Page::Workshop => {
                 self.page = Page::Library;

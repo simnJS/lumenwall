@@ -6,6 +6,8 @@ Desktop app (iced, native Rust, no webview) to browse, apply and configure wallp
 lumenwall-ui                 # the window
 lumenwall-ui --tray          # tray icon only (separate process, no GPU)
 lumenwall-ui --background    # start the daemon if needed, then the tray (what autostart runs)
+lumenwall-ui --setup         # the window with the installation dialog open
+lumenwall-ui --stop-engine   # ask the engine to quit and wait (installers: exit 0 stopped, 3 none, 1 error)
 lumenwall-ui --demo-library --fake-daemon   # generated library + in-process fake daemon over real IPC
 ```
 
@@ -26,11 +28,29 @@ Other developer options: `--fake-steam`, `--no-key`, `--ws-select`, `--screensho
 | `daemon.rs` | IPC worker thread and the UI's view of the daemon |
 | `workshop/` | Steam Workshop: public Web API client (allow-listed hosts, TTL disk cache), BBCode renderer, API key storage (0600), folder watcher (`notify`), page state, fake Steam server (`--fake-steam`) |
 | `tray/` | StatusNotifierItem + dbusmenu over zbus (Linux), `tray-icon` (Windows) |
+| `setup/` | Installation on this computer: first-run dialog and the Installation card of the Settings (below) |
 | `updater.rs` | Self-update through `lumenwall-update`: "Lumenwall X.Y.Z is available" banner above the pages (release notes, progress, errors), Updates card in the Settings, engine and app restart |
 | `config.rs`, `i18n.rs`, `picker.rs`, `platform.rs` | Preferences and autostart, EN/FR strings, file chooser portal / dialog, OS helpers |
 | `fake.rs`, `demo.rs` | Fake daemon and generated demo library for development and screenshots |
 
 The catalog lives here behind `catalog::Discovery` until `lumenwall-assets` / `lumenwall-scene` are integrated.
+
+## Installation dialog
+
+Released programs are often started from a downloaded folder. At the first start the app checks, on a worker thread, what is in place for the current user and, if something is missing, opens a dialog that lists it; each item can be ticked off, and nothing is written before "Set up" is clicked (no keyboard shortcut does it). "Not now" is remembered (`ui.json`: `"setup": {"prompted": true}`); the dialog comes back only when the app carries a newer GNOME extension than the installed one, once per version. Settings › Installation shows the same items with Repair and Uninstall. The dialog never opens by itself in development builds, screenshots or demo runs, nor for a copy made by the Windows installer, which already asked (`--setup` forces it).
+
+| Item | Linux | Windows |
+|---|---|---|
+| Programs (only when started from an extracted release archive elsewhere) | `lumenwall`, `lumenwall-ui` copied to `~/.local/bin` | the whole folder copied to `%LOCALAPPDATA%\Programs\Lumenwall` |
+| Menu | `~/.local/share/applications/lumenwall-ui.desktop` (absolute `Exec`, `TryExec`) and the `hicolor` icons | `Lumenwall.lnk` in the Start menu (`IShellLinkW`) |
+| Start with the session | `~/.config/autostart/lumenwall.desktop` (`"<absolute path>/lumenwall-ui" --background`) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Lumenwall` |
+| GNOME Shell extension (GNOME sessions) | copied to `~/.local/share/gnome-shell/extensions/lumenwall@simnjs.github.io` (whole folder replaced when the embedded `version-name` is newer), then `gnome-extensions enable`, or the `org.gnome.shell enabled-extensions` key when the running Shell does not know it yet; the dialog then says to log out and back in | — |
+
+- The desktop entry, icons and extension are compiled into the binary from `packaging/` (`setup/assets.rs`; a test fails if a file there is not embedded), so a bare `lumenwall-ui` can set itself up.
+- Programs are replaced atomically (written beside, then renamed); on Windows a running `.exe` is renamed to `<name>.lumenwall-old` first, as the updater does. Copies in `~/.local/bin` and `%LOCALAPPDATA%\Programs\Lumenwall` keep updating themselves (`lumenwall-update`).
+- State: `Ok`, `Missing`, `Outdated` (other version of the programs, an entry whose program is gone, a lost icon, an older extension), `Disabled` (extension turned off), `System` (from a package: `/usr/share/applications`, `/usr/share/gnome-shell/extensions`). A package-managed copy (`/usr/bin`) only offers what belongs to the user: start-up and turning the extension on.
+- Uninstall stops the engine (IPC `shutdown`), then removes the entries, icons, autostart entry, the user's copy of the extension (turned off first) and the programs in `~/.local/bin`; settings and the library stay. On Windows, a copy installed by the installer is removed by its `uninstall.exe`; a folder Lumenwall still runs from is reported for deletion after closing.
+- Tests: `setup::linux`, `setup::windows` (registry and shortcuts behind a fake), `setup::files`, `setup::desktop` run on temporary folders; GNOME Shell is reached through the `Shell` trait, faked in tests. Never test `apply` by hand outside a throw-away session: the GSettings fallback writes the session's real `enabled-extensions` list.
 
 ## Specs
 

@@ -900,10 +900,12 @@ impl App {
                     S::ManagedBody.get(lang).replace("{name}", name),
                     false,
                 ),
+                // A distribution's package, or Lumenwall's own .deb (no apt
+                // repository yet): the releases page has the newer packages.
                 None => (
                     S::DistroTitle.get(lang).to_owned(),
                     S::DistroBody.get(lang).to_owned(),
-                    false,
+                    true,
                 ),
             },
             Availability::ReadOnly(dir) => (
@@ -1227,9 +1229,9 @@ texts! {
     ManagedTitle => "Updates come from {name}", "Les mises à jour viennent de {name}";
     ManagedBody => "This copy of Lumenwall was installed with {name}, which keeps it up to date.",
         "Cette copie de Lumenwall a été installée avec {name}, qui la tient à jour.";
-    DistroTitle => "Updates come from your distribution", "Les mises à jour viennent de votre distribution";
-    DistroBody => "This copy of Lumenwall comes from a system package: your package manager keeps it up to date.",
-        "Cette copie de Lumenwall vient d'un paquet système : votre gestionnaire de paquets la tient à jour.";
+    DistroTitle => "Installed from a system package", "Installé depuis un paquet système";
+    DistroBody => "This copy comes from a system package, whose files Lumenwall does not replace. Update it with your package manager, or install the newer .deb from the releases page.",
+        "Cette copie vient d'un paquet système, dont Lumenwall ne remplace pas les fichiers. Mettez-la à jour avec votre gestionnaire de paquets, ou installez le .deb plus récent depuis la page des versions.";
     ReadOnlyTitle => "Lumenwall can't update itself here", "Lumenwall ne peut pas se mettre à jour ici";
     ReadOnlyBody => "Its folder ({dir}) is read-only for your account. Download new versions from GitHub.",
         "Son dossier ({dir}) est en lecture seule pour votre compte. Téléchargez les nouvelles versions sur GitHub.";

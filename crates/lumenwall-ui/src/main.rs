@@ -23,6 +23,7 @@ mod icons;
 mod picker;
 mod platform;
 mod previews;
+mod setup;
 mod theme;
 mod thumbs;
 mod tray;
@@ -56,6 +57,8 @@ struct Args {
     lang: Option<LangPref>,
     screenshot: Option<PathBuf>,
     size: Option<[f32; 2]>,
+    setup: bool,
+    stop_engine: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -66,6 +69,8 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--tray" => a.tray = true,
             "--background" => a.background = true,
+            "--setup" => a.setup = true,
+            "--stop-engine" => a.stop_engine = true,
             "--fake-daemon" => a.fake_daemon = true,
             "--demo-library" => a.demo_library = true,
             "--bench-animate" => a.bench_animate = true,
@@ -149,8 +154,19 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let lang = Lang::resolve(args.lang.unwrap_or(UiConfig::load().language));
     let endpoint = lumenwall_ipc::Endpoint::for_current_user();
+    if args.stop_engine {
+        // For installers: 0 stopped, 3 none was running, 1 failure.
+        return match setup::stop_engine(&endpoint) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::from(3),
+            Err(e) => {
+                eprintln!("lumenwall-ui: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let lang = Lang::resolve(args.lang.unwrap_or(UiConfig::load().language));
 
     if args.background || args.tray {
         if args.background {
@@ -195,6 +211,7 @@ fn run_window(args: Args) -> ExitCode {
         screenshot: args.screenshot,
         lang: args.lang,
         bench_animate: args.bench_animate,
+        setup: args.setup,
         ws_select: args.ws_select,
         screenshot_delay: args
             .screenshot_delay

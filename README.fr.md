@@ -93,50 +93,52 @@ Mesurez sur votre machine avec `LUMENWALL_STATS=1 lumenwall <id>` : i/s, temps 
 | ✅ | Fichier de configuration rechargé à chaud | i/s et propriétés appliqués sans redémarrer |
 | ✅ | Application de bureau (`lumenwall-ui`) et zone de notification | Bibliothèque, écrans, réglages, édition des propriétés en direct, changement de fond d’écran à chaud via l’IPC du moteur, choix enregistrés dans la configuration. 🚧 Pas encore testée sous Windows |
 | ✅ | Navigateur du Workshop dans l’application | Recherche et filtres via l’API Web Steam avec votre propre clé ; l’abonnement passe par le client Steam ; les nouveaux abonnements apparaissent tout seuls |
-| ⏳ | Paquets (Flatpak, AUR, installateur Windows) | Aucun pour l’instant : compilez depuis les sources |
+| 🚧 | Paquets | Le processus de publication produit un installateur Windows, un paquet Debian et un installateur Linux en une ligne, et l’application s’installe d’elle-même au premier lancement ([Installation](#installation)) ; aucune version publiée pour l’instant. Pas de paquet Flatpak ni AUR |
 
 ## Installation
 
-**Il vous faut :**
+Il vous faut **Wallpaper Engine**, acheté et installé via Steam, avec les fonds d’écran voulus abonnés dans le Workshop. Lumenwall lit les éléments du Workshop et le dossier `assets` de Wallpaper Engine là où ils sont, et n’en distribue aucun fichier. Sous Linux, installez Wallpaper Engine avec Steam Play (Proton) activé pour lui ; Lumenwall ne le lance jamais. Lumenwall a besoin d’un pilote Vulkan sous Linux (Mesa ou NVIDIA) et de DirectX 12 sous Windows. Les versions publiées sont compilées pour x86-64 et paraissent sur la [page des versions](https://github.com/simnJS/lumenwall/releases) dès la première publication.
 
-- **Wallpaper Engine**, acheté et installé via Steam, avec les fonds d’écran voulus abonnés dans le Workshop. Lumenwall lit les éléments du Workshop et le dossier `assets` de Wallpaper Engine là où ils sont, et n’en distribue aucun fichier. Sous Linux, installez Wallpaper Engine avec Steam Play (Proton) activé pour lui ; Lumenwall ne le lance jamais.
-- **Rust 1.90 ou plus récent** ([rustup](https://rustup.rs)).
-- **Un pilote Vulkan** sous Linux (Mesa ou NVIDIA), DirectX 12 sous Windows.
-- **Les bibliothèques de compilation Linux**, d’après l’arbre des dépendances (compilateur C pour QuickJS, ALSA, PulseAudio) :
-  - Debian, Ubuntu : `sudo apt install build-essential pkg-config libasound2-dev libpulse-dev`
-  - Fedora : `sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel`
-  - Arch : `sudo pacman -S base-devel alsa-lib libpulse`
+**Windows.** Téléchargez `lumenwall-<version>-x86_64-windows-setup.exe` depuis la [dernière version](https://github.com/simnJS/lumenwall/releases/latest) et lancez-le. Il installe Lumenwall pour votre compte seulement, sans droits d’administrateur, dans `%LOCALAPPDATA%\Programs\Lumenwall`, ajoute un raccourci au menu Démarrer et, si la case reste cochée, démarre Lumenwall avec Windows. Lumenwall se met ensuite à jour tout seul ; désinstallez-le depuis Paramètres › Applications (vos réglages sont conservés). L’installateur n’a pas encore de signature Authenticode : SmartScreen peut demander une confirmation ; sa signature minisign et son SHA-256 sont sur la page de la version ([vérifier un téléchargement](docs/RELEASING.md#verify-a-download)). Le zip de la même page fonctionne aussi : lancez `lumenwall-ui.exe` et laissez-le s’installer (plus bas).
 
-  La CI installe un ensemble plus large, pour toutes les crates et options : [`.github/actions/setup-rust/action.yml`](.github/actions/setup-rust/action.yml).
+**Linux, en une ligne** (pour votre compte seulement, sans sudo) :
 
-**Installer depuis le dépôt** (la crate `lumenwall` de crates.io est un autre projet) :
+```bash
+curl -fsSL https://github.com/simnJS/lumenwall/releases/latest/download/install.sh | sh
+```
+
+[Le script](packaging/linux/install.sh) télécharge la dernière version, la vérifie avec le `SHA256SUMS` de la version, et avec sa signature si [minisign](https://jedisct1.github.io/minisign/) est installé (`--require-signature` la rend obligatoire), puis installe dans `~/.local` : les programmes dans `~/.local/bin`, l’entrée de menu et les icônes, le démarrage à l’ouverture de session (`--no-autostart` pour s’en passer) et, sous GNOME, l’extension Shell qui met le fond d’écran en pause derrière les fenêtres maximisées et lui transmet les clics sur le bureau : déconnectez-vous puis reconnectez-vous une fois pour l’activer. Lumenwall se met ensuite à jour tout seul. `… | sh -s -- --uninstall` le retire ; réglages et fonds d’écran sont conservés.
+
+**Debian, Ubuntu** (pour tout le système) : téléchargez `lumenwall-<version>-amd64.deb` depuis la [dernière version](https://github.com/simnJS/lumenwall/releases/latest), puis :
+
+```bash
+sudo apt install ./lumenwall-<version>-amd64.deb
+```
+
+Le paquet déclare ses dépendances (ALSA, PulseAudio, le chargeur Vulkan) et recommande les bibliothèques FFmpeg pour les fonds vidéo. Il n’y a pas encore de dépôt apt : installez le `.deb` de la version suivante de la même façon (la mise à jour intégrée de l’application reste désactivée pour les paquets système). Le paquet est compilé sur l’Ubuntu des machines GitHub (24.04 aujourd’hui) et demande cette version ou une plus récente.
+
+**Au premier lancement**, l’application vérifie ce qui est en place pour votre compte et propose d’installer ce qui manque, chaque élément pouvant être décoché : la copie des programmes (s’ils sont lancés depuis une archive extraite), l’entrée de menu et les icônes, le démarrage avec la session et, sous GNOME, l’extension Shell. Rien ne change avant le clic sur « Installer ». Réglages › Installation montre ensuite les mêmes éléments, pour les réparer ou les désinstaller.
+
+**Depuis les sources.** Avec Rust 1.90 ou plus récent ([rustup](https://rustup.rs)) et les bibliothèques de compilation Linux (compilateur C pour QuickJS, ALSA, PulseAudio) :
+
+- Debian, Ubuntu : `sudo apt install build-essential pkg-config libasound2-dev libpulse-dev`
+- Fedora : `sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel`
+- Arch : `sudo pacman -S base-devel alsa-lib libpulse`
+
+La CI installe un ensemble plus large, pour toutes les crates et options : [`.github/actions/setup-rust/action.yml`](.github/actions/setup-rust/action.yml). Installez depuis le dépôt (la crate `lumenwall` de crates.io est un autre projet), ou compilez une copie :
 
 ```bash
 cargo install --locked --git https://github.com/simnJS/lumenwall lumenwall
-cargo install --locked --git https://github.com/simnJS/lumenwall lumenwall-ui   # facultatif : aperçu de l’application
-```
+cargo install --locked --git https://github.com/simnJS/lumenwall lumenwall-ui   # l’application
 
-**Démarrer avec la session (Linux).** Choisissez le fond d’écran dans le fichier de configuration, puis copiez l’entrée de démarrage automatique et les icônes :
-
-```bash
-git clone https://github.com/simnJS/lumenwall && cd lumenwall
-mkdir -p ~/.config/lumenwall ~/.config/autostart ~/.local/share/icons
-printf 'wallpaper = "<id-workshop>"\n' > ~/.config/lumenwall/config.toml
-cp packaging/linux/lumenwall.desktop ~/.config/autostart/
-cp -r packaging/linux/icons/hicolor ~/.local/share/icons/
-```
-
-GNOME, KDE, XFCE et les autres bureaux lancent `lumenwall` à l’ouverture de session depuis `~/.config/autostart`. Supprimez le fichier pour arrêter. Modifier `config.toml` pendant que Lumenwall tourne applique aussitôt les changements d’i/s et de propriétés.
-
-**Compiler depuis les sources :**
-
-```bash
 git clone https://github.com/simnJS/lumenwall && cd lumenwall
 cargo build --release --locked          # target/release/lumenwall et target/release/lumenwall-ui
 # Optionnel, pour les fonds web : l’hôte Chromium à côté de lumenwall. Télécharge la
 # distribution CEF (≈ 333 Mo, ≈ 1,9 Go extraite, gardée dans CEF_PATH) ; nécessite cmake et ninja.
 CEF_PATH=~/.cache/lumenwall/cef cargo build --release --locked -p lumenwall-web --features cef
 ```
+
+`lumenwall-ui --setup` ajoute ensuite l’entrée de menu, le démarrage avec la session et l’extension GNOME pour les programmes là où ils sont. Sans l’application, `lumenwall` lit son fond d’écran dans `~/.config/lumenwall/config.toml` (`wallpaper = "<id-workshop>"`) ; modifier ce fichier pendant que Lumenwall tourne applique aussitôt les changements d’i/s et de propriétés.
 
 L’ensemble des vérifications (format, clippy, tests, tests GPU sur adaptateur logiciel, `cargo deny`) est décrit dans [`docs/CI.md`](docs/CI.md).
 
