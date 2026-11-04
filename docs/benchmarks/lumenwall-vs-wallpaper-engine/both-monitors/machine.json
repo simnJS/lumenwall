@@ -1,0 +1,93 @@
+{
+  "date": "2026-11-04 15:28",
+  "os": "Microsoft Windows 11 Pro 10.0.26300",
+  "cpu": "AMD Ryzen 9 7950X3D 16-Core Processor",
+  "logical_cpus": 32,
+  "adapters": [
+    {
+      "name": "NVIDIA GeForce RTX 4080 SUPER",
+      "luid": "0x00000000_0x0000EBF6",
+      "tag": "nvidia",
+      "vram_mib": 16045,
+      "outputs": [
+        "\\\\.\\DISPLAY1 2560x1440 at 0,0",
+        "\\\\.\\DISPLAY2 2560x1440 at -2560,0"
+      ]
+    },
+    {
+      "name": "AMD Radeon(TM) Graphics",
+      "luid": "0x00000000_0x00011809",
+      "tag": "amd",
+      "vram_mib": 486,
+      "outputs": []
+    },
+    {
+      "name": "Microsoft Basic Render Driver",
+      "luid": "0x00000000_0x00011791",
+      "tag": "basic",
+      "vram_mib": 0,
+      "outputs": []
+    }
+  ],
+  "displays": [
+    "NVIDIA GeForce RTX 4080 SUPER: 2560x1440 @ 279 Hz",
+    "AMD Radeon(TM) Graphics: 2560x1440 @ 239 Hz"
+  ],
+  "nvidia": "NVIDIA GeForce RTX 4080 SUPER, 621.01",
+  "lumenwall": "lumenwall 0.1.0",
+  "lumenwall_exe": "%USERPROFILE%\\Desktop\\lumenwall-0.1.0-x86_64-pc-windows-msvc\\lumenwall.exe",
+  "we_version": "2.8.42",
+  "we_exe": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\wallpaper_engine\\wallpaper64.exe",
+  "we_settings": {
+    "fps": 30,
+    "preset": "ultra",
+    "msaa": "x2",
+    "postprocessing": "ultra",
+    "reflection": true,
+    "shadows": "ultra",
+    "volumetrics": "ultra",
+    "resolution": "full",
+    "playbackfocus": "run",
+    "playbackmaximized": "pause",
+    "playbackfullscreen": "pause",
+    "playbackaudio": "run",
+    "videoframework": "mfEngine",
+    "videohardwareacceleration": true,
+    "processpriority": "normal",
+    "highprecisiontimer": true
+  },
+  "fps": 30,
+  "wallpapers": [
+    {
+      "id": "3463520581",
+      "type": "scene",
+      "title": "Kirito x Asuna / Sword Art Online [4K]"
+    },
+    {
+      "id": "3018340632",
+      "type": "scene",
+      "title": "Boykisser — Ryan Gosling │ Blade Runner theme │ 4k"
+    },
+    {
+      "id": "3044696375",
+      "type": "web",
+      "title": "JavaScript Clock & Motivation"
+    },
+    {
+      "id": "3655057993",
+      "type": "video",
+      "title": "Boykisser │ Winter theme [4K]"
+    }
+  ],
+  "parameters": {
+    "repetitions": 1,
+    "warmup_s": 10,
+    "measure_s": 30,
+    "idle_s": 15,
+    "settle_s": 3,
+    "we_monitors": [
+      "0",
+      "1"
+    ]
+  }
+}
