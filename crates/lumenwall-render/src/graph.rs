@@ -1392,8 +1392,9 @@ pub struct RenderScene {
 }
 
 /// Memory of the transient targets that deferred scene draws may keep alive when the frame is
-/// reordered ([`crate::schedule`]).
-pub const REORDER_BUDGET_MIB: u64 = 32;
+/// reordered ([`crate::schedule`]). 3463520581 at 2560x1440: budget 0 (spec order) 89 render
+/// passes, 192 MiB reserved; 8 MiB: 65 passes, 192 MiB; 32 MiB: 59 passes, 224 MiB.
+pub const REORDER_BUDGET_MIB: u64 = 8;
 
 /// Default number of extra frames rendered after the last change when the
 /// graph accumulates across frames (translucent/additive passes into targets
