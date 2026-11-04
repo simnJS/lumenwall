@@ -109,6 +109,21 @@ pub fn read_texture_rgba8(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<V
             depth_or_array_layers: 1,
         },
     );
+    if texture
+        .usage()
+        .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+    {
+        // Back to the sampled state: a scene recorded directly in Vulkan expects its targets
+        // there between frames (crate::hal), and the wgpu path does not mind.
+        encoder.transition_resources(
+            std::iter::empty(),
+            std::iter::once(wgpu::TextureTransition {
+                texture,
+                selector: None,
+                state: wgpu::TextureUses::RESOURCE,
+            }),
+        );
+    }
     ctx.queue().submit(std::iter::once(encoder.finish()));
     let (tx, rx) = std::sync::mpsc::channel();
     buffer.map_async(wgpu::MapMode::Read, .., move |r| {

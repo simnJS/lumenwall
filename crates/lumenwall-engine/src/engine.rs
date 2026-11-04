@@ -1893,8 +1893,12 @@ impl Local {
                     if let Some(t) = &mut r.timer {
                         t.begin(&mut enc);
                     }
+                    // A scene recorded directly in Vulkan hands back its command buffers (the
+                    // ones above with its uploads, then its frame): one submission with the
+                    // composition. Empty on the wgpu path, where everything is in `enc`.
+                    let mut scene_commands = lumenwall_render::FrameCommands::default();
                     if fresh || redraw {
-                        slot.runtime.scene.encode(&r.ctx, &mut enc);
+                        scene_commands = slot.runtime.scene.encode_frame(&r.ctx, &mut enc);
                         slot.updated_at = r.iteration;
                         slot.serial += 1;
                     }
@@ -1910,7 +1914,11 @@ impl Local {
                     if let Some(t) = &mut r.timer {
                         t.end(&mut enc);
                     }
-                    r.ctx.queue().submit(std::iter::once(enc.finish()));
+                    r.ctx.queue().submit(
+                        scene_commands
+                            .into_iter()
+                            .chain(std::iter::once(enc.finish())),
+                    );
                     if let Some(t) = &mut r.timer {
                         t.after_submit();
                     }

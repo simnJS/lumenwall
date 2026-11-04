@@ -53,6 +53,11 @@ pub struct HeadlessOptions {
     /// Render `_rt_FullFrameBuffer` at the scene's own size, as before the displayed-size
     /// rendering (comparisons). Also set by `LUMENWALL_SCENE_SIZE_TARGET=1`.
     pub scene_size_target: bool,
+    /// Frames per second the run is held to in real time (`--pace`): each frame starts no
+    /// earlier than `i / pace` seconds after the first, so a measurement leaves the GPU to
+    /// whatever else runs. `None` (default): frames back to back. The measured CPU split
+    /// (update, encode, finish, submit) never includes the wait.
+    pub pace: Option<f32>,
 }
 
 impl Default for HeadlessOptions {
@@ -78,6 +83,7 @@ impl Default for HeadlessOptions {
             hwdec: lumenwall_video::HwDecode::Auto,
             audio_level: 0.0,
             scene_size_target: crate::scene::scene_size_target_forced(),
+            pace: None,
         }
     }
 }
@@ -243,9 +249,19 @@ pub fn render_headless(
     // CPU time of the scene update and of the graph encode (the rest: composition, submit).
     let mut split = (Duration::ZERO, Duration::ZERO);
     let mut finish_submit = (Duration::ZERO, Duration::ZERO);
+    // Direct Vulkan recording: the recording inside the encode time.
+    let mut direct_record = Duration::ZERO;
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
+    let paced_from = Instant::now();
     for i in 0..opts.frames {
+        if let Some(fps) = opts.pace.filter(|f| *f > 0.0) {
+            // Real-time pacing (`--pace`), before the frame's measured work.
+            let due = paced_from + Duration::from_secs_f64(f64::from(i) / f64::from(fps));
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+        }
         let time = opts.start_time + f64::from(i) * f64::from(dt);
         let cursor = opts.pointer.map_or(
             Vec2::new(opts.width as f32, opts.height as f32) * 0.5,
@@ -301,7 +317,10 @@ pub fn render_headless(
         }
         let t_update = start.elapsed();
         changed_frames += u32::from(rt.scene.needs_redraw());
-        rt.scene.encode(&ctx, &mut enc);
+        // As the engine does: the scene's command buffers (direct Vulkan path) and the
+        // composition go in one submission.
+        let before = rt.scene.encode_frame(&ctx, &mut enc);
+        direct_record += rt.scene.last_direct_times().record;
         let t_encode = start.elapsed();
         uv = composer.update(&ctx, out.size(), rt.logical);
         compositor.encode(
@@ -317,7 +336,8 @@ pub fn render_headless(
         let t_finish0 = start.elapsed();
         let commands = enc.finish();
         let t_finish1 = start.elapsed();
-        ctx.queue().submit(std::iter::once(commands));
+        ctx.queue()
+            .submit(before.into_iter().chain(std::iter::once(commands)));
         let t_submit = start.elapsed();
         finish_submit.0 += t_finish1 - t_finish0;
         finish_submit.1 += t_submit - t_finish1;
@@ -395,6 +415,14 @@ pub fn render_headless(
         finish_submit.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
         finish_submit.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
     );
+    if rt.scene.records_direct() {
+        // Inside "encode": the Vulkan recording of the frame.
+        tracing::debug!(
+            "direct Vulkan recording per frame: record {:.3} ms ({} render passes)",
+            direct_record.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+            rt.scene.counts().render_passes,
+        );
+    }
     if let Some((s, tick)) = rt.script_stats() {
         tracing::info!(
             "scripts: {} loaded, {} active, {} per-frame update(s), {} timer(s), {:.1} µs per frame, {:.0} KiB JS heap; {changed_frames}/{} frame(s) needed a redraw",

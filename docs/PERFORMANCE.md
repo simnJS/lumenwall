@@ -197,8 +197,8 @@ Vulkan stays first on Windows, Direct3D 12 as the fallback (part C's switch in l
 Lumenwall's own work per frame is small (scene update 0.01–0.06 ms, graph encode 0.01–0.06 ms). wgpu 30 defers
 validation, state tracking, barriers and Vulkan encoding to `CommandEncoder::finish`, which costs ≈ 8.5 µs per
 render pass whatever the number of draws (8 scenes: 3 passes 0.045 ms … 24 passes 0.32 ms … 96 passes 0.84 ms);
-render bundles change nothing. Recording the scene graph directly through wgpu-hal is the next step (task
-"Perf D").
+render bundles change nothing. On Vulkan the scene graph is now recorded directly through wgpu-hal (part D
+below).
 
 ### Visual comparison (headless, 2560×1440, particles off, frame 44, against main)
 
@@ -229,6 +229,9 @@ displayed size as its GPU time suggests.
 - Switches for measurements: `LUMENWALL_SCENE_SIZE_TARGET=1`, `LUMENWALL_FULL_SIZE_CHAINS=1`,
   `LUMENWALL_NO_TARGET_ALIASING=1`, `LUMENWALL_ALIAS_SLACK`, `LUMENWALL_REORDER_BUDGET_MIB` (0 = spec order),
   `LUMENWALL_GPU_BLOCKS=<min>-<max>`, `LUMENWALL_FRAME_LATENCY`, `LUMENWALL_GPU_BACKEND=vulkan|dx12`.
+- Part D: `LUMENWALL_DIRECT_VULKAN=0` (every scene through wgpu), `render_png --pace <fps>` (a run held to real
+  time), headless debug log `lumenwall_render::direct=debug` (the path each scene took, its render passes, draws,
+  pipelines and barriers; the recording time per frame).
 
 ## Windows, part B: CPU and RAM of scene content (measured by part B)
 
@@ -247,3 +250,112 @@ byte-identical.
 | Process memory, Vulkan on NVIDIA/Windows | every `VkDeviceMemory` is committed private memory (protect 0x404, never resident): +64.1 MiB private for a 64 MiB texture, 545 of 715 MiB private on 3463520581, 200 of 356 on 3018340632 (main). Rust heap after load 3.6 / 2.0 MiB live (peak 12 / 33 MiB while loading, returned); process heap 20 / 16 MiB committed with 5 / 2.6 MiB free, `HeapCompact` recovers nothing |
 | Working set | made of load-time pages: `K32EmptyWorkingSet` after 40 frames (8–11 ms, first frame after +2–5 ms) → 19 MiB (3018340632) and 49 MiB (3463520581) 330 frames later, headless (part C) |
 | Threads at 30 fps (main, `GetThreadTimes`, game running) | 3018340632: render thread 2.65 % of a core (update 72 µs + encode/submit 644 µs per frame), one NVIDIA driver thread 0.70 %; 3463520581: 6.85 % (update 119 µs + encode/submit 1983 µs), driver thread 2.34 %, 12 other threads ≈ 0. With the content update at 20–60 µs, the process CPU is the render thread's encode and submit plus that driver thread, which follows what is submitted |
+
+## Windows, part C: daemon at rest and wallpaper switch (measured by part C)
+
+Release builds, off the desktop (the daemon with `--no-config --silent --fps 30` in a 480×270 window
+below the monitors, private IPC endpoint and `LOCALAPPDATA`, below-normal priority, a game running:
+absolute times are pessimistic), Windows 11, RTX 4080 SUPER + AMD iGPU without monitor. Base: main
+b4d1db6 (engine in the daemon). Details in `crates/lumenwall-engine/README.md`, "Measurements".
+Wallpaper Engine (desktop bench): empty 3.1 MiB private, 16.7 MiB working set; command → first GPU
+activity 462 ms (3463520581), 331 ms (3018340632).
+
+| Change | Before | After |
+|---|---|---|
+| Engine in a process of its own on Windows (the daemon never loads the GPU driver; the process ends on `clear`, is reused between two wallpapers, tied to the daemon by a job object) | empty daemon after a scene and `clear`: 62–81 MiB private, 84–120 MiB working set, 10–14 threads, `nvoglv64` and 4 other NVIDIA modules mapped | 6.3–7.0 MiB private, working set 2.3 MiB, no GPU module |
+| Log file queue of 1024 lines instead of tracing-appender's 128 000 (preallocated) | 6.29 MiB private | 2.28 MiB |
+| Windows heaps trimmed (`HeapOptimizeResources` + `HeapCompact`) after an unload and when the engine process ends | 3.14 MiB after 7 switches from empty and 6 between wallpapers | 2.40 MiB |
+| One GPU backend per instance (Vulkan, Direct3D 12 only as a fallback; `LUMENWALL_GPU_BACKEND`) | adapter + device 294–605 ms (DX12 enumeration) | instance + device 148–177 ms (cold driver, new process) |
+| Vulkan loader restricted to the adapter's driver, AMD's implicit layer off | `amdvlk64` mapped, `AMD\VkCache` created | NVIDIA modules only |
+| GPU opened alongside the platform, swap chain alongside the scene build | first start, process → renderer ready (3018340632) 702–772 ms | 446–507 ms |
+
+| Situation (with parts A and B merged) | Result |
+|---|---|
+| Empty daemon after a scene and `clear` | **2.23 MiB private, 1.97 MiB working set**, 0.0 wake-ups/s (2.35 / 2.08 MiB after 13 mixed switches) |
+| Command → first frame between two wallpapers (same engine process) | **202–241 ms** (3463520581), **231–269 ms** (3018340632); first GPU activity 45–120 ms |
+| Command → first frame from empty | 511–645 ms (3463520581), 504–548 ms (3018340632); first GPU activity 279–344 ms and 287–377 ms |
+
+From empty, the first frame waits for a new process, a cold Vulkan driver and NVIDIA's first swap
+chain of a device (≈ 0.2 s): about 0.45 s before any scene work. Only a device kept open would
+remove it, and a device keeps the driver in memory (≥ 30 MiB private): the empty daemon and the
+switch from empty are traded against each other.
+
+## Windows, part E: presentation and shared GPU memory (measured by part E)
+
+Probe outside the repo (RTX 4080 SUPER, driver 621.01, resizable BAR, 2560×1440, 30 fps), per process, GPU
+Process Memory counters = `VK_EXT_memory_budget`. Details in `crates/lumenwall-render/README.md`, "Windows: shared
+GPU memory and presentation".
+
+| Step | Shared GPU memory |
+|---|---|
+| Vulkan device, one queue (bare or wgpu, any queue family/priority/API version) | 12.4–12.9 MiB |
+| FIFO swap chain (before) / Mailbox swap chain (now) | +26.8 / +0.03 MiB |
+| GPU timer readback (`MAP_READ`: a 4 MiB system-memory block kept for the device's life) / now (`MAP_READ \| MAP_WRITE`) | +4.0 / +0 MiB |
+| Command buffers: 65 passes in 1 / in 65 command buffers per frame (bare Vulkan, 300 frames); wgpu-core makes 2 per pass | +0 / +5 MiB (wgpu: +2.5–3 paced, +16 back to back on 3463520581) |
+| For comparison: D3D11 device + DXGI swap chain / D3D12 device + queue + swap chain | 0.7 / 26.4 MiB in all |
+
+FIFO also costs ≈ 0.69 ms of 3D time per presented frame at idle clocks (probe: 0.737 vs 0.045 ms/frame) and
+190–230 ms to create (Mailbox 16 ms).
+
+| Change | Before | After |
+|---|---|---|
+| Mailbox presentation on Windows (never tearing; daemon in an off-screen 2560×1440 window, process tree, 30 fps, Idle priority, a game running so GPU clocks were high; interleaved) | 3463520581: GPU 3D 1.83/2.08 %, shared 42.7/43.7 MiB, dedicated 266.7 MiB, private 344–350 MiB; 3018340632: 2.23/2.18 %, 42.2/42.7, 217.1, 284–286 | 1.45/1.46/1.50 %, 15.9 MiB, 248.2 MiB, 279–281 MiB; 1.70/1.67 %, 15.4, 198.6, 221–222 |
+
+Projection to the desktop bench (no game): desktop ms/frame = 1.10 × headless ms + 0.945 ms (fit on main's two
+scenes; the constant is presentation, absent headless). Without FIFO: 3463520581 ≈ 2.2–2.6 % (WE 3.23),
+3018340632 ≈ 1.3–1.4 % (WE 2.89); Perf A's projection × the measured Mailbox/FIFO ratio (0.70–0.80, game clocks):
+2.3–3.0 %. Shared memory floor with Vulkan: 12.4–12.9 MiB (WE 3 MiB, D3D11): below it only with a Direct3D 11
+renderer (decision for the person).
+
+## Windows, part D: the scene graph recorded directly in Vulkan
+
+### What changed
+
+- On a Vulkan device a scene records its frame into one Vulkan command buffer of its own
+  (`lumenwall-render` `hal` module, through wgpu-hal): pipelines, layouts, bind groups and samplers are created
+  through wgpu-hal from the same descriptors as the wgpu path (same SPIR-V, same states), and the frame is planned
+  once (image barriers, hazard copies, render passes, draws) and replayed every frame. Between frames every
+  render target, depth buffer and texture is in the state wgpu-core believes it is in, so the composition, the
+  uploads and the readbacks stay on wgpu. Details and the contract with wgpu-core: `crates/lumenwall-render/src/hal/mod.rs`.
+- The wgpu path stays for Direct3D 12, `LUMENWALL_DIRECT_VULKAN=0` and any scene whose wgpu-hal objects cannot be
+  created or whose frame cannot be planned (automatic, per scene, also after load: layers added by scripts).
+- The engine submits the scene's command buffers and the composition at once (`RenderScene::encode_frame`):
+  −0.04 to −0.06 ms per frame against a submission of the scene's own (`encode`).
+- `render_png --pace <fps>`: headless runs held to real time (measurements on a PC in use).
+
+### Before and after (headless, interleaved)
+
+Windows 11, RTX 4080 SUPER, release, `render_png --size 2560x1440 --frames 300 --pace 30`, Idle priority while a
+game was running, one GPU run at a time. Before = the wgpu path of the same build (`LUMENWALL_DIRECT_VULKAN=0`,
+what main records), after = the direct path, runs interleaved. Absolute CPU times are about 3× those of unpaced
+runs on a quiet PC (wgpu's `finish` on 3463520581: 1.29–1.31 ms here, 0.42–0.47 ms unpaced the same day).
+
+| | 3463520581 wgpu | 3463520581 direct | 3018340632 wgpu | 3018340632 direct |
+|---|---|---|---|---|
+| Render passes / draws per frame | 65 / 156 | 65 / 156 | 24 / 27 | 24 / 27 |
+| Render thread after the scene update (encode + `finish` + submit) | 1.55–1.57 ms | **0.51–0.60 ms** | 0.72–0.88 ms | **0.37–0.41 ms** |
+| of which the Vulkan recording | – | 0.25–0.28 ms | – | 0.13–0.14 ms |
+| Shared GPU memory (peak, GPU Process Memory) | 22.7 MiB | **15.2 MiB** | 18.7 MiB | **15.2 MiB** |
+| Dedicated GPU memory | 199.3 MiB | 199.3 MiB | 122.9–131.5 MiB | 122.9 MiB |
+| Scene load, GPU time per frame | 0.73–0.86 s, 1.05–1.20 ms | 0.62–0.84 s, 0.91–1.20 ms | 0.55–1.00 s, 0.37–0.43 ms | 0.67–1.02 s, 0.37–0.73 ms (noise) |
+
+Per render pass, from the two scenes (41 render passes and 129 draws apart): 17–20 µs on the wgpu path,
+3.5–4.5 µs on the direct path in these conditions; scaled by the wgpu path's ratio to part A's 8.5 µs per pass,
+≈ 1.5–2.2 µs per render pass on a quiet PC. Fixed cost of the direct frame ≈ 0.1 ms (encoders, the first render
+pass begun through wgpu-hal on purpose: it resets the encoder's bind point, ≈ 13 µs). Projected on a quiet PC
+from the same ratios: 3463520581 ≈ 0.17–0.22 ms per frame instead of 0.53–0.58 ms, 3018340632 ≈ 0.09–0.11 ms
+instead of 0.19–0.21 ms (before presentation; the final desktop bench measures it). The shared GPU memory saved
+is wgpu-core's two command buffers per render pass (part E's probe: +5 MiB for 65 command buffers per frame).
+
+Visual: headless renders on both paths (2560×1440, particles off, frames 0 and 44) are byte-identical PNGs on the
+8 scenes of part A and on 15 of the 16 installed default scenes, 3D scenes with depth buffers and meshes
+included (arsenal, audiophile, beach, deep_space, demon_core, dino_run, dna_fragment, eagleflag, fantasticcar,
+neon_sunset, razer_vortex, retro, ricepod, shimmering_particles, techno). razer_bedroom differs in one
+520×476-pixel region on every run, on either path alike (wgpu against wgpu: 2.46 % of the pixels, direct against
+direct: 2.44 %, same region; identical elsewhere): that part of the scene is not deterministic. No Vulkan
+validation layer is installed on the measuring PC: not run. Linux records through the same code (Vulkan); not
+measured there.
+
+For the final desktop bench: a release build of main with this part records every Vulkan scene directly; the same
+binary with `LUMENWALL_DIRECT_VULKAN=0` in the engine's environment (`bench-vs-we -LumenwallEnv`) records through
+wgpu, for a before/after on the desktop without a second build.
