@@ -11,8 +11,9 @@ use iced::futures::channel::mpsc::{UnboundedSender, unbounded};
 use iced::futures::{SinkExt, StreamExt};
 
 use lumenwall_ipc::{
-    Client, ClientEvent, Endpoint, Error, Event, Output, PropertyMap, Request, Response, Scaling,
-    ServerInfo, Settings, State, Stats, Topic, WallpaperAudio, wallpaper_key,
+    Client, ClientEvent, Endpoint, Error, Event, Output, Playlist, PlaylistPosition, PropertyMap,
+    Request, Response, Scaling, ServerInfo, Settings, State, Stats, Topic, WallpaperAudio,
+    wallpaper_key,
 };
 
 use crate::platform;
@@ -46,6 +47,8 @@ pub enum Cmd {
         values: PropertyMap,
     },
     FetchProperties(String),
+    /// Wallpaper Engine playlists, read again by the daemon.
+    FetchPlaylists,
     Stats(bool),
 }
 
@@ -63,6 +66,9 @@ pub enum Msg {
     State(State),
     Settings(Settings),
     Properties(String, PropertyMap),
+    /// `Err`: the daemon cannot read them (no Wallpaper Engine installation...); `None`
+    /// inside: the daemon has no playlists at all (older build).
+    Playlists(Option<Result<Vec<Playlist>, String>>),
     Error(String),
 }
 
@@ -74,6 +80,9 @@ pub struct DaemonLink {
     pub stats: Option<Stats>,
     /// Property values reported by the daemon, by output.
     pub properties: HashMap<String, PropertyMap>,
+    /// Wallpaper Engine playlists: `None` until known or when the daemon has none (then
+    /// hide the controls), `Some(Err)` when the daemon cannot read them.
+    pub playlists: Option<Result<Vec<Playlist>, String>>,
     /// Errors to show once (drained by the UI).
     pub errors: Vec<String>,
     cmd: Option<Sender<Cmd>>,
@@ -135,6 +144,7 @@ impl DaemonLink {
             settings: None,
             stats: None,
             properties: HashMap::new(),
+            playlists: None,
             errors: Vec::new(),
             cmd: None,
             stats_wanted: false,
@@ -176,6 +186,7 @@ impl DaemonLink {
                 if self.stats_wanted {
                     self.send(Cmd::Stats(true));
                 }
+                self.send(Cmd::FetchPlaylists);
             }
             Msg::Offline(reason) => {
                 self.link = Link::Offline(reason);
@@ -183,6 +194,7 @@ impl DaemonLink {
                 self.stats = None;
                 self.outputs.clear();
                 self.properties.clear();
+                self.playlists = None;
             }
             Msg::Starting => self.link = Link::Starting,
             Msg::Event(event) => match event {
@@ -200,8 +212,44 @@ impl DaemonLink {
             Msg::Properties(output, values) => {
                 self.properties.insert(output, values);
             }
+            Msg::Playlists(list) => self.playlists = list,
             Msg::Error(e) => self.errors.push(e),
         }
+    }
+
+    /// Asks the daemon for the playlists again (they may have been made in Wallpaper Engine
+    /// meanwhile). Only when online.
+    pub fn fetch_playlists(&self) {
+        if self.is_online() {
+            self.send(Cmd::FetchPlaylists);
+        }
+    }
+
+    /// The playlist that drives `output`, if any.
+    pub fn playlist_on(&self, output: &str) -> Option<&PlaylistPosition> {
+        self.state
+            .as_ref()?
+            .outputs
+            .iter()
+            .find(|o| o.output == output)?
+            .playlist
+            .as_ref()
+    }
+
+    pub fn apply_playlist(&self, output: Option<String>, name: String, scaling: Scaling) {
+        self.send(Cmd::Call(Request::ApplyPlaylist {
+            output,
+            name,
+            scaling,
+        }));
+    }
+
+    pub fn playlist_step(&self, output: Option<String>, forward: bool) {
+        self.send(Cmd::Call(if forward {
+            Request::PlaylistNext { output }
+        } else {
+            Request::PlaylistPrevious { output }
+        }));
     }
 
     /// Tries again after "not running" (window focused, user asked). Never loops.
@@ -300,6 +348,25 @@ impl DaemonLink {
     }
 }
 
+/// What the UI makes of a `list_playlists` answer: daemons without playlists (an unknown
+/// request, or not implemented) hide the controls; other errors are shown.
+fn playlists_reply(reply: Result<Vec<Playlist>, Error>) -> Option<Result<Vec<Playlist>, String>> {
+    use lumenwall_ipc::ErrorCode;
+    match reply {
+        Ok(list) => Some(Ok(list)),
+        Err(Error::Remote(e))
+            if matches!(e.code, ErrorCode::InvalidRequest | ErrorCode::Unsupported) =>
+        {
+            None
+        }
+        Err(Error::Remote(e)) => Some(Err(e.message)),
+        Err(e) => {
+            tracing::debug!("IPC: {e}");
+            None
+        }
+    }
+}
+
 /// Whether `next` makes `queued` pointless: the same volume control set again.
 fn supersedes(next: &Request, queued: &Request) -> bool {
     match (next, queued) {
@@ -378,6 +445,9 @@ impl Worker {
                     let refresh = matches!(
                         req,
                         Request::Apply { .. }
+                            | Request::ApplyPlaylist { .. }
+                            | Request::PlaylistNext { .. }
+                            | Request::PlaylistPrevious { .. }
                             | Request::Clear { .. }
                             | Request::SetPaused { .. }
                             | Request::SetMuted { .. }
@@ -403,6 +473,18 @@ impl Worker {
                         self.call_quiet(Request::GetProperties { output })
                     {
                         self.send(Msg::Properties(output, values));
+                    }
+                }
+                Cmd::FetchPlaylists => {
+                    let Some(client) = &self.client else {
+                        continue;
+                    };
+                    match client.playlists() {
+                        Err(Error::Disconnected) => {
+                            self.client = None;
+                            self.send(Msg::Offline(Offline::NotRunning));
+                        }
+                        reply => self.send(Msg::Playlists(playlists_reply(reply))),
                     }
                 }
                 Cmd::Stats(on) => {
@@ -536,6 +618,22 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_controls_hide_for_daemons_without_playlists() {
+        use lumenwall_ipc::{ErrorCode, RemoteError};
+        let remote = |code| Err(Error::Remote(RemoteError::new(code, "x")));
+        // Unknown request (older daemon) or not implemented: no controls.
+        assert_eq!(playlists_reply(remote(ErrorCode::InvalidRequest)), None);
+        assert_eq!(playlists_reply(remote(ErrorCode::Unsupported)), None);
+        assert_eq!(playlists_reply(Err(Error::Timeout)), None);
+        // The daemon cannot read Wallpaper Engine's settings: say why.
+        assert_eq!(
+            playlists_reply(remote(ErrorCode::NotFound)),
+            Some(Err("x".to_owned()))
+        );
+        assert_eq!(playlists_reply(Ok(vec![])), Some(Ok(vec![])));
+    }
 
     #[test]
     fn only_the_latest_volume_is_sent() {

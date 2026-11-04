@@ -126,8 +126,8 @@ struct Output {
     /// The surface must be presented again (resize, first frame).
     dirty: bool,
     frame_requested: bool,
-    /// Video and web wallpapers: serial of the last presented frame, output image
-    /// generation bound.
+    /// Serial of the last presented frame of the target (scene, video or web); for videos
+    /// and webs, also the output image generation bound.
     shown_serial: u64,
     video_generation: u64,
 }
@@ -136,6 +136,10 @@ struct SceneSlot {
     runtime: SceneRuntime,
     /// Loop iteration of the last update/encode (shared by span outputs).
     updated_at: u64,
+    /// Frames encoded so far. The first output of an iteration encodes the frame; the others
+    /// sharing the scene only compose it, and know they have not shown it yet by their
+    /// `shown_serial` ([`scene_present_due`]).
+    serial: u64,
     /// The scene's own time, started on its first frame (`crate::clock`).
     clock: crate::clock::SceneClock,
 }
@@ -1519,7 +1523,7 @@ impl Engine {
         let o = &mut r.outputs[oi];
         let redraw = slot.runtime.scene.needs_redraw();
         let mut measured = None;
-        if redraw || o.dirty {
+        if scene_present_due(redraw, o.dirty, o.shown_serial, slot.serial) {
             match o.surface.acquire(&r.ctx) {
                 Ok(Some(frame)) => {
                     let mut enc =
@@ -1534,6 +1538,7 @@ impl Engine {
                     if fresh || redraw {
                         slot.runtime.scene.encode(&r.ctx, &mut enc);
                         slot.updated_at = r.iteration;
+                        slot.serial += 1;
                     }
                     let size = frame.size();
                     o.uv = o.composer.update(&r.ctx, size, slot.runtime.logical);
@@ -1554,6 +1559,7 @@ impl Engine {
                     r.surfaces.pre_present(id);
                     frame.present(&r.ctx);
                     o.dirty = false;
+                    o.shown_serial = slot.serial;
                     r.rendered += 1;
                     let cpu = start.elapsed();
                     let gpu = r.timer.as_mut().and_then(|t| t.poll(&r.ctx));
@@ -1732,6 +1738,7 @@ fn build_renderer(
     Ok(Renderer::Scene(Box::new(SceneSlot {
         runtime,
         updated_at: u64::MAX,
+        serial: 0,
         clock: crate::clock::SceneClock::new(),
     })))
 }
@@ -2045,6 +2052,17 @@ fn render_web(r: &mut Running, oi: usize, start: Instant) -> Option<(Duration, O
     measured
 }
 
+/// Whether an output showing a scene presents on its frame event: the scene changes
+/// (`redraw`), the surface needs an image (`dirty`), or another output sharing the scene
+/// encoded a frame this one has not shown (`shown` behind the scene's `serial`).
+///
+/// The platforms fire the outputs of one frame interval in the same loop iteration (one timer
+/// on Windows and X11). The first output encodes the scene and clears `redraw`, so without the
+/// serial the others never present again after their first frame.
+fn scene_present_due(redraw: bool, dirty: bool, shown: u64, serial: u64) -> bool {
+    redraw || dirty || shown != serial
+}
+
 /// Asks the platform for a frame, unless one is pending or the output is held by a user
 /// pause with nothing new to show.
 fn request(s: &mut dyn WallpaperSurface, o: &mut Output) {
@@ -2229,6 +2247,36 @@ mod tests {
         });
         w.idle_wait();
         t.join().unwrap();
+    }
+
+    /// Two outputs of an animated scene firing in the same loop iteration, as the Windows and
+    /// X11 timers fire them (`render_output`: the first encodes, both present).
+    #[test]
+    fn outputs_sharing_a_scene_present_every_frame() {
+        let mut serial = 0u64;
+        let mut shown = [u64::MAX; 2];
+        let mut dirty = [true; 2];
+        let mut presented = [0u32; 2];
+        for _ in 0..10 {
+            // The update of the iteration changes the time uniform; the encode flushes it.
+            let mut redraw = true;
+            for o in 0..2 {
+                if scene_present_due(redraw, dirty[o], shown[o], serial) {
+                    if redraw {
+                        serial += 1;
+                        redraw = false;
+                    }
+                    shown[o] = serial;
+                    dirty[o] = false;
+                    presented[o] += 1;
+                }
+            }
+        }
+        assert_eq!(presented, [10, 10]);
+        // A static scene: nothing new, nothing presented.
+        assert!(!scene_present_due(false, false, serial, serial));
+        // A surface that needs an image (resize, resume) gets one without a new frame.
+        assert!(scene_present_due(false, true, serial, serial));
     }
 
     #[test]

@@ -13,7 +13,9 @@ Built from `specs/07-plateforme-audio-video-web.md` only: §1 (lifecycle), §2 (
 §22–§23 (Windows, open questions); plus `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`,
 `docs/research/platform.md`, and the public documentation of `clap`, `tracing`,
 `tracing-appender`, `toml`, `dirs`, `notify`, `signal-hook`, `windows-sys` and
-`embed-manifest`. No upstream code was read.
+`embed-manifest`. For playlists, also the public wallpaperengine.io home page (playlist modes)
+and `config.json` excerpts posted by users on the Steam community forums (`transition`,
+`"order": "sorted"`). No upstream code and no other reimplementation was read.
 
 ## Flow
 
@@ -31,13 +33,13 @@ signals (SIGINT/SIGTERM, console events) ─────────────
 | `config` | TOML file, validation, default location |
 | `plan` | `ExecutionPlan` (what runs where, how), CLI/config merge, `diff` for reloads |
 | `services` | Traits to other crates: `WallpaperResolver`, `PlaylistCatalog`, `Engine`, `Waker`; control channel |
-| `playlist` | Wallpaper Engine `config.json` playlists (§17): parsing, path normalisation, timer |
+| `playlist` | Wallpaper Engine `config.json` playlists (§17): parsing, path normalisation, `PlaylistRunner` (timer, order, pauses, failures, next/previous) |
 | `screenshot` | One-shot trigger after N frames (§18.2) |
 | `logging` | `tracing` setup: stdout/stderr split, env filter, rotated file, reloadable level |
 | `watch` | Event-driven file watcher (`notify`) |
 | `signals` | SIGINT/SIGTERM (`signal-hook`), Windows console control events |
 | `console` | Windows GUI subsystem: reattach to the parent terminal |
-| `daemon` | IPC daemon (`lumenwall-ipc` `Handler`): reads from engine snapshots, client choices written atomically to the configuration file (`toml_edit`, comments kept) and applied live, statistics sampled only while subscribed |
+| `daemon` | IPC daemon (`lumenwall-ipc` `Handler`): reads from engine snapshots, client choices written atomically to the configuration file (`toml_edit`, comments kept) and applied live, statistics sampled only while subscribed; `daemon/playlists`: one runner per playlist target and the thread that changes items ([Playlists](#playlists)) |
 | `app` | Lifecycle (§1.1 order), exit codes, single instance |
 
 `main.rs` plugs placeholder services until the other crates are wired: paths resolve as is,
@@ -57,7 +59,7 @@ marked *target* apply to the output or span group named by the last `-r`/`--scre
 | `--screen-root` | `-r` | output | — | Desktop mode on this output; becomes the target. Repeatable |
 | `--screen-span` | | `A,B[,C…]` | — | One wallpaper across ≥ 2 outputs; target key `span:<raw>`. Repeatable |
 | `--bg` | `-b` | ID or path | — | Wallpaper of the target **and** new default wallpaper. Repeatable |
-| `--playlist` | | name | — | Target playlist (its first item becomes the target's wallpaper), or window playlist without target; fills an empty default. Repeatable |
+| `--playlist` | | name | — | Target playlist: its first item shows at once, the next ones follow its settings ([Playlists](#playlists)); without target, the window's playlist (every output); fills an empty default. Repeatable |
 | `--scaling` | | `stretch` `fit` `fill` `default` | `default` | *target*; without target, global default for the window and for outputs named **afterwards** |
 | `--clamp` | `--clamping` | `clamp` `border` `repeat` | `clamp` | Same rule as `--scaling` |
 | `--layer` | | `background` `bottom` `top` `overlay` | `bottom` | Wayland layer (no effect on Windows) |
@@ -204,11 +206,45 @@ input, particles, hwdec, layer, assets, properties, screenshot). An invalid file
 and the running settings stay; a removed file means defaults. The log level is reloaded;
 log file settings apply at next start. The directory must exist at startup to be watched.
 
+## Playlists
+
+Wallpaper Engine playlists (its `config.json`, spec 07 §17) run in the daemon, one per target
+(window, screen or span group), whatever starts them:
+
+- **Choosing one.** `--playlist NAME` (per target, §2.3), `playlist = "NAME"` in the
+  configuration file (top level, `[[screen]]`, `[[span]]`), or a client (`apply_playlist`, saved
+  there like a wallpaper, so the choice comes back at the next start). A second
+  `lumenwall --playlist NAME` sends it to the running daemon.
+- **Timing.** `"mode": "timer"`: every `delay` minutes (at least 1), counted from the last
+  change. The `lumenwall-playlists` thread sleeps until the earliest deadline (no polling); a
+  change is a plan reload of that target only (`TargetContent`), the other outputs keep running.
+  Other modes never change by themselves (§17.3); next and previous still work.
+- **Order.** `"order": "random"` shuffles each round; anything else (`sorted`, `sequential`)
+  plays in the playlist's order and loops.
+- **Pauses.** Unless `updateonpause`, time spent paused does not count: the user pause, or every
+  output of the target paused (fullscreen window, locked session, hidden or covered). While all
+  playing playlists wait for a pause to end, the thread has no deadline at all. With
+  `updateonpause`, items change while paused.
+- **Failures.** An item whose `project.json` lacks `type` or `file`, or that the engine cannot
+  show, is skipped for the rest of the session (§17.4).
+- **Next / previous** (`playlist_next` / `playlist_previous`, the window's Screens page): change
+  at once, in any mode, and restart the delay.
+- **Other changes** (volume, another output's wallpaper, a hand edit of the file) keep each
+  playlist on its current item. A restart begins again at the first item, with a full delay.
+- **Not done.** `transition` (Wallpaper Engine blends into the next item) is read and reported
+  to clients, but items change with a cut: it needs rendering in the engine
+  (`lumenwall-engine` README). Wallpaper Engine's "Time of day" and "Log in" modes are not
+  described by the spec nor by public documentation of `config.json`: such playlists stay on
+  their item (open question 6). `videosequence` is read and unused (§17.3).
+
 ## IPC daemon (Lumenwall extension)
 
 - `lumenwall` serves `lumenwall-ipc` on `$XDG_RUNTIME_DIR/lumenwall/ipc.sock` (`LUMENWALL_IPC_ENDPOINT` overrides).
-  Single instance: a second `lumenwall` sends its wallpaper (`apply`) to the running one, or prints
-  "Lumenwall is already running"; exit 0.
+  Single instance: a second `lumenwall` sends its wallpaper (`apply`) or playlist (`apply_playlist`)
+  to the running one, or prints "Lumenwall is already running"; exit 0.
+- Playlists: `list_playlists` (read again from Wallpaper Engine's `config.json` on each request),
+  `apply_playlist`, `playlist_next`, `playlist_previous`; `get_state` names each output's playlist
+  and the item shown.
 - `lumenwall` with no argument and no configured wallpaper starts idle (no surface, no GPU device)
   and waits for a client (deviation: the reference exits with "no wallpaper").
 - Client choices (wallpaper per output or for all, scaling, saved properties, fps, fullscreen
@@ -253,12 +289,12 @@ log file settings apply at next start. The directory must exist at startup to be
 | Trait | Provided by | Contract |
 |---|---|---|
 | `WallpaperResolver` | `lumenwall-assets` | Workshop ID/path → wallpaper folder (§3.1); errors are shown as is |
-| `PlaylistCatalog` | `playlist::WeConfigCatalog` + a `config.json` reader from `lumenwall-assets` (§3.2) | Name → first item folder; unknown names list the available ones |
+| `PlaylistCatalog` | `playlist::WeConfigCatalog` + a `config.json` reader from `lumenwall-assets` (§3.2) | Name → first item folder, or the whole playlist; unknown names list the available ones; `list` reads the file again |
 | `Engine` | platform/render/audio crates | `load` (no window/audio/web for `--list-properties`), `write_properties`, `start`, `write_structure`, `run(Receiver<Control>)` blocking on OS events |
 | `Waker` | engine event loop | Wakes the loop after a `Control` message is queued |
 
-The engine is also expected to use `PlaylistRunner` (deadline-driven, `pause_ended` for
-`updateonpause`) and `ScreenshotTrigger`.
+The engine is also expected to use `ScreenshotTrigger`. Playlists need nothing from it: the
+daemon drives them through plan reloads.
 
 ## Deviations
 
@@ -281,7 +317,14 @@ The engine is also expected to use `PlaylistRunner` (deadline-driven, `pause_end
 | Negative `--screenshot-delay` | Not specified | Fatal error | Domain is ≥ 0 |
 | Path classification on Windows | Linux only | `\` and `C:` also mean path | §22 |
 | Playlist paths on Windows (QO-24) | Linux mapping | Native paths kept | §22 |
-| Playlist timer | Checked every iteration | Exposes `deadline()` for the event loop | PERFORMANCE |
+| Playlist timer | Checked every iteration | A thread sleeps until the earliest deadline | PERFORMANCE |
+| Paused time (`updateonpause` false) | Fullscreen pauses only | Every pause of the target's outputs (fullscreen, locked, hidden) and the user pause | Lumenwall has more pause causes; a hidden wallpaper's timer should not run either |
+| Random order, first round | Starts in the middle of the shuffled order, skipping the items before the one shown | Starts with the item shown: the first round shows every item | Visible defect |
+| Random order, new round | Can show the same item twice in a row | Never starts with the item that ended the round | Visible defect |
+| Target showing a wallpaper outside its playlist (`-r A --playlist P --bg X`) | First change shows the second item | First change shows the start of the order | Visible defect |
+| Reading `config.json` (§17.1) | Once | Once for plans, again each time a client lists the playlists | Playlists made in Wallpaper Engine appear without a restart |
+| Next / previous item | None | IPC `playlist_next` / `playlist_previous`, the window's buttons | Lumenwall extension |
+| Playlist `transition` | Not read | Read and reported, not drawn (cut) | Needs engine rendering |
 | `XDG_SESSION_TYPE`, D-Bus fatal (QO-22) | Fatal | Not handled here (platform/media crates) | PARITY 2 |
 
 ## Open questions (non-blocking)
@@ -294,3 +337,8 @@ The engine is also expected to use `PlaylistRunner` (deadline-driven, `pause_end
 3. §1.1: does the "running with" line include `argv[0]`? (Lumenwall includes it.)
 4. §20: valid range of `object=`/`skip-object=`/`skip-effect=` ids (`u32` assumed).
 5. QO-27: output names for `-r` on Windows (owned by `lumenwall-platform`).
+6. §17.3: Wallpaper Engine changes playlists "at set intervals or times of day, when you sign
+   in, or when you launch a specific app" (wallpaperengine.io), but only `"mode": "timer"` is
+   specified; the `config.json` values of the other modes and the per-item times of a "Time of
+   day" playlist are in no spec and no public page. Those playlists are frozen (§17.3) until a
+   spec writer documents them (a sample `config.json` with such playlists was asked for).

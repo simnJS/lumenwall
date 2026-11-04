@@ -1,6 +1,6 @@
 //! Screens page: the monitor layout drawn to scale, then one tile per screen.
 
-use iced::widget::{column, container, responsive, row, scrollable, space};
+use iced::widget::{column, container, pick_list, responsive, row, scrollable, space};
 use iced::{Alignment, Element, Length, Padding, Size};
 
 use super::widgets::{self, MapMode, label, strong};
@@ -146,6 +146,7 @@ impl App {
                     col = col.push(label(m.clone(), size::CAPTION, t.danger));
                 }
             }
+            col = col.push(self.playlist_controls(t, &o.id));
             let mut buttons = row![widgets::secondary_button(
                 t,
                 Some(Icon::Library),
@@ -178,5 +179,90 @@ impl App {
             .style(theme::scroll_style)
             .height(Length::Fill)
             .into()
+    }
+
+    /// The screen's Wallpaper Engine playlist: where it is and how it changes, previous /
+    /// next / stop, and a list to start one. Nothing for a daemon without playlists.
+    fn playlist_controls(&self, t: &'static Tokens, output: &str) -> Element<'_, Message> {
+        let mut col = column![].spacing(sp::S);
+        let Some(available) = &self.daemon.playlists else {
+            return col.into();
+        };
+        let list = available.as_ref().map(Vec::as_slice).unwrap_or_default();
+        let playing = self.daemon.playlist_on(output);
+        if let Some(p) = playing {
+            let where_ = match p.item {
+                Some(i) if p.count > 0 => self
+                    .t(K::PlaylistPosition)
+                    .replace("{n}", &(i + 1).to_string()),
+                _ => self.t(K::PlaylistOutside).to_owned(),
+            }
+            .replace("{name}", &p.name)
+            .replace("{count}", &p.count.to_string());
+            col = col.push(label(where_, size::CAPTION, t.accent));
+            if let Some(s) = list.iter().find(|l| l.name == p.name).map(|l| &l.settings) {
+                let mut how = match s.mode {
+                    lumenwall_ipc::PlaylistMode::Timer => self
+                        .t(K::PlaylistEvery)
+                        .replace("{n}", &s.delay_minutes.to_string()),
+                    _ => self.t(K::PlaylistManual).to_owned(),
+                };
+                if s.order == lumenwall_ipc::PlaylistOrder::Random {
+                    how = format!("{how} · {}", self.t(K::PlaylistRandom));
+                }
+                col = col.push(label(how, size::CAPTION, t.faint));
+            }
+            let id = output.to_owned();
+            col = col.push(
+                row![
+                    widgets::icon_button(
+                        t,
+                        Icon::Previous,
+                        self.t(K::PlaylistPrevious),
+                        false,
+                        Some(Message::PlaylistStep(id.clone(), false)),
+                    ),
+                    widgets::icon_button(
+                        t,
+                        Icon::Next,
+                        self.t(K::PlaylistNext),
+                        false,
+                        Some(Message::PlaylistStep(id.clone(), true)),
+                    ),
+                    widgets::ghost_button(
+                        t,
+                        Some(Icon::Close),
+                        self.t(K::PlaylistStop),
+                        Some(Message::StopPlaylist(id)),
+                    ),
+                ]
+                .spacing(sp::XS)
+                .align_y(Alignment::Center),
+            );
+        }
+        match available {
+            Err(e) => {
+                let text = self.t(K::PlaylistUnavailable).replace("{e}", e);
+                col = col.push(label(text, size::CAPTION, t.faint));
+            }
+            Ok(list) if list.is_empty() => {
+                col = col.push(label(self.t(K::PlaylistNone), size::CAPTION, t.faint));
+            }
+            Ok(list) => {
+                let names: Vec<String> = list.iter().map(|p| p.name.clone()).collect();
+                let id = output.to_owned();
+                col = col.push(
+                    pick_list(names, playing.map(|p| p.name.clone()), move |name| {
+                        Message::StartPlaylist(id.clone(), name)
+                    })
+                    .placeholder(self.t(K::PlaylistPick))
+                    .width(Length::Fill)
+                    .text_size(size::CAPTION)
+                    .padding(Padding::from([6.0, 12.0]))
+                    .style(theme::pick_list_style),
+                );
+            }
+        }
+        col.into()
     }
 }

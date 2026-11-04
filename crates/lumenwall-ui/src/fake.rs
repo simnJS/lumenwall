@@ -16,6 +16,8 @@ pub struct FakeDaemon {
     props: Mutex<std::collections::HashMap<String, PropertyMap>>,
     publisher: OnceLock<Publisher>,
     sampling: AtomicBool,
+    /// Wallpaper Engine playlists the fake offers (made from the demo library).
+    playlists: Vec<Playlist>,
 }
 
 impl FakeDaemon {
@@ -146,6 +148,7 @@ impl Handler for FakeDaemon {
                     scaling,
                     status: WallpaperStatus::Running,
                     message: None,
+                    playlist: None,
                 });
                 self.props.lock().unwrap().remove(&id);
             }
@@ -270,7 +273,109 @@ impl Handler for FakeDaemon {
         Ok(self.stats_now(0))
     }
 
+    fn playlists(&self) -> Result<Vec<Playlist>, RemoteError> {
+        Ok(self.playlists.clone())
+    }
+
+    /// Shows the first item; items change only through next/previous (no timer here).
+    fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        scaling: Scaling,
+    ) -> Result<(), RemoteError> {
+        let playlist = self
+            .playlists
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| RemoteError::new(ErrorCode::NotFound, format!("no playlist {name}")))?;
+        self.apply(output, &playlist.items[0], scaling)?;
+        for o in &mut self.state.lock().unwrap().outputs {
+            if output.is_none_or(|id| id == o.output) {
+                o.playlist = Some(PlaylistPosition {
+                    name: name.to_owned(),
+                    item: Some(0),
+                    count: playlist.items.len() as u32,
+                });
+            }
+        }
+        self.publish_state();
+        Ok(())
+    }
+
+    fn step_playlist(&self, output: Option<&str>, forward: bool) -> Result<(), RemoteError> {
+        {
+            let mut state = self.state.lock().unwrap();
+            let mut playing = false;
+            for o in &mut state.outputs {
+                if output.is_some_and(|id| id != o.output) {
+                    continue;
+                }
+                let Some(position) = &mut o.playlist else {
+                    continue;
+                };
+                let Some(p) = self.playlists.iter().find(|p| p.name == position.name) else {
+                    continue;
+                };
+                let n = p.items.len();
+                let i = position.item.map_or(0, |i| i as usize);
+                let next = if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                };
+                position.item = Some(next as u32);
+                o.wallpaper = Some(p.items[next].clone());
+                self.props.lock().unwrap().remove(&o.output);
+                playing = true;
+            }
+            if !playing {
+                return Err(RemoteError::new(
+                    ErrorCode::InvalidRequest,
+                    "no playlist plays there",
+                ));
+            }
+        }
+        self.publish_state();
+        Ok(())
+    }
+
     fn subscribers_changed(&self, _topic: Topic, _count: usize) {}
+}
+
+/// Two playlists over the demo wallpapers next to the first one playing.
+fn demo_playlists(playing: &[std::path::PathBuf]) -> Vec<Playlist> {
+    let Some(dir) = playing.first().and_then(|p| p.parent()) else {
+        return Vec::new();
+    };
+    let items: Vec<_> = (0..6)
+        .map(|i| dir.join(format!("demo-{i:02}")))
+        .filter(|p| p.join("project.json").is_file())
+        .collect();
+    if items.len() < 2 {
+        return Vec::new();
+    }
+    let mut evening = items.clone();
+    evening.reverse();
+    vec![
+        Playlist {
+            name: "Demo rotation".into(),
+            items,
+            settings: PlaylistSettings {
+                delay_minutes: 15,
+                ..PlaylistSettings::default()
+            },
+        },
+        Playlist {
+            name: "Evening".into(),
+            items: evening,
+            settings: PlaylistSettings {
+                order: PlaylistOrder::Random,
+                transition: true,
+                ..PlaylistSettings::default()
+            },
+        },
+    ]
 }
 
 /// Serves a fake daemon on a private endpoint; keep the returned server alive.
@@ -283,6 +388,7 @@ pub fn start(playing: &[std::path::PathBuf]) -> Result<(Server, Endpoint), Error
             wallpaper_audio: Some(Default::default()),
             ..State::default()
         }),
+        playlists: demo_playlists(playing),
         ..FakeDaemon::default()
     });
     let handler: Arc<dyn Handler> = Arc::new(SamplingHandler(Arc::clone(&daemon)));
@@ -324,6 +430,9 @@ impl Handler for SamplingHandler {
         settings() -> Result<Settings, RemoteError>;
         set_settings(settings: Settings) -> Result<(), RemoteError>;
         stats() -> Result<Stats, RemoteError>;
+        playlists() -> Result<Vec<Playlist>, RemoteError>;
+        apply_playlist(output: Option<&str>, name: &str, scaling: Scaling) -> Result<(), RemoteError>;
+        step_playlist(output: Option<&str>, forward: bool) -> Result<(), RemoteError>;
     }
 
     fn subscribers_changed(&self, topic: Topic, count: usize) {

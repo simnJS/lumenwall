@@ -238,10 +238,58 @@ Lumenwall needs no restart: it subscribes again when the extension reappears.
   sctk 0.19 / x11rb 0.13 (duplicate crates, `cargo deny` warns only). winit must run on the main thread.
 - Windows: embed a manifest with Windows 8+ `supportedOS` entries (layered child windows) and, ideally,
   PerMonitorV2 awareness (the backend also requests it at runtime).
+- Windows and X11 pace every output with one timer: the outputs of a frame interval get their
+  `Event::Frame` in the same `wait`. A renderer shared by several outputs must remember, per output, which
+  of its frames that output has presented; "the scene changed since the last encode" is already false for
+  the second output (lumenwall-engine `scene_present_due`; it left the second monitor on its first frame).
+
+## NVIDIA overlay ("Alt+Z" prompt) on Windows
+
+Observed on Windows 11 (build 26300), NVIDIA app and capture module 11.0.9.585, driver 621.01, in
+`C:\ProgramData\NVIDIA Corporation\ShadowPlay\CaptureCore.log`, which logs every process by name and PID.
+
+**Cause.** The driver loads NVIDIA's capture module (`nvspcap64.dll`) into every process that uses the
+GPU. It classifies the process (`CAppSettings::ComputeAppSettings: m_uiIndex: -1 isGame: 1` for Lumenwall)
+and, about 5 s after the first frame it sees presented, sends the overlay's hotkey message
+(`ProcessGFEOverlay::ShowHotKeyMessage: Sent Hotkey Message`): the "Alt+Z" prompt. All the Lumenwall
+processes of the test day got it, `lumenwall-ui` too. The only exceptions come from NVIDIA's own application
+list, keyed on the executable name: `wallpaper64.exe` is on it (`m_uiIndex: 338 isGame: 0
+isAppBlackListed: 1`). Wallpaper Engine's other processes are not (`wallpaperui`, `webwallpaper64`:
+`m_uiIndex: -1 isGame: 1`) and get the same prompt as Lumenwall: Wallpaper Engine has no technique of its
+own. Every unknown process that presented through a swap chain for more than ≈ 5 s got the prompt (browsers,
+Electron apps, small windows, child windows of Progman); those that presented for less than 4 s did not.
+
+**Measured** (scene 3018340632, 30–45 s per run, the verdict read for the run's PID):
+
+| Variant | Classification | Prompt |
+|---|---|---|
+| Vulkan (default) | game when the device is created | yes, 5 s after the first frame |
+| `DISABLE_LAYER_NV_PRESENT_1=1` (NVIDIA present layer off) | game | yes |
+| `VK_LOADER_LAYERS_DISABLE=~implicit~` (every implicit layer off) | game | yes: the module is driven by the Vulkan driver itself (`nvoglv64.dll`), not by a layer |
+| DX12, HWND swap chain (`WGPU_BACKEND=dx12`) | "Not a game" at creation, `game[1]` after ≈ 5 presents | yes |
+| DX12, DirectComposition swap chain | same | yes |
+| NVIDIA DRS application profile | not a lever: `webwallpaper64.exe` belongs to the same predefined "Wallpaper Engine" profile as `wallpaper64.exe` (read through the public NVAPI, nothing written) and gets the prompt | — |
+
+A probe outside the repository (D3D11, full-monitor window, 607 updates in 20 s) settles what counts: a
+composition swap chain was promoted to a game after 4 presents and got the prompt; an `IDCompositionSurface`
+updated with `BeginDraw`/`EndDraw`/`Commit` (no swap chain, no Present) was never promoted, no frame was seen
+and no prompt came.
+
+**What would avoid it** (not done; the person chose to leave it): present without a swap chain. Each
+output's image, still rendered by Vulkan, is exported (`VK_KHR_external_memory_win32`, with a shared fence or
+a keyed mutex), opened by a D3D11 device on the same adapter, copied into an `IDCompositionSurface` of the
+output window (`WS_EX_NOREDIRECTIONBITMAP`) between `BeginDraw` and `EndDraw`, and `Commit` replaces Present.
+Cost: a D3D11 device and its driver (memory, start-up time), one copy per frame and output, pacing from
+Lumenwall's timer only (no FIFO), resize and device-loss handling, and the D3D11 side of the GPU release.
+
+**User-side workaround.** The prompt belongs to the NVIDIA overlay: switching the in-game overlay off in
+the NVIDIA app (Settings, Features), or switching off its notification for opening the overlay in the
+overlay's own notification settings, removes it. Menu names may differ between NVIDIA app versions.
 
 ## Not tested
 
-- **Windows**: only `cargo check`/`clippy --target x86_64-pc-windows-gnu`. Nothing ran on Windows.
+- **Windows**: ran on Windows 11 build 26300 (24H2+ Progman path), two 2560×1440 monitors on one RTX 4080
+  SUPER (one left of the primary). Not run with a monitor driven by another GPU, nor on Windows 10.
 - **Wayland**: the dev machine runs GNOME (no layer-shell); only the connection and the "no layer-shell"
   error path ran. Needs sway / Hyprland / niri / KDE / COSMIC.
 - X11 ran on XWayland only (GNOME), not on a real Xorg with a reparenting WM or a compositor (picom).

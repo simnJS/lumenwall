@@ -263,7 +263,7 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | Script effects on fixed state | Effect visibility, particle `origin`/`scale`/`angles` (read by `lumenwall-particles` at creation), camera/bloom/clear-colour members: scripts can read and write them, the image is unchanged. |
 | `localStorage` | In memory (not persisted between runs). |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
-| Playlists | Only the first item is shown (no `PlaylistRunner` timer). |
+| Playlist transitions | Playlists run in the daemon (`lumenwall` README, Playlists): each change is a plan reload of the target, a cut. Wallpaper Engine's `transition` (blend into the next item) needs the old and new renderers alive at once and a blend pass: not done. |
 | Plan reload | Wallpapers, layout, fps, audio, pause policy, GPU release delay and properties apply live (`EngineControl::Reload`); `hwdec`, input, particles, debug switches apply to wallpapers loaded afterwards. A plan received while the GPU is released restores it first (≈ 0.2 s), even when nothing needs drawing. A video applied to a device created without decode queues recreates the device (below): the other targets are rebuilt too (scripts restart, web pages reload), and a video that fails to open then leaves its target in error instead of keeping the previous wallpaper. |
 | Screenshot formats | PNG data whatever the extension. |
 

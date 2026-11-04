@@ -9,6 +9,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use crate::plan::{ExecutionPlan, PlanChange};
+use crate::playlist::Playlist;
 use crate::settings::WallpaperSource;
 
 /// Error reported by a subsystem; its message is shown to the user as is.
@@ -27,6 +28,18 @@ pub trait PlaylistCatalog: Send + Sync {
     /// Folder of the first usable item of the playlist; an unknown name is an error that
     /// lists the available names.
     fn first_wallpaper(&self, name: &str) -> Result<PathBuf, ServiceError>;
+
+    /// The whole playlist (items and settings), to run it; same errors as
+    /// [`first_wallpaper`](Self::first_wallpaper). Without it, a playlist only shows its first
+    /// item.
+    fn playlist(&self, name: &str) -> Result<Playlist, ServiceError> {
+        Err(format!("playlist '{name}' cannot be played by this build").into())
+    }
+
+    /// Every playlist, sorted by name, read again from the source (a client lists them).
+    fn list(&self) -> Result<Vec<Playlist>, ServiceError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Wakes the engine's blocking event loop from another thread (calloop ping, Win32 event...)

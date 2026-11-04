@@ -111,16 +111,26 @@ impl Outcome {
 }
 
 fn launch(args: &[&str], fail_at: Option<&'static str>, script: Option<RunScript>) -> Outcome {
+    launch_with(args, fail_at, script, Arc::new(NoPlaylists), None)
+}
+
+fn launch_with(
+    args: &[&str],
+    fail_at: Option<&'static str>,
+    script: Option<RunScript>,
+    playlists: Arc<dyn PlaylistCatalog>,
+    ipc: Option<lumenwall_ipc::Endpoint>,
+) -> Outcome {
     let record = Arc::new(Mutex::new(Record::default()));
     let services = Services {
         resolver: Arc::new(Resolver),
-        playlists: Arc::new(NoPlaylists),
+        playlists,
         engine: Box::new(ScriptedEngine {
             record: record.clone(),
             fail_at,
             run: script,
         }),
-        ipc: None,
+        ipc,
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let args = std::iter::once("lumenwall")
@@ -345,4 +355,162 @@ fn configuration_hot_reload() {
     assert_eq!((first.fps, first.audio.volume), (20, 3));
     assert_eq!(second_changes, &[PlanChange::Fps, PlanChange::Audio]);
     assert_eq!((second.fps, second.audio.volume), (30, 64));
+}
+
+/// Playlist `fast` over the given folders, changing every 30 ms.
+struct FastPlaylist(Vec<PathBuf>);
+
+impl PlaylistCatalog for FastPlaylist {
+    fn first_wallpaper(&self, name: &str) -> Result<PathBuf, ServiceError> {
+        Ok(PlaylistCatalog::playlist(self, name)?.items[0].clone())
+    }
+
+    fn playlist(&self, name: &str) -> Result<crate::playlist::Playlist, ServiceError> {
+        if name != "fast" {
+            return Err(format!("playlist '{name}' not found; available playlists: fast").into());
+        }
+        Ok(crate::playlist::Playlist {
+            name: name.to_owned(),
+            items: self.0.clone(),
+            settings: crate::playlist::PlaylistSettings {
+                delay: Duration::from_millis(30),
+                ..Default::default()
+            },
+        })
+    }
+}
+
+fn wallpaper_folders(dir: &std::path::Path, names: &[&str]) -> Vec<PathBuf> {
+    names
+        .iter()
+        .map(|n| {
+            let path = dir.join(n);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("project.json"),
+                r#"{"type":"scene","file":"scene.json"}"#,
+            )
+            .unwrap();
+            path
+        })
+        .collect()
+}
+
+#[test]
+fn a_command_line_playlist_changes_wallpaper() {
+    let dir = tempfile::tempdir().unwrap();
+    let items = wallpaper_folders(dir.path(), &["one", "two"]);
+    let script: RunScript = Box::new(move |control, record| {
+        // The daemon's playlist thread asks for the next item.
+        let (plan, changes) =
+            next_reload(&control, Duration::from_secs(10)).expect("the playlist did not change");
+        record.lock().unwrap().reloads.push((plan, changes));
+        Ok(StopReason::Driver)
+    });
+    let o = launch_with(
+        &["--no-config", "-r", "DP-1", "--playlist", "fast"],
+        None,
+        Some(script),
+        Arc::new(FastPlaylist(items.clone())),
+        None,
+    );
+    assert_eq!(o.exit, Exit::Success);
+    let record = o.record.lock().unwrap();
+    let start = &record.plan.as_ref().unwrap().targets[0];
+    assert_eq!(start.wallpaper.path, items[0]);
+    assert_eq!(start.playlist.as_deref(), Some("fast"));
+    let (next, changes) = &record.reloads[0];
+    assert_eq!(next.targets[0].wallpaper.path, items[1]);
+    assert_eq!(
+        changes,
+        &[PlanChange::TargetContent(crate::plan::TargetKey::Screen(
+            "DP-1".into()
+        ))]
+    );
+}
+
+/// Records what a second `lumenwall` sends to the running daemon.
+#[derive(Default)]
+struct Running(Mutex<Vec<(Option<String>, String)>>);
+
+impl lumenwall_ipc::Handler for Running {
+    fn apply_playlist(
+        &self,
+        output: Option<&str>,
+        name: &str,
+        _scaling: lumenwall_ipc::Scaling,
+    ) -> Result<(), lumenwall_ipc::RemoteError> {
+        let entry = (output.map(str::to_owned), format!("playlist {name}"));
+        self.0.lock().unwrap().push(entry);
+        Ok(())
+    }
+
+    fn apply(
+        &self,
+        output: Option<&str>,
+        wallpaper: &std::path::Path,
+        _scaling: lumenwall_ipc::Scaling,
+    ) -> Result<(), lumenwall_ipc::RemoteError> {
+        let entry = (output.map(str::to_owned), wallpaper.display().to_string());
+        self.0.lock().unwrap().push(entry);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_second_instance_sends_its_playlist_to_the_running_daemon() {
+    let endpoint = if cfg!(unix) {
+        let dir = std::env::temp_dir().join(format!("lumenwall-app-test-{}", std::process::id()));
+        lumenwall_ipc::Endpoint::Path(dir.join("forward.sock"))
+    } else {
+        lumenwall_ipc::Endpoint::Name(format!("lumenwall-app-test-{}", std::process::id()))
+    };
+    let running = Arc::new(Running::default());
+    let _server =
+        lumenwall_ipc::Server::bind(&endpoint, running.clone(), "lumenwall", "0.0.0").unwrap();
+    let o = launch_with(
+        &[
+            "--no-config",
+            "-r",
+            "DP-1",
+            "--playlist",
+            "day",
+            "-r",
+            "HDMI-A-1",
+            "--bg",
+            "123",
+        ],
+        None,
+        None,
+        Arc::new(NoPlaylists),
+        Some(endpoint.clone()),
+    );
+    assert_eq!(o.exit, Exit::Success);
+    assert!(o.out.ends_with("wallpaper sent to it\n"), "{}", o.out);
+    // Nothing started here.
+    assert!(o.calls().is_empty());
+    let sent = running.0.lock().unwrap().clone();
+    let workshop = PathBuf::from("/workshop").join("123").display().to_string();
+    assert_eq!(
+        sent,
+        [
+            (Some("DP-1".to_owned()), "playlist day".to_owned()),
+            (Some("HDMI-A-1".to_owned()), workshop),
+        ]
+    );
+
+    // Without a target, the playlist goes to every output.
+    running.0.lock().unwrap().clear();
+    let o = launch_with(
+        &["--no-config", "--playlist", "night"],
+        None,
+        None,
+        Arc::new(NoPlaylists),
+        Some(endpoint),
+    );
+    assert_eq!(o.exit, Exit::Success);
+    assert_eq!(
+        running.0.lock().unwrap().clone(),
+        [(None, "playlist night".to_owned())]
+    );
 }
