@@ -2,18 +2,21 @@
 //!
 //! One output named `default`. Normal mode: resizable 640×480 window. Explicit geometry: undecorated,
 //! fixed-size, always-on-top window at the given position. Driven with `pump_app_events`, so `wait` blocks
-//! in winit exactly like the desktop backends block in their own loops.
+//! in winit exactly like the desktop backends block in their own loops. winit allows one event loop per
+//! process: a closed backend leaves its loop to the next one of the thread (the engine reopens its surfaces
+//! when a wallpaper comes back after `clear`).
 //!
 //! Deviations from the reference window: no fullscreen detector (debug mode only), the pointer is only
 //! tracked while it is over the window (winit does not report positions outside it).
 
+use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Instant;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
@@ -74,6 +77,30 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.create_window(event_loop);
+    }
+
+    /// A reused event loop (see [`SPARE_LOOP`]) never sends `resumed` again: the window of a
+    /// later backend is created on its first loop iteration.
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _: StartCause) {
+        self.create_window(event_loop);
+    }
+
+    fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {
+        self.queue.push(Event::Wake);
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Late events of the window of a closed backend (the loop outlives it).
+        if self.window.as_ref().map(Window::id) != Some(id) {
+            return;
+        }
+        self.handle_window_event(event);
+    }
+}
+
+impl App {
+    fn create_window(&mut self, event_loop: &ActiveEventLoop) {
         let Some(attributes) = self.attributes.take() else {
             return;
         };
@@ -107,11 +134,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {
-        self.queue.push(Event::Wake);
-    }
-
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn handle_window_event(&mut self, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 self.queue.push(Event::CloseRequested)
@@ -162,9 +185,7 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
-}
 
-impl App {
     fn push_pointer(&mut self, x: f64, y: f64, kind: PointerKind) {
         // Buttons carry the last known position.
         let (x, y) = if x.is_nan() {
@@ -184,9 +205,17 @@ impl App {
     }
 }
 
+thread_local! {
+    /// winit allows one event loop per process, and the engine closes its surfaces when its
+    /// last wallpaper goes, then opens new ones for the next: a closed backend leaves its loop
+    /// here for the next backend of the thread.
+    static SPARE_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
+}
+
 /// The windowed backend.
 pub(crate) struct WindowedBackend {
-    event_loop: EventLoop<()>,
+    /// Always `Some` until `drop` hands it to [`SPARE_LOOP`].
+    event_loop: Option<EventLoop<()>>,
     app: App,
     display: RawDisplayHandle,
     waker: Waker,
@@ -198,9 +227,12 @@ impl WindowedBackend {
         config: &Config,
         geometry: Option<WindowGeometry>,
     ) -> Result<Self, PlatformError> {
-        let event_loop = EventLoop::<()>::with_user_event()
-            .build()
-            .map_err(|e| PlatformError::Connect(e.to_string()))?;
+        let event_loop = match SPARE_LOOP.with(|s| s.borrow_mut().take()) {
+            Some(l) => l,
+            None => EventLoop::<()>::with_user_event()
+                .build()
+                .map_err(|e| PlatformError::Connect(e.to_string()))?,
+        };
         let display = event_loop
             .display_handle()
             .map_err(|e| PlatformError::Connect(e.to_string()))?
@@ -238,7 +270,7 @@ impl WindowedBackend {
         }
 
         let mut backend = Self {
-            event_loop,
+            event_loop: Some(event_loop),
             app: App {
                 attributes: Some(attributes),
                 window: None,
@@ -254,7 +286,7 @@ impl WindowedBackend {
             waker,
             closed: false,
         };
-        // The window can only be created from inside the loop (`resumed`).
+        // The window can only be created from inside the loop (`resumed`, `new_events`).
         for _ in 0..100 {
             if backend.app.window.is_some() {
                 return Ok(backend);
@@ -262,9 +294,7 @@ impl WindowedBackend {
             if let Some(e) = backend.app.create_error.take() {
                 return Err(PlatformError::Os(format!("cannot create the window: {e}")));
             }
-            if let PumpStatus::Exit(code) = backend
-                .event_loop
-                .pump_app_events(Some(std::time::Duration::from_millis(10)), &mut backend.app)
+            if let PumpStatus::Exit(code) = backend.pump(Some(std::time::Duration::from_millis(10)))
             {
                 return Err(PlatformError::Os(format!(
                     "event loop exited during startup ({code})"
@@ -272,6 +302,30 @@ impl WindowedBackend {
             }
         }
         Err(PlatformError::Os("the window was never created".to_owned()))
+    }
+
+    fn pump(&mut self, timeout: Option<std::time::Duration>) -> PumpStatus {
+        let Some(event_loop) = self.event_loop.as_mut() else {
+            return PumpStatus::Exit(0);
+        };
+        let status = event_loop.pump_app_events(timeout, &mut self.app);
+        if matches!(status, PumpStatus::Exit(_)) {
+            // An exited loop cannot run again: the next backend builds none (winit refuses).
+            self.closed = true;
+        }
+        status
+    }
+}
+
+impl Drop for WindowedBackend {
+    fn drop(&mut self) {
+        // The window goes now; its last events are ignored by the next backend (other id).
+        self.app.window = None;
+        if !self.closed
+            && let Some(event_loop) = self.event_loop.take()
+        {
+            SPARE_LOOP.with(|s| *s.borrow_mut() = Some(event_loop));
+        }
     }
 }
 
@@ -355,8 +409,7 @@ impl WallpaperSurface for WindowedBackend {
             }
             let due = self.app.slot.due(now, !self.app.paused.is_empty(), true);
             let timeout = min_deadline(due, limit).map(|d| d.saturating_duration_since(now));
-            if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
-                self.closed = true;
+            if let PumpStatus::Exit(_) = self.pump(timeout) {
                 self.app.queue.push(Event::CloseRequested);
             }
             pumped = true;

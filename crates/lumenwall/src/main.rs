@@ -21,6 +21,13 @@ use lumenwall_engine::{EngineControl, EnginePlan, Stopped};
 fn main() -> ExitCode {
     // First, while the process has a single thread: it may set a Vulkan loader variable.
     lumenwall_engine::restrict_vulkan_loader();
+    // An engine process started by the daemon (hidden first argument) runs the engine only.
+    // `try_init` also routes the `log` records of wgpu and naga to its subscriber.
+    if let Some(code) = lumenwall_engine::run_engine_host(|logger| {
+        let _ = tracing_subscriber::util::SubscriberInitExt::try_init(logger);
+    }) {
+        return code;
+    }
     let attached = lumenwall::console::prepare();
     let resolver = lumenwall_engine::WallpaperResolver::new();
     let install = resolver.clone();

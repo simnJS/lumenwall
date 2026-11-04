@@ -9,7 +9,8 @@
 # lumenwall-<v>-x86_64-unknown-linux-gnu.tar.gz, lumenwall-<v>-amd64.deb, install.sh,
 # SHA256SUMS, SHA256SUMS.minisig.
 # The Windows zip (and the installer made from it) also ships FFmpeg's LGPL DLLs (video
-# wallpapers) and lumenwall-web-host.exe with the CEF runtime (web wallpapers):
+# wallpapers; Lumenwall's minimal build, packaging/ffmpeg/build.sh, made by the `ffmpeg`
+# job) and lumenwall-web-host.exe with the CEF runtime (web wallpapers):
 # packaging/release/windows-runtime.toml lists them.
 # Procedure, key creation and checks: docs/RELEASING.md.
 # Third-party actions are pinned to a commit SHA (tag in the trailing comment).
@@ -80,9 +81,36 @@ jobs:
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
+  # Lumenwall's FFmpeg for Windows (packaging/ffmpeg/build.sh, packaging/ffmpeg/README.md):
+  # FFmpeg's release tarball and two header packages, each checked against its SHA-256,
+  # cross-compiled with mingw-w64 on the same image as CI's `ffmpeg` job. No cache: like
+  # the programs, a release's DLLs are built from this commit's sources.
+  ffmpeg:
+    name: FFmpeg (Windows DLLs)
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            gcc-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev nasm make pkg-config
+          packaging/ffmpeg/build.sh "$RUNNER_TEMP/ffmpeg-win64"
+          du -cb "$RUNNER_TEMP"/ffmpeg-win64/bin/*.dll
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ffmpeg-win64
+          path: ${{ runner.temp }}/ffmpeg-win64
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: build (${{ matrix.target }})
-    needs: version
+    needs: [version, ffmpeg]
     strategy:
       fail-fast: true
       matrix:
@@ -107,7 +135,7 @@ jobs:
         with:
           # No cache: a release is built from this commit and crates.io only.
           cache: "false"
-          # Windows: BtbN's FFmpeg 8.1 LGPL shared build, pinned by SHA-256 (FFMPEG_DIR,
+          # Windows: Lumenwall's FFmpeg build from the `ffmpeg` job (FFMPEG_DIR,
           # LIBCLANG_PATH), for video wallpapers. No effect on Linux (system FFmpeg).
           ffmpeg: "true"
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
@@ -259,7 +287,7 @@ jobs:
 
   # NSIS (zlib licence) runs on Linux: the installer is made from the Windows zip
   # itself, so it holds exactly the files the archive and the updater have. Solid LZMA
-  # over ≈ 565 MB (FFmpeg and CEF included) takes a few minutes.
+  # over ≈ 448 MB (FFmpeg and CEF included) takes a few minutes.
   installer:
     name: windows installer
     needs: [version, build]

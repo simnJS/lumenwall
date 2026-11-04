@@ -5,32 +5,42 @@
 # exactly the expected files; the release workflow repeats that check before publishing
 # (`package.py --check <zip>`). docs/RELEASING.md.
 #
-# Recipes: crates/lumenwall-video/README.md ("Windows distribution") for FFmpeg,
-# crates/lumenwall-web/README.md ("Windows runtime files") for CEF. Bump [ffmpeg] with the
-# FFmpeg build pinned in .github/actions/setup-rust/action.yml, [cef] with the `cef` crate
+# Recipes: packaging/ffmpeg/README.md and crates/lumenwall-video/README.md ("Windows
+# distribution") for FFmpeg, crates/lumenwall-web/README.md ("Windows runtime files") for
+# CEF. Bump [ffmpeg] with the pins of packaging/ffmpeg/build.sh, [cef] with the `cef` crate
 # of crates/lumenwall-web/Cargo.toml: package.py refuses a build that does not match.
 
 [ffmpeg]
-# BtbN's FFmpeg-Builds, release branch 8.1, "lgpl-shared": LGPL only (configured with
-# --enable-version3 --enable-shared --disable-static, never --enable-gpl), DLLs loaded by
-# name at run time by lumenwall.exe, never linked statically.
-folder = "ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1"
-version = "n8.1.3-27-g8dca1586f4"
+# Lumenwall's own minimal build (packaging/ffmpeg/build.sh): FFmpeg's release tarball,
+# unmodified, with only the demuxers, decoders and hardware decoders of a video wallpaper;
+# LGPL only (--enable-version3, never --enable-gpl or --enable-nonfree), no external
+# library. Built by the `ffmpeg` job of ci.yml and release.yml (mingw-w64 on
+# ubuntu-24.04). The DLLs are loaded by name at run time by lumenwall.exe, never linked
+# statically. package.py checks the build's BUILD-INFO.txt against these values.
+version = "8.1.3"
 licence = "LGPL-3.0-or-later"
-archive = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1.zip"
-sha256 = "5cef7bc48e513f3cee7c881e8b2999d835541edb1846c3e89443a67f8f8556ab"
-# Corresponding source: FFmpeg at the build's commit, and the build scripts at the
-# autobuild tag (they pin every library compiled into the DLLs).
-source = "https://github.com/FFmpeg/FFmpeg/tree/8dca1586f468bfcbb78ae3ed618af1361d9f140a"
-build-scripts = "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-10-31-12-59"
-# From the archive's bin\, next to lumenwall.exe (128 MiB). swresample is needed by
-# avcodec. Not avfilter/avdevice, nor ffmpeg.exe/ffprobe.exe/ffplay.exe.
+# Corresponding source: the release tarball (build.sh checks its SHA-256) and the script
+# that configures and builds it, at the release's tag ({version}: Lumenwall's version).
+source = "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz"
+sha256 = "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3"
+build-script = "https://github.com/simnJS/lumenwall/blob/v{version}/packaging/ffmpeg/build.sh"
+# From the build's bin\, next to lumenwall.exe (≈ 13 MiB; swresample is needed by avcodec).
 dlls = ["avutil-60.dll", "swresample-6.dll", "swscale-9.dll", "avcodec-62.dll", "avformat-62.dll"]
-# The archive's LICENSE.txt (LGPL-3.0), shipped as:
-licence-file = "licenses/FFmpeg-LGPL-3.0.txt"
-# The LGPL-3.0 incorporates the GPL-3.0, whose text must accompany it
-# (packaging/about/GPL-3.0.txt, from https://www.gnu.org/licenses/gpl-3.0.txt).
-gpl-file = "licenses/GPL-3.0.txt"
+# The build's BUILD-INFO.txt (sources and SHA-256, configure line, toolchain), shipped as:
+build-info = "licenses/FFmpeg-BUILD-INFO.txt"
+
+# Licences of what is compiled into the DLLs, written by build.sh into the build's
+# licenses\ and shipped under the same names.
+[ffmpeg.licences]
+# FFmpeg: the LGPL-3.0 (COPYING.LGPLv3), and the GPL-3.0 it incorporates (COPYING.GPLv3).
+lgpl = "licenses/FFmpeg-LGPL-3.0.txt"
+gpl = "licenses/GPL-3.0.txt"
+# NVIDIA's codec headers as packaged by FFmpeg (MIT): CUDA and NVDEC.
+nv-codec-headers = "licenses/nv-codec-headers.txt"
+# Khronos' Vulkan headers (Apache-2.0, some files also MIT): Vulkan Video.
+vulkan-headers = "licenses/Vulkan-Headers.txt"
+# The MinGW-w64 runtime linked statically into each DLL (the toolchain's own licence file).
+mingw-w64 = "licenses/MinGW-w64.txt"
 
 [cef]
 # The `cef` crate's distribution (CEF_PATH/<version>/cef_windows_x86_64): CEF 156.0.15,

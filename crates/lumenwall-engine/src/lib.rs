@@ -35,7 +35,7 @@ mod web;
 use std::path::PathBuf;
 
 pub use assets::{SceneSource, VfsBytes, WallpaperResolver, open_vfs};
-pub use engine::{Engine, EngineWaker};
+pub use engine::{Engine, EngineWaker, run_engine_host};
 pub use headless::{HeadlessOptions, HeadlessReport, render_headless};
 pub use monitor::{EngineMonitor, EngineReport};
 pub use plan::{

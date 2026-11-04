@@ -26,12 +26,15 @@ Archive layout (what crates/lumenwall-update installs):
         share/icons/hicolor/...          Linux
         share/gnome-shell/extensions/lumenwall@simnjs.github.io/   Linux
         avutil-60.dll, swresample-6.dll, swscale-9.dll, avcodec-62.dll, avformat-62.dll
-                                         Windows, --ffmpeg-dir (FFmpeg, LGPL)
+                                         Windows, --ffmpeg-dir (FFmpeg, LGPL: a build of
+                                         packaging/ffmpeg/build.sh)
         libcef.dll, chrome_elf.dll, *.pak, icudtl.dat, v8_context_snapshot.bin,
         d3dcompiler_47.dll, vk_swiftshader*, vulkan-1.dll, locales/*.pak
                                          Windows, --web-runtime (CEF)
         licenses/                        Windows: FFmpeg's LGPL-3.0 and the GPL-3.0 text,
-                                         CEF's licence and Chromium's CREDITS.html
+                                         the licences of what the FFmpeg DLLs contain and
+                                         their BUILD-INFO.txt, CEF's licence and
+                                         Chromium's CREDITS.html
 
 On Windows, the files that Cargo does not build are listed in windows-runtime.toml:
 exactly those are copied, their notices are written into THIRD-PARTY-NOTICES.html, and
@@ -134,25 +137,64 @@ def copy_file(src: Path, dest: Path) -> None:
     shutil.copy2(src, dest)
 
 
-def add_ffmpeg(top: Path, ffmpeg_dir: Path, spec: dict) -> None:
-    """FFmpeg's DLLs next to lumenwall.exe, exactly those of the manifest, from the
-    pinned LGPL build only."""
-    if ffmpeg_dir.name != spec["folder"]:
-        die(
-            f"--ffmpeg-dir is {ffmpeg_dir.name}, but windows-runtime.toml describes {spec['folder']}: "
-            "ship the pinned LGPL build, or update the manifest and its notice with it"
-        )
+def read_build_info(ffmpeg_dir: Path) -> dict:
+    """The BUILD-INFO.txt that packaging/ffmpeg/build.sh writes: `key=value` lines, `dll=`
+    repeated (name, size, SHA-256)."""
+    path = ffmpeg_dir / "BUILD-INFO.txt"
+    if not path.is_file():
+        die(f"{path} is missing: --ffmpeg-dir must be a build of packaging/ffmpeg/build.sh")
+    info: dict = {"dll": {}}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            die(f"{path}: unexpected line {line!r}")
+        if key == "dll":
+            name, size, sha = value.split()
+            info["dll"][name] = (int(size), sha)
+        else:
+            info[key] = value
+    return info
+
+
+def add_ffmpeg(top: Path, ffmpeg_dir: Path, spec: dict) -> dict:
+    """FFmpeg's DLLs next to lumenwall.exe, exactly those of the manifest, from the pinned
+    LGPL build of packaging/ffmpeg/build.sh only, with the licences of what they contain.
+    Returns the build's BUILD-INFO.txt."""
+    info = read_build_info(ffmpeg_dir)
+    for key, want in [
+        ("ffmpeg-version", spec["version"]),
+        ("ffmpeg-source", spec["source"]),
+        ("ffmpeg-sha256", spec["sha256"]),
+        ("licence", "LGPL version 3 or later"),
+    ]:
+        if info.get(key) != want:
+            die(
+                f"{ffmpeg_dir}: BUILD-INFO.txt says {key}={info.get(key)!r}, windows-runtime.toml expects "
+                f"{want!r}: ship the pinned LGPL build, or update the manifest with packaging/ffmpeg/build.sh"
+            )
+    configuration = info.get("configuration", "")
+    for flag in ["--enable-gpl", "--enable-nonfree", "--enable-static"]:
+        if flag in configuration.split():
+            die(f"{ffmpeg_dir} was configured with {flag}")
+    # Not compared with the SHA-256 of BUILD-INFO.txt: the release's Authenticode step signs
+    # the DLLs in place before this (the setup action checked them when it installed them).
     for dll in spec["dlls"]:
         src = ffmpeg_dir / "bin" / dll
+        if not src.is_file() or dll not in info["dll"]:
+            die(f"{src} is missing, or not part of the build its BUILD-INFO.txt describes")
+        copy_file(src, top / dll)
+    for path in spec["licences"].values():
+        src = ffmpeg_dir / path
         if not src.is_file():
             die(f"{src} is missing")
-        copy_file(src, top / dll)
-    licence = ffmpeg_dir / "LICENSE.txt"
-    text = licence.read_text(encoding="utf-8", errors="replace") if licence.is_file() else ""
+        copy_file(src, top / path)
+    text = (ffmpeg_dir / spec["licences"]["lgpl"]).read_text(encoding="utf-8", errors="replace")
     if "GNU LESSER GENERAL PUBLIC LICENSE" not in text or "Version 3" not in text:
-        die(f"{licence} is not the LGPL-3.0 text: not an LGPL v3 build")
-    copy_file(licence, top / spec["licence-file"])
-    copy_file(ABOUT / "GPL-3.0.txt", top / spec["gpl-file"])
+        die(f"{ffmpeg_dir / spec['licences']['lgpl']} is not the LGPL-3.0 text")
+    copy_file(ffmpeg_dir / "BUILD-INFO.txt", top / spec["build-info"])
+    return info
 
 
 def cef_licence(web_runtime: Path, spec: dict) -> bytes:
@@ -203,8 +245,9 @@ def add_cef(top: Path, web_runtime: Path, spec: dict) -> None:
     licence.write_bytes(cef_licence(web_runtime, spec))
 
 
-def bundled_notices(runtime: dict, ffmpeg: bool, cef: bool) -> str:
-    """The THIRD-PARTY-NOTICES.html section for the libraries shipped as files."""
+def bundled_notices(runtime: dict, ffmpeg: dict | None, cef: bool, version: str) -> str:
+    """The THIRD-PARTY-NOTICES.html section for the libraries shipped as files. `ffmpeg`:
+    the BUILD-INFO.txt of the FFmpeg build shipped, if any."""
     parts = ['<h2 id="bundled">Libraries shipped beside the programs</h2>']
 
     def fill(template: str, values: dict) -> str:
@@ -212,21 +255,29 @@ def bundled_notices(runtime: dict, ffmpeg: bool, cef: bool) -> str:
         text = re.sub(r"\A<!--.*?-->\n", "", text, flags=re.S)  # the file's own comment
         return string.Template(text).substitute({k: html.escape(str(v)) for k, v in values.items()})
 
-    if ffmpeg:
+    if ffmpeg is not None:
         f = runtime["ffmpeg"]
+        lic = f["licences"]
         parts.append(
             fill(
                 "ffmpeg.html",
                 {
                     "version": f["version"],
-                    "major": f["version"].removeprefix("n").split(".")[0],
+                    "major": f["version"].split(".")[0],
                     "dlls": ", ".join(f["dlls"]),
                     "source": f["source"],
-                    "build_scripts": f["build-scripts"],
-                    "archive": f["archive"],
                     "sha256": f["sha256"],
-                    "licence_file": f["licence-file"],
-                    "gpl_file": f["gpl-file"],
+                    "build_script": f["build-script"].format(version=version),
+                    "configuration": ffmpeg["configuration"],
+                    "build_info": f["build-info"],
+                    "nvcodec": ffmpeg["nv-codec-headers"].split()[0],
+                    "vulkan": ffmpeg["vulkan-headers"].split()[0],
+                    "mingw": ffmpeg["mingw-w64"],
+                    "lgpl_file": lic["lgpl"],
+                    "gpl_file": lic["gpl"],
+                    "nvcodec_file": lic["nv-codec-headers"],
+                    "vulkan_file": lic["vulkan-headers"],
+                    "mingw_file": lic["mingw-w64"],
                 },
             )
         )
@@ -251,16 +302,18 @@ def bundled_notices(runtime: dict, ffmpeg: bool, cef: bool) -> str:
     return "\n".join(parts)
 
 
-def write_notices(src: Path, dest: Path, runtime: dict | None, ffmpeg: bool, cef: bool) -> None:
+def write_notices(
+    src: Path, dest: Path, runtime: dict | None, ffmpeg: dict | None, cef: bool, version: str
+) -> None:
     if not src.is_file():
         die(f"{src} is missing: run cargo about first")
-    if runtime is None or not (ffmpeg or cef):
+    if runtime is None or not (ffmpeg is not None or cef):
         shutil.copy2(src, dest)
         return
     text = src.read_text(encoding="utf-8")
     if len(BUNDLED_MARKER.findall(text)) != 1:
         die(f"{src} has no '<!-- lumenwall:bundled-libraries -->' marker: generate it with packaging/about/about.hbs")
-    section = bundled_notices(runtime, ffmpeg, cef)
+    section = bundled_notices(runtime, ffmpeg, cef, version)
     dest.write_text(BUNDLED_MARKER.sub(lambda _: section, text), encoding="utf-8", newline="")
 
 
@@ -304,13 +357,12 @@ def stage(args: argparse.Namespace) -> tuple[Path, bool, bool]:
                     shutil.copytree(item, dest)
                 else:
                     shutil.copy2(item, dest)
-    ffmpeg = bool(args.ffmpeg_dir)
-    if ffmpeg:
-        add_ffmpeg(top, Path(args.ffmpeg_dir), runtime["ffmpeg"])
+    ffmpeg_info = add_ffmpeg(top, Path(args.ffmpeg_dir), runtime["ffmpeg"]) if args.ffmpeg_dir else None
+    ffmpeg = ffmpeg_info is not None
 
     for lic in ["LICENSE-MIT", "LICENSE-APACHE"]:
         shutil.copy2(ROOT / lic, top / lic)
-    write_notices(Path(args.notices), top / "THIRD-PARTY-NOTICES.html", runtime, ffmpeg, web)
+    write_notices(Path(args.notices), top / "THIRD-PARTY-NOTICES.html", runtime, ffmpeg_info, web, args.version)
 
     platform = (WINDOWS if windows else LINUX).format(version=args.version, target=args.target)
     readme = README.format(version=args.version, target=args.target, platform=platform)
@@ -353,7 +405,7 @@ def check_windows_zip(archive: Path, ffmpeg: bool = True, web: bool = True) -> N
         files = {n.removeprefix(f"{top}/") for n in names}
         want = {f"{p}.exe" for p in PROGRAMS} | set(TOP_FILES)
         if ffmpeg:
-            want |= set(f["dlls"]) | {f["licence-file"], f["gpl-file"]}
+            want |= set(f["dlls"]) | set(f["licences"].values()) | {f["build-info"]}
         if web:
             want |= {"lumenwall-web-host.exe", c["licence-file"], c["credits-file"]}
             want |= set(c["required"]) | set(c["recommended"])
@@ -371,7 +423,17 @@ def check_windows_zip(archive: Path, ffmpeg: bool = True, web: bool = True) -> N
         if not problems:
             notices = z.read(f"{top}/THIRD-PARTY-NOTICES.html").decode("utf-8", errors="replace")
             for shipped, anchor, needles in [
-                (ffmpeg, 'id="ffmpeg"', [f["source"], f["build-scripts"], "LGPL-3.0-or-later"]),
+                (
+                    ffmpeg,
+                    'id="ffmpeg"',
+                    [
+                        f["source"],
+                        f["sha256"],
+                        f["build-script"].format(version=version),
+                        "LGPL-3.0-or-later",
+                        *f["licences"].values(),
+                    ],
+                ),
                 (web, 'id="cef"', [c["source"], c["credits-file"]]),
             ]:
                 if shipped and (anchor not in notices or not all(html.escape(s) in notices for s in needles)):
@@ -472,7 +534,11 @@ def main() -> None:
         "extracted distribution, CEF_PATH/<version>/cef_windows_x86_64, files picked from "
         "windows-runtime.toml; Linux: every file of the folder)",
     )
-    ap.add_argument("--ffmpeg-dir", help="Windows: the extracted FFmpeg build (FFMPEG_DIR), DLLs from its bin/")
+    ap.add_argument(
+        "--ffmpeg-dir",
+        help="Windows: the FFmpeg build of packaging/ffmpeg/build.sh (FFMPEG_DIR): DLLs from its bin/, "
+        "licences from its licenses/, checked against its BUILD-INFO.txt",
+    )
     ap.add_argument("--check", metavar="ZIP", help="only check a Windows release zip (FFmpeg and CEF required)")
     args = ap.parse_args()
     if args.check:

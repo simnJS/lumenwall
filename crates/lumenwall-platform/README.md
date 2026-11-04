@@ -242,6 +242,14 @@ Lumenwall needs no restart: it subscribes again when the extension reappears.
   `Event::Frame` in the same `wait`. A renderer shared by several outputs must remember, per output, which
   of its frames that output has presented; "the scene changed since the last encode" is already false for
   the second output (lumenwall-engine `scene_present_due`; it left the second monitor on its first frame).
+- Window mode: winit allows one event loop per process. A closed windowed backend leaves its loop to the next
+  one of the thread (the engine closes its surfaces on `clear` and opens new ones for the next wallpaper;
+  every switch after a `clear` used to fail with "EventLoop can't be recreated").
+- `vulkan_registry` (Windows): each display adapter's PCI ids, Vulkan driver manifest and implicit layer
+  manifests, read from its driver's registry key (read only), for lumenwall-engine's loader restriction.
+- `process`: `Tie` (Windows job object with `KILL_ON_JOB_CLOSE`: lumenwall-engine's engine process dies with
+  the daemon), `trim_heaps` (`HeapOptimizeResources` + `HeapCompact`, the Windows side of `malloc_trim`) and
+  `trim_working_set` (`K32EmptyWorkingSet`). No effect elsewhere.
 
 ## NVIDIA overlay ("Alt+Z" prompt) on Windows
 
