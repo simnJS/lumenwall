@@ -62,7 +62,8 @@ pub const RETRY_INTERVAL: Duration = Duration::from_secs(3600);
 /// `None` would disable the updater ([`Availability::NoKey`]): there would be nothing to verify
 /// against. `docs/RELEASING.md` explains how the key pair was created and where its secret half
 /// lives (repository secrets, never in git).
-pub const RELEASE_PUBLIC_KEY: Option<&str> = Some("RWQt/7tWeHNqM8Z/BqlP0VmbIHU4DhM9iWA8dzM7rfrHXK5ZxtoIHMbY");
+pub const RELEASE_PUBLIC_KEY: Option<&str> =
+    Some("RWQt/7tWeHNqM8Z/BqlP0VmbIHU4DhM9iWA8dzM7rfrHXK5ZxtoIHMbY");
 
 /// Rust target triple whose release archive this build installs, if releases exist
 /// for this platform.
