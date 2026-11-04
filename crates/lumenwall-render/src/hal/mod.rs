@@ -31,8 +31,37 @@
 //! records through wgpu.
 
 mod plan;
+#[cfg(test)]
+mod tests;
 
 pub use plan::{Recording, WgpuReason, choose};
+
+/// Injected failures (tests of the fallback to wgpu).
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static PIPELINES: AtomicBool = AtomicBool::new(false);
+    static PROGRAMS: AtomicBool = AtomicBool::new(false);
+
+    /// wgpu-hal pipeline creation fails while set.
+    pub(crate) fn fail_pipelines(on: bool) {
+        PIPELINES.store(on, Ordering::SeqCst);
+    }
+
+    /// Frame planning fails while set.
+    pub(crate) fn fail_programs(on: bool) {
+        PROGRAMS.store(on, Ordering::SeqCst);
+    }
+
+    pub(super) fn pipelines() -> bool {
+        PIPELINES.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn programs() -> bool {
+        PROGRAMS.load(Ordering::SeqCst)
+    }
+}
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -520,6 +549,10 @@ impl DirectGraph {
 
     /// Creates a render pipeline; returns its index.
     pub(crate) fn add_pipeline(&mut self, spec: &PipelineSpec<'_>) -> Res<usize> {
+        #[cfg(test)]
+        if faults::pipelines() {
+            return Err(Unsupported("injected pipeline failure".into()));
+        }
         let layout = self.layout(spec.layout)?;
         let module = self
             .modules
@@ -979,6 +1012,10 @@ impl DirectGraph {
     /// Replaces the recorded frame with `steps` (the scene's segments, in order), and adopts
     /// the textures it uses for the first time.
     pub(crate) fn build_program(&mut self, ctx: &GpuContext, steps: &[Step<'_>]) -> Res<()> {
+        #[cfg(test)]
+        if faults::programs() {
+            return Err(Unsupported("injected planning failure".into()));
+        }
         // Image table: every render target and depth buffer a step touches.
         let mut images: Vec<(wgpu::Texture, vk::Image, Use)> = Vec::new();
         let mut index: HashMap<wgpu::Texture, u32> = HashMap::new();
