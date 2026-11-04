@@ -60,23 +60,25 @@ pub(crate) fn open_device(
     adapter: &AdapterHint,
     pix_fmt: ff::AVPixelFormat,
 ) -> Result<HwDevice, String> {
-    let device: Option<String> = match kind {
+    // Device string for FFmpeg, and how it is logged.
+    let (device, label): (Option<String>, Option<String>) = match kind {
         HwKind::Vaapi => {
             let nodes = render_nodes();
             match pick_render_node(&nodes, adapter) {
-                Some(n) => Some(n.path.clone()),
+                Some(n) => (Some(n.path.clone()), None),
                 // Unknown adapter (software renderer): FFmpeg's default node.
-                None if adapter.vendor == 0 => None,
+                None if adapter.vendor == 0 => (None, None),
                 None if matches!(adapter.vendor, VENDOR_AMD | VENDOR_INTEL) => {
                     return Err("no DRM render node for the rendering GPU".into());
                 }
-                None => None,
+                None => (None, None),
             }
         }
         // FFmpeg selects a Vulkan device by a substring of its name: wgpu reports the same
         // `deviceName`.
-        HwKind::Vulkan if !adapter.name.is_empty() => Some(adapter.name.clone()),
-        HwKind::Vulkan | HwKind::Cuda | HwKind::D3d11va => None,
+        HwKind::Vulkan if !adapter.name.is_empty() => (Some(adapter.name.clone()), None),
+        HwKind::D3d11va => d3d11_adapter(adapter),
+        HwKind::Vulkan | HwKind::Cuda => (None, None),
     };
     let c_device = device
         .as_deref()
@@ -109,9 +111,28 @@ pub(crate) fn open_device(
         kind,
         buf,
         pix_fmt,
-        device: device.unwrap_or_else(|| "default".into()),
+        device: label.or(device).unwrap_or_else(|| "default".into()),
         _keep: None,
     })
+}
+
+/// D3D11VA: index of the DXGI adapter wgpu renders on (FFmpeg's device string), and its
+/// name for the log; FFmpeg's default adapter when there is no match (software renderer).
+#[cfg(windows)]
+fn d3d11_adapter(adapter: &AdapterHint) -> (Option<String>, Option<String>) {
+    let adapters = super::dxgi::adapters();
+    match crate::select::pick_dxgi_adapter(&adapters, adapter) {
+        Some(i) => (
+            Some(i.to_string()),
+            Some(format!("{i} ({})", adapters[i].name)),
+        ),
+        None => (None, None),
+    }
+}
+
+#[cfg(not(windows))]
+fn d3d11_adapter(_adapter: &AdapterHint) -> (Option<String>, Option<String>) {
+    (None, None)
 }
 
 /// State read by [`get_format`] through `AVCodecContext::opaque`.

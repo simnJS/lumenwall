@@ -11,9 +11,11 @@ Runs on every push to `main`, every pull request, on demand, and every Monday (n
 | cargo-deny | Linux | `cargo deny --locked check advisories`, then `bans licenses sources` (policy in `deny.toml`) |
 | clippy | Linux, Windows | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | test | Linux, Windows | `cargo test --workspace --locked`, then GPU tests on a software adapter |
+| video (Windows, FFmpeg) | Windows | With `--features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg`: workspace clippy, `cargo test -p lumenwall-video -p lumenwall-engine`, `lumenwall.exe --version` with only the Windows folders on `PATH` (no import of the FFmpeg DLLs), and an H.264 clip made by `ffmpeg.exe` decoded by the `video_png` example on WARP |
 | release build | Linux, Windows | `cargo build --workspace --release --locked`; the binary is kept 7 days as a private artifact |
 
 Toolchain: `rust-toolchain.toml` (stable, rustfmt, clippy, Linux and MSVC targets). Builds use `--locked`: commit `Cargo.lock` with every dependency change.
+FFmpeg on Windows: the setup action's `ffmpeg: "true"` input downloads BtbN's FFmpeg 8.1 `lgpl-shared` build (URL and SHA-256 pinned in `.github/actions/setup-rust/action.yml`, same build as `crates/lumenwall-video/README.md`), sets `FFMPEG_DIR` and `LIBCLANG_PATH`, and puts the DLLs on `PATH`. The default jobs build without it, like a Windows machine without the FFmpeg SDK.
 The cache is written only from `main`; pull requests restore it.
 
 ## Same checks locally
@@ -25,6 +27,9 @@ cargo test --workspace --locked
 LUMENWALL_GPU_TESTS=1 cargo test --workspace --locked -- --ignored gpu
 cargo deny --locked check            # cargo install cargo-deny --locked
 cargo build --workspace --release --locked
+# Windows video feature: FFMPEG_DIR set, its bin\ on PATH (crates/lumenwall-video/README.md)
+cargo clippy --workspace --all-targets --locked --features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg -- -D warnings
+cargo test -p lumenwall-video -p lumenwall-engine --locked --features lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg
 ```
 
 Linux packages: the list in `.github/actions/setup-rust/action.yml` (Ubuntu names), plus `mesa-vulkan-drivers vulkan-tools` to run GPU tests on lavapipe without a GPU:
@@ -73,7 +78,7 @@ Development happens on Linux; the Windows jobs are the only Windows build. On ev
 
 From Linux, `cargo clippy -p <crate> --target x86_64-pc-windows-msvc` type-checks the Windows code of pure-Rust crates before pushing. Crates whose dependencies compile C or assembly need an MSVC compiler and fail this way (today `lumenwall-script` through rquickjs-sys, `lumenwall-assets` through stacker); for those, rely on CI or an MSVC sysroot such as `cargo xwin`.
 
-Not covered by CI (runner = Windows Server with no GPU, no audio device, one virtual screen): the Windows 11 24H2/25H2 desktop layering (Progman/WorkerW), real GPU drivers and D3D11VA decoding, WASAPI loopback on a real device, multi-monitor and DPI scaling. Before each release, run the release artifact on a Windows 11 machine or VM through that list; a self-hosted Windows 11 runner with a GPU can automate it later. Tests that need an audio device must treat "no device" as a normal outcome (`docs/PARITY-POLICY.md`, rule 2).
+Not covered by CI (runner = Windows Server with no GPU, no audio device, one virtual screen): the Windows 11 24H2/25H2 desktop layering (Progman/WorkerW), real GPU drivers and hardware video decoding (D3D11VA, Vulkan Video zero copy: WARP decodes in software), WASAPI loopback on a real device, multi-monitor and DPI scaling. Before each release, run the release artifact on a Windows 11 machine or VM through that list; a self-hosted Windows 11 runner with a GPU can automate it later. Tests that need an audio device must treat "no device" as a normal outcome (`docs/PARITY-POLICY.md`, rule 2).
 
 ## Releases
 

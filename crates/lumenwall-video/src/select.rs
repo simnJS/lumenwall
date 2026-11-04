@@ -10,6 +10,8 @@ use crate::{HwDecode, HwKind};
 pub const VENDOR_NVIDIA: u32 = 0x10de;
 pub const VENDOR_AMD: u32 = 0x1002;
 pub const VENDOR_INTEL: u32 = 0x8086;
+/// Microsoft: WARP / "Microsoft Basic Render Driver" (software rasteriser, no video decoder).
+pub const VENDOR_MICROSOFT: u32 = 0x1414;
 
 /// The rendering adapter, as far as decoder selection is concerned.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -74,6 +76,11 @@ pub fn candidates(policy: HwDecode, adapter: &AdapterHint, windows: bool) -> Vec
     match policy {
         HwDecode::No => Vec::new(),
         HwDecode::NvdecCopy => vec![HwKind::Cuda],
+        // NVIDIA's D3D11 download costs ≈ 3× NVDEC's copy (README, measurements); D3D11VA
+        // stays its fallback and is the decoder of every other GPU.
+        HwDecode::Auto if windows && adapter.vendor == VENDOR_NVIDIA => {
+            vec![HwKind::Cuda, HwKind::D3d11va]
+        }
         HwDecode::Auto if windows => vec![HwKind::D3d11va],
         HwDecode::Auto => match adapter.vendor {
             VENDOR_NVIDIA => vec![HwKind::Cuda, HwKind::Vulkan],
@@ -111,6 +118,32 @@ pub fn pick_render_node<'a>(
     nodes
         .iter()
         .find(|n| adapter.vendor != 0 && n.vendor == adapter.vendor)
+}
+
+/// A DXGI adapter (Windows), as enumerated by DXGI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DxgiAdapter {
+    /// PCI vendor id.
+    pub vendor: u32,
+    /// PCI device id.
+    pub device: u32,
+    /// Adapter description.
+    pub name: String,
+}
+
+/// Index (in DXGI's enumeration order, FFmpeg's D3D11VA device string) of the adapter wgpu
+/// renders on: same PCI vendor and device ids, else the first one of the same vendor.
+/// `None` (FFmpeg's default adapter) for software and unknown renderers: decoding on any
+/// hardware GPU still beats software decoding there.
+#[must_use]
+pub fn pick_dxgi_adapter(adapters: &[DxgiAdapter], adapter: &AdapterHint) -> Option<usize> {
+    if adapter.vendor == 0 || adapter.vendor == VENDOR_MICROSOFT {
+        return None;
+    }
+    adapters
+        .iter()
+        .position(|a| a.vendor == adapter.vendor && a.device == adapter.device)
+        .or_else(|| adapters.iter().position(|a| a.vendor == adapter.vendor))
 }
 
 /// Render nodes of this machine (Linux sysfs; empty elsewhere).
@@ -179,6 +212,14 @@ mod tests {
             vec![HwKind::D3d11va]
         );
         assert_eq!(
+            candidates(HwDecode::Auto, &nv, true),
+            vec![HwKind::Cuda, HwKind::D3d11va]
+        );
+        assert_eq!(
+            candidates(HwDecode::Auto, &hint(0, ""), true),
+            vec![HwKind::D3d11va]
+        );
+        assert_eq!(
             candidates(HwDecode::NvdecCopy, &amd, false),
             vec![HwKind::Cuda]
         );
@@ -190,6 +231,50 @@ mod tests {
         assert_eq!(
             parse_decoder_list("zerocopy, Vulkan,nvdec,bogus"),
             vec![HwKind::Vulkan, HwKind::Cuda]
+        );
+    }
+
+    #[test]
+    fn dxgi_adapter_of_the_rendering_gpu() {
+        let dxgi = |vendor, device| DxgiAdapter {
+            vendor,
+            device,
+            name: String::new(),
+        };
+        // AMD iGPU first (primary display), two NVIDIA GPUs, then WARP.
+        let adapters = vec![
+            dxgi(VENDOR_AMD, 0x13c0),
+            dxgi(VENDOR_NVIDIA, 0x2684),
+            dxgi(VENDOR_NVIDIA, 0x2702),
+            dxgi(VENDOR_MICROSOFT, 0x8c),
+        ];
+        let gpu = |vendor, device| AdapterHint {
+            vendor,
+            device,
+            ..AdapterHint::default()
+        };
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &gpu(VENDOR_NVIDIA, 0x2702)),
+            Some(2)
+        );
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &gpu(VENDOR_AMD, 0x13c0)),
+            Some(0)
+        );
+        // Same vendor, other device id: the first of the vendor.
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &gpu(VENDOR_NVIDIA, 0x1)),
+            Some(1)
+        );
+        // Software renderer, unknown or absent vendor: FFmpeg's default adapter.
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &gpu(VENDOR_MICROSOFT, 0x8c)),
+            None
+        );
+        assert_eq!(pick_dxgi_adapter(&adapters, &gpu(0, 0)), None);
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &gpu(VENDOR_INTEL, 0x56a0)),
+            None
         );
     }
 

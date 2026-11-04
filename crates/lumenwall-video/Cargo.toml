@@ -9,10 +9,12 @@ publish.workspace = true
 build = "build.rs"
 
 [features]
-# FFmpeg decoding (libavformat + libavcodec + libavutil + libswscale, linked dynamically).
-# Off by default so that a workspace build on a machine without the FFmpeg development
-# files (Windows CI) still compiles; lumenwall-engine turns it on for Linux. Without it,
-# `VideoPlayer::open` returns `VideoError::Unsupported`.
+# FFmpeg decoding (libavformat + libavcodec + libavutil + libswscale, shared libraries opened
+# at the first video). Off by default so that a workspace build on a machine without the
+# FFmpeg development files (a Windows machine without FFMPEG_DIR) still compiles;
+# lumenwall-engine turns it on for Linux, Windows release builds with
+# `--features lumenwall-engine/video-ffmpeg` (README). Without it, `VideoPlayer::open`
+# returns `VideoError::Unsupported`.
 ffmpeg = ["dep:ffmpeg-sys-next", "dep:libc", "dep:ash"]
 
 [dependencies]

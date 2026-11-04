@@ -9,7 +9,8 @@
 //!   --fps N                      display cap for --bench (default 30)
 //!   --low-power                  render on the integrated GPU
 //! ```
-//! `LUMENWALL_VIDEO_DECODERS=zerocopy,cuda,vulkan,vaapi` overrides the decoder order of `auto`.
+//! `LUMENWALL_VIDEO_DECODERS=zerocopy,cuda,vulkan,vaapi,d3d11va` overrides the decoder order of
+//! `auto`; `WGPU_BACKEND=vulkan|dx12` restricts the render backend.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -70,6 +71,7 @@ fn main() {
         std::process::exit(2);
     };
     let ctx = GpuContext::new_headless(&ContextOptions {
+        backends: wgpu::Backends::from_env(),
         power_preference: if low_power {
             wgpu::PowerPreference::LowPower
         } else {
