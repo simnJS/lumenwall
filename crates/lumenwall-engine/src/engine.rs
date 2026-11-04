@@ -535,6 +535,8 @@ impl Local {
     fn open_running(&mut self) -> Result<Running, String> {
         let t0 = Instant::now();
         let config = Self::platform_config(&self.plan);
+        // Dropped unjoined on an error below: the thread then closes what it opened by itself.
+        let gpu_early = self.open_gpu_early();
         let mut surfaces = self.open_platform(&config)?;
         tracing::info!(
             "platform backend: {:?} ({:.1} ms)",
@@ -574,7 +576,25 @@ impl Local {
                 _ => None,
             })
             .ok_or("no output")?;
-        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first, None) {
+        let adopted = match gpu_early.map(std::thread::JoinHandle::join) {
+            Some(Ok(Ok(ctx))) => Self::adopt_gpu(ctx, surfaces.as_ref(), first)
+                .inspect_err(|e| tracing::debug!("GPU opened ahead not used: {e}"))
+                .ok(),
+            Some(Ok(Err(e))) => {
+                tracing::debug!("GPU not opened ahead: {e}");
+                None
+            }
+            Some(Err(_)) => {
+                tracing::warn!("the thread opening the GPU ahead panicked");
+                None
+            }
+            None => None,
+        };
+        let opened = match adopted {
+            Some(b) => Ok(b),
+            None => self.open_gpu(surfaces.as_ref(), first, None),
+        };
+        let (first_surface, ctx) = match opened {
             Ok(b) => b,
             Err(e) => {
                 self.waker.detach();
@@ -650,13 +670,8 @@ impl Local {
     /// adapter must present it. When the Vulkan loader is restricted to the remembered driver
     /// and that finds no adapter or another one, the instance is created again with every
     /// driver (`vulkan_driver`).
-    fn open_gpu(
-        &self,
-        surfaces: &dyn WallpaperSurface,
-        first: OutputId,
-        instance: Option<GpuInstance>,
-    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
-        let options = ContextOptions {
+    fn context_options(&self) -> ContextOptions {
+        ContextOptions {
             pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
             // Timestamp queries are allowed so that statistics can time the GPU on demand;
             // nothing is measured until someone asks.
@@ -668,7 +683,64 @@ impl Local {
                     .iter()
                     .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
             ..ContextOptions::default()
-        };
+        }
+    }
+
+    /// Windows: starts creating the instance and the device (first backend of
+    /// [`gpu_backends`]) on a thread while the platform opens; the adapter is checked against
+    /// the first output's surface once it exists ([`Local::adopt_gpu`]). Measured in the engine
+    /// process: instance 87–101 ms with a cold driver, device 66–73 ms, platform 40–55 ms
+    /// (window) and wallpaper load 2–15 ms, which used to run one after the other.
+    fn open_gpu_early(&self) -> Option<std::thread::JoinHandle<Result<GpuContext, String>>> {
+        if !cfg!(windows) {
+            return None;
+        }
+        let options = self.context_options();
+        let backends = *gpu_backends().first()?;
+        std::thread::Builder::new()
+            .name("lumenwall-gpu-open".into())
+            .spawn(move || {
+                let t0 = Instant::now();
+                let ctx = GpuInstance::new(Some(backends))
+                    .into_context(&options, &[])
+                    .map_err(|e| e.to_string());
+                tracing::debug!(
+                    "GPU opened ahead of the surfaces ({backends:?}, Vulkan drivers: {}): {:.1} ms",
+                    vulkan_driver::describe(),
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+                ctx
+            })
+            .ok()
+    }
+
+    /// The context opened by [`Local::open_gpu_early`], when its adapter is the remembered one
+    /// and presents to `first`.
+    fn adopt_gpu(
+        ctx: GpuContext,
+        surfaces: &dyn WallpaperSurface,
+        first: OutputId,
+    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
+        if vulkan_driver::wrong_adapter(&ctx) {
+            // The remembered GPU is gone: the normal opening tries every driver.
+            vulkan_driver::lift();
+            return Err("the remembered GPU is not there".into());
+        }
+        let surface = create_surface_for(&ctx, surfaces, first)?;
+        if !ctx.adapter().is_surface_supported(&surface) {
+            return Err("its adapter cannot present to the first output".into());
+        }
+        vulkan_driver::remember(&ctx);
+        Ok((surface, ctx))
+    }
+
+    fn open_gpu(
+        &self,
+        surfaces: &dyn WallpaperSurface,
+        first: OutputId,
+        instance: Option<GpuInstance>,
+    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
+        let options = self.context_options();
         let open = |instance: Option<GpuInstance>, backends: wgpu::Backends| {
             let t0 = Instant::now();
             let instance = instance.unwrap_or_else(|| GpuInstance::new(Some(backends)));
@@ -1570,17 +1642,42 @@ impl Local {
         };
         let size = info.physical_size;
         let t0 = Instant::now();
-        let surface = OutputSurface::new(&r.ctx, surface, size).map_err(|e| e.to_string())?;
-        let swap_chain = t0.elapsed();
-        if r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none() {
-            match build_renderer(
-                r,
-                &mut self.wallpapers[target],
-                &self.plan.targets[target],
-                &self.plan,
-                &self.waker,
-                size,
-            ) {
+        let needs_renderer =
+            r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none();
+        // The swap chain is created while the renderer is built: on NVIDIA/Vulkan/Windows the
+        // first one of a process takes 189–197 ms (measured in the engine process), as long as a
+        // light scene's build. wgpu devices are thread-safe; nothing else touches the surface.
+        let (chain, swap_chain, built) = std::thread::scope(|scope| {
+            let ctx = &r.ctx;
+            let chain = scope.spawn(move || {
+                let t = Instant::now();
+                (
+                    OutputSurface::new(ctx, surface, size).map_err(|e| e.to_string()),
+                    t.elapsed(),
+                )
+            });
+            let built = needs_renderer.then(|| {
+                build_renderer(
+                    r,
+                    &mut self.wallpapers[target],
+                    &self.plan.targets[target],
+                    &self.plan,
+                    &self.waker,
+                    size,
+                )
+            });
+            let (chain, swap_chain) = chain.join().unwrap_or_else(|_| {
+                (
+                    Err("the thread creating the swap chain panicked".into()),
+                    Duration::ZERO,
+                )
+            });
+            (chain, swap_chain, built)
+        });
+        // A renderer built for an output that cannot present is dropped: it shows nothing.
+        let surface = chain?;
+        if let Some(built) = built {
+            match built {
                 Ok(Renderer::Video(mut v)) => {
                     v.attach_sound(&mut r.audio, &self.plan);
                     r.videos[target] = Some(*v);
@@ -1618,10 +1715,10 @@ impl Local {
             self.wallpapers[target].project.title
         );
         tracing::debug!(
-            "output {}: swap chain {:.1} ms, renderer and composer {:.1} ms",
+            "output {}: ready in {:.1} ms (swap chain {:.1} ms, alongside the renderer)",
             info.name,
+            t0.elapsed().as_secs_f64() * 1000.0,
             swap_chain.as_secs_f64() * 1000.0,
-            (t0.elapsed() - swap_chain).as_secs_f64() * 1000.0
         );
         let reasons = r.surfaces.pause_reasons(id);
         if !reasons.is_empty() {
@@ -1919,7 +2016,7 @@ fn needs_reopen(r: &Running, want: &Config, plan: &EnginePlan, known: &[Known]) 
 
 /// Builds the scene or opens the video of a target (no sound: the caller attaches it).
 fn build_renderer(
-    r: &mut Running,
+    r: &Running,
     wp: &mut Wallpaper,
     tplan: &TargetPlan,
     plan: &EnginePlan,
