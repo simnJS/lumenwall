@@ -26,9 +26,9 @@ use lumenwall_render::math::{
 use lumenwall_render::targets::{ScopeId, composite_names, scaled_actual, scaled_size};
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
-    BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
-    ImageSpec, Op, PassId, PuppetGeometry, QualitySettings, RenderScene, RtId, ScalingMode, SceneBuilder,
-    SkinVertex, SlotSource, TextureRef, Vertex, add_image_with_options,
+    BlendMode, ClampMode, CullMode, GpuContext, HdrMode, ImageFrame, ImageHandle, ImageOptions,
+    ImagePass, ImageSpec, Msaa, Op, PassId, PuppetGeometry, QualitySettings, RenderScene, RtId,
+    ScalingMode, SceneBuilder, SkinVertex, SlotSource, TextureRef, Vertex, add_image_with_options,
 };
 use lumenwall_scene::{
     BuildOptions, ConstantSource, ImagePasses, MAX_PARENT_DEPTH, MainTextureFormat, ObjectIndex,
@@ -132,7 +132,11 @@ impl EngineSettings {
 /// Render scale of image composites and effect targets: the scene's displayed-size scale,
 /// or 1 when the native resolution is asked for.
 fn chain_scale_for(quality: &QualitySettings, scale: f32) -> f32 {
-    if quality.native_resolution { 1.0 } else { scale }
+    if quality.native_resolution {
+        1.0
+    } else {
+        scale
+    }
 }
 
 /// Displayed pixels per scene pixel of a scene of logical size `logical` shown on `display`
@@ -547,7 +551,14 @@ pub fn build_scene(
     shaders: &mut dyn ShaderProvider,
     opts: &SceneOptions,
 ) -> Result<SceneRuntime, String> {
-    build_scene_with(ctx, project, vfs, shaders, opts, &EngineSettings::from_env())
+    build_scene_with(
+        ctx,
+        project,
+        vfs,
+        shaders,
+        opts,
+        &EngineSettings::from_env(),
+    )
 }
 
 /// Builds the render graph of a scene project with explicit engine settings.
@@ -601,6 +612,10 @@ pub fn build_scene_with(
 
     let mut b = SceneBuilder::new(ctx, (size.x, size.y));
     b.set_quality(quality);
+    // HDR: 16-bit float targets for the scenes that ask for `hdr` (bloom keeps values above 1).
+    if quality.hdr == HdrMode::Scene && general.hdr {
+        b.use_hdr_targets();
+    }
     let full_sampler = SamplerKey {
         address: opts.clamp.address(),
         nearest: false,
@@ -624,6 +639,15 @@ pub fn build_scene_with(
     let st = b
         .targets
         .create_scene_targets_at(ctx, logical, rendered, full_sampler);
+    if quality.msaa != Msaa::Off {
+        let level = b.enable_msaa(st.full, quality.msaa);
+        if level != quality.msaa {
+            tracing::info!(
+                "anti-aliasing {} unsupported here: using {level}",
+                quality.msaa
+            );
+        }
+    }
     let root = b.targets.scene_scope();
     let mut textures = TextureCache::default();
     let mut stats = SceneStats::default();
