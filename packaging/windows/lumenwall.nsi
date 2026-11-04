@@ -10,10 +10,12 @@
 ; updater keeps working: lumenwall.bundle marks it), a Start menu shortcut, optionally
 ; the start with Windows (HKCU Run value "Lumenwall", as the app's Settings toggle) and
 ; a desktop shortcut, and an entry in Settings > Apps. Installing over an earlier
-; version stops its engine, moves programs still running aside (<name>.lumenwall-old,
-; removed by the app at its next start, as after an in-app update) and starts the
-; engine again. The uninstaller removes the folder, both shortcuts, the Run value and
-; the Apps entry; settings (%APPDATA%\Lumenwall) are kept.
+; version stops its engine and its web host (lumenwall-web-host.exe, which holds
+; libcef.dll and the CEF data files), moves programs and libraries still in use aside
+; (<name>.lumenwall-old, removed by the app at its next start, as after an in-app
+; update) and starts the engine again. The uninstaller ends what still runs from the
+; folder, then removes it, both shortcuts, the Run value and the Apps entry; settings
+; (%APPDATA%\Lumenwall) are kept.
 ;
 ; One window: the app icon, the version, "Start with Windows" (ticked) and "Desktop
 ; shortcut" (unticked), and an Install button. Over an installation the boxes show
@@ -25,6 +27,9 @@
 Unicode true
 ManifestDPIAware true
 SetCompressor /SOLID lzma
+; 64 MiB instead of 8: libcef.dll and the FFmpeg DLLs compress better (-8 MB on a
+; 182 MB installer). Decompression needs as much memory, once.
+SetCompressorDictSize 64
 
 !ifndef VERSION
   !error "-DVERSION=<x.y.z> is required"
@@ -75,6 +80,9 @@ Var InstalledVersion ; its version in Settings > Apps, when known
 Var Autostart ; 1: the Run value
 Var DesktopLink ; 1: the desktop shortcut
 Var EngineWasRunning
+Var EndProgram.Name ; EndProgram: program file in $INSTDIR
+Var EndProgram.Grace ; how long it may take to quit by itself, in 250 ms steps
+Var EndProgram.Found ; 1: it was running
 Var Options.Icon
 Var Options.Autostart
 Var Options.Desktop
@@ -262,6 +270,82 @@ Function InstFilesShow
   ${EndIf}
 FunctionEnd
 
+; ------------------------------------------------------------------ running programs
+
+; While a program runs, its files cannot be replaced (File fails) nor removed (RMDir /r
+; skips them without a word): the web host keeps libcef.dll and the CEF data files, the
+; engine the FFmpeg DLLs. EndProgram waits $EndProgram.Grace x 250 ms for
+; $INSTDIR\$EndProgram.Name to quit by itself, then ends every process of that name
+; and gives the files 3 s more. A copy running from its .lumenwall-old file (an earlier
+; update moved it aside) counts. Sets $EndProgram.Found to 1 if one was running.
+!macro DefineEndProgram UN
+; 1 on the stack if $INSTDIR\<file> (on the stack) is a running program: a running
+; program cannot be opened for writing, whatever the language of Windows.
+Function ${UN}InUse
+  Exch $0
+  Push $1
+  ${If} ${FileExists} "$INSTDIR\$0"
+    ClearErrors
+    FileOpen $1 "$INSTDIR\$0" a
+    ${If} ${Errors}
+      StrCpy $0 1
+    ${Else}
+      FileClose $1
+      StrCpy $0 0
+    ${EndIf}
+  ${Else}
+    StrCpy $0 0
+  ${EndIf}
+  Pop $1
+  Exch $0
+FunctionEnd
+
+Function ${UN}EndProgram
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  StrCpy $EndProgram.Found 0
+  StrCpy $3 $EndProgram.Name
+  IntOp $2 $EndProgram.Grace + 12
+  StrCpy $1 0
+  ${Do}
+    Push "$3"
+    Call ${UN}InUse
+    Pop $0
+    ${If} $0 = 0
+      Push "$3.lumenwall-old"
+      Call ${UN}InUse
+      Pop $0
+    ${EndIf}
+    ${If} $0 = 0
+      ${Break}
+    ${EndIf}
+    StrCpy $EndProgram.Found 1
+    ${If} $1 = $EndProgram.Grace
+      nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM "$3"'
+      Pop $0
+    ${ElseIf} $1 >= $2
+      ${Break}
+    ${EndIf}
+    Sleep 250
+    IntOp $1 $1 + 1
+  ${Loop}
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+!macroend
+!insertmacro DefineEndProgram ""
+!insertmacro DefineEndProgram "un."
+
+!macro EndProgram UN NAME GRACE
+  StrCpy $EndProgram.Name "${NAME}"
+  StrCpy $EndProgram.Grace ${GRACE}
+  Call ${UN}EndProgram
+!macroend
+
 ; ------------------------------------------------------------------ install
 
 ; Starts a program (on the stack) with the user's normal rights. This installer asks
@@ -280,35 +364,80 @@ Function StartAsUser
   Pop $0
 FunctionEnd
 
-; A program still running (the tray, the window) cannot be overwritten but can be
-; renamed: moved aside, it is deleted by the app at its next start.
-!macro MoveAside NAME
-  Delete "$INSTDIR\${NAME}.lumenwall-old"
-  ${If} ${FileExists} "$INSTDIR\${NAME}"
+; A program or library still in use (the tray icon, the window) cannot be replaced
+; but can be renamed: moved aside, it is deleted by the app at its next start, as
+; after an in-app update. The others are deleted, so that none of an earlier version
+; stays behind (an FFmpeg DLL of another major version, say).
+!macro MoveAsideMatching PATTERN
+  FindFirst $0 $1 "$INSTDIR\${PATTERN}"
+  ${DoWhile} $1 != ""
     ClearErrors
-    Delete "$INSTDIR\${NAME}"
+    Delete "$INSTDIR\$1"
     ${If} ${Errors}
-      Rename "$INSTDIR\${NAME}" "$INSTDIR\${NAME}.lumenwall-old"
+      Push $1
+      Call MoveAside
     ${EndIf}
-  ${EndIf}
+    FindNext $0 $1
+  ${Loop}
+  FindClose $0
 !macroend
+
+Function MoveAsideInUse
+  Push $0
+  Push $1
+  !insertmacro MoveAsideMatching "*.exe"
+  !insertmacro MoveAsideMatching "*.dll"
+  Pop $1
+  Pop $0
+FunctionEnd
+
+; Renames $INSTDIR\<file> (on the stack) to <file>.lumenwall-old, or to
+; <file>.<n>.lumenwall-old while an older copy is still in use too (as the app does).
+Function MoveAside
+  Exch $0
+  Push $1
+  Push $2
+  StrCpy $1 "$INSTDIR\$0.lumenwall-old"
+  StrCpy $2 0
+  ${Do}
+    Delete "$1"
+    ${IfNot} ${FileExists} "$1"
+      Rename "$INSTDIR\$0" "$1"
+      ${Break}
+    ${EndIf}
+    IntOp $2 $2 + 1
+    ${If} $2 > 9
+      ${Break}
+    ${EndIf}
+    StrCpy $1 "$INSTDIR\$0.$2.lumenwall-old"
+  ${Loop}
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
 
 Section "-Lumenwall"
   SetShellVarContext current
   SetOutPath "$INSTDIR"
   StrCpy $EngineWasRunning 0
+  StrCpy $0 ""
   ${If} ${FileExists} "$INSTDIR\lumenwall-ui.exe"
     DetailPrint "$(StoppingEngine)"
     ; Exit 0: an engine was running and has stopped (3: none was running).
-    StrCpy $0 ""
     ExecWait '"$INSTDIR\lumenwall-ui.exe" --stop-engine' $0
     ${If} $0 == 0
       StrCpy $EngineWasRunning 1
     ${EndIf}
   ${EndIf}
-  !insertmacro MoveAside "lumenwall.exe"
-  !insertmacro MoveAside "lumenwall-ui.exe"
-  !insertmacro MoveAside "lumenwall-web-host.exe"
+  ; The engine has asked its web host to quit. Whatever of them still runs after 5 s
+  ; is ended: an engine that did not stop is started again below.
+  !insertmacro EndProgram "" "lumenwall-web-host.exe" 20
+  !insertmacro EndProgram "" "lumenwall.exe" 20
+  ${If} $EndProgram.Found == 1
+  ${AndIf} $0 != 3
+    StrCpy $EngineWasRunning 1
+  ${EndIf}
+  Call MoveAsideInUse
   File /r "${SRCDIR}\*"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   ; Back first, so that it answers by the time the window opens.
@@ -385,9 +514,11 @@ Section "Uninstall"
   ${If} ${FileExists} "$INSTDIR\lumenwall-ui.exe"
     ExecWait '"$INSTDIR\lumenwall-ui.exe" --stop-engine'
   ${EndIf}
-  ; The tray icon and the window use the files being removed.
-  nsExec::Exec 'taskkill /F /IM lumenwall-ui.exe'
-  Pop $0
+  ; What still runs from the folder: the tray icon and the window (ended at once), the
+  ; web host and the engine (after 5 s).
+  !insertmacro EndProgram "un." "lumenwall-ui.exe" 0
+  !insertmacro EndProgram "un." "lumenwall-web-host.exe" 20
+  !insertmacro EndProgram "un." "lumenwall.exe" 20
   Delete "$SMPROGRAMS\Lumenwall.lnk"
   Delete "$DESKTOP\Lumenwall.lnk"
   DeleteRegValue HKCU "${RUN_KEY}" "Lumenwall"

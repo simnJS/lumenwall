@@ -50,10 +50,19 @@ makensis -V2 -INPUTCHARSET UTF8 \
 
 if command -v 7z >/dev/null 2>&1; then
     listing=$(7z l "$setup")
+    in_setup() {
+        printf '%s\n' "$listing" | grep -qF "$1" || die "$1 is not in the installer"
+    }
     for f in lumenwall.exe lumenwall-ui.exe lumenwall.bundle LICENSE-MIT; do
-        printf '%s\n' "$listing" | grep -q "$f" || die "$f is not in the installer"
+        in_setup "$f"
     done
-    echo "checked: the installer holds the programs"
+    # And every program and library the zip has next to them: the web host and CEF
+    # (libcef.dll...), the FFmpeg DLLs (avcodec-62.dll...), when the release ships them.
+    for path in "$src"/*.exe "$src"/*.dll; do
+        [ -f "$path" ] || continue
+        in_setup "${path##*/}"
+    done
+    echo "checked: the installer holds the programs and libraries"
 else
     echo "7z is not installed: contents not checked"
 fi
