@@ -15,7 +15,7 @@
 //! beginning with their sound track, web pages reload.
 //!
 //! The same release and rebuild serve a video applied to a device created without Vulkan
-//! Video queues (hot switch from a scene, [`Engine::recreate_for_video`]): the device is
+//! Video queues (hot switch from a scene, [`Local::recreate_for_video`]): the device is
 //! recreated with them right away, the instance kept, so the video decodes with zero copy.
 
 use std::time::Instant;
@@ -25,7 +25,7 @@ use lumenwall_render::GpuInstance;
 use lumenwall_render::compose::Compositor;
 use lumenwall_render::stats::GpuTimer;
 
-use super::{Engine, Running, Stats, note_known, target_for};
+use super::{Local, Running, Stats, note_known, target_for};
 use crate::audio::Audio;
 use crate::monitor::Change;
 use crate::plan::Stopped;
@@ -37,7 +37,7 @@ use lumenwall_platform::mouse::PointerTracker;
 enum Restore {
     /// An output shows a wallpaper again (or a control message needs a frame).
     Resume,
-    /// A video was applied to a device without decode queues ([`Engine::recreate_for_video`]).
+    /// A video was applied to a device without decode queues ([`Local::recreate_for_video`]).
     VideoDevice,
 }
 
@@ -76,7 +76,7 @@ pub(super) fn gpu_unused(r: &Running) -> bool {
     r.outputs.iter().all(|o| o.paused || (o.held && !o.dirty))
 }
 
-impl Engine {
+impl Local {
     /// When the GPU of `r` is due for release, if it is unused and release is enabled.
     pub(super) fn release_deadline(&self, r: &Running) -> Option<Instant> {
         Some(r.idle_since? + self.plan.gpu_release?)
@@ -107,6 +107,7 @@ impl Engine {
         let t0 = Instant::now();
         let (vram, _) = self.release_running(r, false);
         super::trim_heap();
+        super::trim_resident();
         tracing::info!(
             "every output paused for {} s: GPU released ({:.1} MiB) in {:.0} ms",
             self.plan.gpu_release.map_or(0, |d| d.as_secs()),
@@ -336,6 +337,7 @@ impl Engine {
             rendered,
             idle_since: None,
             first_frame_due: Some((t0, "the GPU restore began")),
+            trim_due: None,
         };
         let mut first_surface = Some((first, first_surface));
         let ids: Vec<OutputId> = r.surfaces.outputs().iter().map(|o| o.id).collect();
@@ -386,7 +388,7 @@ impl Engine {
 }
 
 /// The output whose surface picks the adapter: one that shows a wallpaper, unpaused first.
-fn first_output(engine: &Engine, d: &Dormant) -> Option<OutputId> {
+fn first_output(engine: &Local, d: &Dormant) -> Option<OutputId> {
     let outputs = d.surfaces.outputs();
     let shown = |o: &&lumenwall_platform::OutputInfo| target_for(&engine.plan, &o.name).is_some();
     outputs

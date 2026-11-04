@@ -235,6 +235,16 @@ pub fn restrict_vulkan_loader() {
     };
 }
 
+/// The loader variables this process set itself: an engine process started by this one
+/// computes its own (and may lift them).
+pub(crate) fn own_variables() -> Vec<&'static str> {
+    match &*state() {
+        State::Restricted { layers: true, .. } => vec![SELECT, LAYERS_DISABLE],
+        State::Restricted { layers: false, .. } => vec![SELECT],
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `ctx` was opened under the restriction on another adapter than the remembered one
 /// (the remembered GPU is gone: [`lift`] and open again).
 pub(crate) fn wrong_adapter(ctx: &lumenwall_render::GpuContext) -> bool {

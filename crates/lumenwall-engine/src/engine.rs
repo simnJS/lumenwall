@@ -11,8 +11,20 @@
 //! layer or pause policy demands it. Without any wallpaper the engine closes its surfaces and
 //! GPU device and sleeps until a plan brings one back. After a long pause it releases the GPU
 //! and keeps only the surfaces (see [`release`]).
+//!
+//! On Windows the daemon runs this loop ([`Local`]) in an engine process of its own
+//! ([`remote`], [`host`]): a process that has opened a Vulkan device keeps the GPU driver
+//! loaded for good (measured with NVIDIA: `nvoglv64.dll` and 6 driver threads stay, ≥ 30 MiB
+//! private after the device and instance are destroyed), so the resident daemon never opens
+//! one, and the engine process ends when the last wallpaper goes. [`Engine`] picks the mode.
 
+mod host;
+mod logfwd;
 mod release;
+mod remote;
+mod wire;
+
+pub use host::run_engine_host;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -194,6 +206,8 @@ struct Running {
     /// Start of a GPU restore or of a plan that brought wallpapers, until the first frame is
     /// presented (logged: IPC apply → first present).
     first_frame_due: Option<(Instant, &'static str)>,
+    /// When to empty the working set, [`TRIM_DELAY`] after the first frame of a load.
+    trim_due: Option<Instant>,
 }
 
 /// An output the platform reported, kept across layout changes.
@@ -210,8 +224,134 @@ enum Staged {
     New(Box<Wallpaper>, Option<Renderer>),
 }
 
-/// The wallpaper engine: load, start, run.
+/// The wallpaper engine: load, start, run. In this process ([`Local`]), or on Windows in an
+/// engine process the daemon starts when a wallpaper appears and ends when the last one goes
+/// (see the module documentation).
 pub struct Engine {
+    waker: EngineWaker,
+    monitor: EngineMonitor,
+    /// Until [`Engine::load`] picks the mode.
+    resolver: Option<WallpaperResolver>,
+    inner: Option<Inner>,
+}
+
+enum Inner {
+    Local(Box<Local>),
+    Remote(Box<remote::Remote>),
+}
+
+impl Engine {
+    pub fn new(resolver: WallpaperResolver) -> Self {
+        Self {
+            waker: EngineWaker::default(),
+            monitor: EngineMonitor::default(),
+            resolver: Some(resolver),
+            inner: None,
+        }
+    }
+
+    pub fn waker(&self) -> EngineWaker {
+        self.waker.clone()
+    }
+
+    /// Status and counters for the application (IPC), readable from any thread.
+    pub fn monitor(&self) -> EngineMonitor {
+        self.monitor.clone()
+    }
+
+    fn inner(&mut self, plan: &EnginePlan) -> &mut Inner {
+        if self.inner.is_none() {
+            let process = use_engine_process(
+                host::available(),
+                cfg!(windows),
+                std::env::var("LUMENWALL_ENGINE_PROCESS").ok().as_deref(),
+                plan,
+            );
+            let inner = if process {
+                Inner::Remote(Box::new(remote::Remote::new(
+                    self.waker.clone(),
+                    self.monitor.clone(),
+                )))
+            } else {
+                let resolver = self.resolver.take().unwrap_or_default();
+                Inner::Local(Box::new(Local::new(
+                    resolver,
+                    self.waker.clone(),
+                    self.monitor.clone(),
+                )))
+            };
+            self.inner = Some(inner);
+        }
+        self.inner.as_mut().expect("set above")
+    }
+
+    /// Reads every wallpaper of the plan (no window, no GPU, no audio). With an engine process
+    /// the process reads them when it starts.
+    pub fn load(&mut self, plan: &EnginePlan) -> Result<(), String> {
+        match self.inner(plan) {
+            Inner::Local(l) => l.load(plan),
+            Inner::Remote(r) => r.load(plan),
+        }
+    }
+
+    /// `--list-properties` (always in this process).
+    pub fn write_properties(&self, out: &mut dyn std::io::Write) -> Result<(), String> {
+        match &self.inner {
+            Some(Inner::Local(l)) => l.write_properties(out),
+            _ => Err("no wallpaper loaded in this process".into()),
+        }
+    }
+
+    /// `--dump-structure` (always in this process).
+    pub fn write_structure(&self, out: &mut dyn std::io::Write) -> Result<(), String> {
+        match &self.inner {
+            Some(Inner::Local(l)) => l.write_structure(out),
+            _ => Err("no wallpaper loaded in this process".into()),
+        }
+    }
+
+    /// Opens the surfaces, the GPU device, the audio, and builds the scenes. Without any
+    /// wallpaper nothing is opened: the engine waits for a plan ([`EngineControl::Reload`]).
+    pub fn start(&mut self) -> Result<(), String> {
+        match &mut self.inner {
+            Some(Inner::Local(l)) => l.start(),
+            Some(Inner::Remote(r)) => r.start(),
+            None => Err("start before load".into()),
+        }
+    }
+
+    /// Main loop: blocks on OS events (or, without any wallpaper, on the waker); `control` is
+    /// polled when woken.
+    pub fn run(
+        &mut self,
+        control: &mut dyn FnMut() -> Option<EngineControl>,
+    ) -> Result<Stopped, String> {
+        match &mut self.inner {
+            Some(Inner::Local(l)) => l.run(control),
+            Some(Inner::Remote(r)) => r.run(control),
+            None => Err("run before load".into()),
+        }
+    }
+}
+
+/// Whether the engine runs in a process of its own: on Windows, when the executable can host it
+/// ([`run_engine_host`] is wired in its `main`), unless `LUMENWALL_ENGINE_PROCESS=0`, and never
+/// for the one-shot commands that print what this process loaded. Pure, for testing.
+fn use_engine_process(
+    available: bool,
+    windows: bool,
+    switch: Option<&str>,
+    plan: &EnginePlan,
+) -> bool {
+    available
+        && windows
+        && switch.map(str::trim) != Some("0")
+        && !plan.list_properties
+        && !plan.dump_structure
+}
+
+/// The engine loop in this process.
+pub(crate) struct Local {
     plan: EnginePlan,
     resolver: WallpaperResolver,
     assets: PathBuf,
@@ -229,31 +369,31 @@ pub struct Engine {
     backend: BackendChoice,
 }
 
-impl Engine {
-    pub fn new(resolver: WallpaperResolver) -> Self {
+impl Local {
+    pub(crate) fn new(
+        resolver: WallpaperResolver,
+        waker: EngineWaker,
+        monitor: EngineMonitor,
+    ) -> Self {
         Self {
             plan: EnginePlan::default(),
             resolver,
             assets: PathBuf::new(),
             wallpapers: Vec::new(),
             states: Vec::new(),
-            waker: EngineWaker::default(),
+            waker,
             running: None,
             dormant: None,
-            monitor: EngineMonitor::default(),
+            monitor,
             known: Vec::new(),
             user_paused: false,
             backend: BackendChoice::Auto,
         }
     }
 
-    pub fn waker(&self) -> EngineWaker {
-        self.waker.clone()
-    }
-
-    /// Status and counters for the application (IPC), readable from any thread.
-    pub fn monitor(&self) -> EngineMonitor {
-        self.monitor.clone()
+    /// The user pause of a restarted engine process, before [`Local::start`].
+    pub(crate) fn preset_user_pause(&mut self, paused: bool) {
+        self.user_paused = paused;
     }
 
     /// Reads every wallpaper of the plan (no window, no GPU, no audio).
@@ -481,7 +621,8 @@ impl Engine {
             screenshot: self.plan.screenshot.clone(),
             rendered: 0,
             idle_since: None,
-            first_frame_due: None,
+            first_frame_due: Some((t0, "the engine opened its outputs")),
+            trim_due: None,
         };
         let mut first_surface = Some((first, first_surface));
         for ev in early {
@@ -636,10 +777,14 @@ impl Engine {
                 self.waker.idle_wait();
                 continue;
             };
-            let deadline = match (video_deadline(r), self.release_deadline(r)) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            if r.trim_due.is_some_and(|d| Instant::now() >= d) {
+                r.trim_due = None;
+                trim_resident();
+            }
+            let deadline = [video_deadline(r), self.release_deadline(r), r.trim_due]
+                .into_iter()
+                .flatten()
+                .min();
             let wait = deadline.map_or(Wait::Block, Wait::Until);
             if let Err(e) = r.surfaces.wait(wait) {
                 break Err(e.to_string());
@@ -1277,6 +1422,7 @@ impl Engine {
                 self.publish(Some(r), Change::Outputs);
             }
             Event::Paused { output, reasons } => {
+                let all_before = !r.outputs.is_empty() && r.outputs.iter().all(|o| o.paused);
                 if let Some(o) = r.outputs.iter_mut().find(|o| o.id == output) {
                     if !o.paused {
                         tracing::info!("output {output} paused: {reasons:?}");
@@ -1287,6 +1433,10 @@ impl Engine {
                 if r.outputs.iter().all(|o| o.paused) {
                     r.audio.pause();
                     r.audio.update(0.0, true);
+                    if !all_before {
+                        // Nothing renders now (a game, a locked session): the RAM goes back.
+                        trim_resident();
+                    }
                 }
                 sync_video_pause(r);
                 self.publish(Some(r), Change::State);
@@ -1483,6 +1633,7 @@ impl Engine {
                 "first frame {:.0} ms after {since}",
                 t.elapsed().as_secs_f64() * 1000.0
             );
+            r.trim_due = Some(Instant::now() + TRIM_DELAY);
         }
     }
 
@@ -2190,6 +2341,22 @@ fn daytime() -> f32 {
     minutes as f32 / 1440.0
 }
 
+/// Time between the first frame of a load (start, new wallpaper, GPU restore) and the working
+/// set trim: about 30 frames at 30 fps, after which the frames only fault back what they use.
+const TRIM_DELAY: Duration = Duration::from_secs(1);
+
+/// Empties the working set (Windows; nothing elsewhere): what loading touched goes back to the
+/// system (driver and shader-compiler pages, decoded files, the mapped `.pkg`). Measured by
+/// Cleo (Perf B), headless, release: 8–11 ms; the next frame costs 2–5 ms more, then nothing;
+/// steady state 3018340632 WS 112.8 → 19.3 MiB, 3463520581 131.6 → 49.0 MiB (WE: 64–69).
+/// Private bytes do not change. Called after a load, when every output pauses and after the GPU
+/// release, never per frame.
+pub(crate) fn trim_resident() {
+    if let Some(t) = lumenwall_platform::process::trim_working_set() {
+        tracing::debug!("working set emptied in {:.1} ms", t.as_secs_f64() * 1000.0);
+    }
+}
+
 /// Gives the heap pages freed by an unloaded wallpaper or a released GPU back to the system.
 /// glibc keeps them in its arenas otherwise (measured: scene → video → scene left 305 MiB
 /// RSS, 227 MiB after the trim, which takes ≈ 5 ms). Called on those events only, never per
@@ -2357,6 +2524,30 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_process_is_used_only_where_it_can_be() {
+        let plan = EnginePlan::default();
+        assert!(use_engine_process(true, true, None, &plan));
+        // Not wired in `main`, not Windows, or switched off.
+        assert!(!use_engine_process(false, true, None, &plan));
+        assert!(!use_engine_process(true, false, None, &plan));
+        assert!(!use_engine_process(true, true, Some(" 0"), &plan));
+        assert!(use_engine_process(true, true, Some("1"), &plan));
+        // One-shot commands print what this process loaded.
+        for plan in [
+            EnginePlan {
+                list_properties: true,
+                ..EnginePlan::default()
+            },
+            EnginePlan {
+                dump_structure: true,
+                ..EnginePlan::default()
+            },
+        ] {
+            assert!(!use_engine_process(true, true, None, &plan));
+        }
+    }
+
+    #[test]
     fn one_backend_per_instance_vulkan_first() {
         use wgpu::Backends as B;
         assert_eq!(backend_order(true, None), vec![B::VULKAN, B::DX12]);
@@ -2409,10 +2600,10 @@ mod tests {
             targets: vec![target("default", &[])],
             ..EnginePlan::default()
         };
-        assert_eq!(Engine::platform_config(&plan).outputs, OutputSelection::All);
+        assert_eq!(Local::platform_config(&plan).outputs, OutputSelection::All);
         plan.targets = vec![target("DP-1", &["DP-1"]), target("DP-2", &["DP-2"])];
         assert_eq!(
-            Engine::platform_config(&plan).outputs,
+            Local::platform_config(&plan).outputs,
             OutputSelection::Named(vec!["DP-1".into(), "DP-2".into()])
         );
     }

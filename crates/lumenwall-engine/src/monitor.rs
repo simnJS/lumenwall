@@ -149,6 +149,15 @@ struct Inner {
     listener: Mutex<Option<Listener>>,
     sampling: AtomicBool,
     counters: Mutex<Counters>,
+    /// The engine process whose frames are counted, when the engine runs in one.
+    remote: Mutex<Option<Arc<dyn CounterSource>>>,
+}
+
+/// Frame counters kept by an engine process (the daemon's monitor forwards to it).
+pub(crate) trait CounterSource: Send + Sync {
+    fn set_sampling(&self, on: bool);
+    /// `None` when the process did not answer in time.
+    fn take_counters(&self) -> Option<FrameCounters>;
 }
 
 #[derive(Default)]
@@ -177,7 +186,8 @@ impl EngineMonitor {
         *lock(&self.inner.listener) = listener;
     }
 
-    /// Turns the frame counters on or off. Never wakes the engine.
+    /// Turns the frame counters on or off. Never wakes the engine (an engine process gets a
+    /// message, read by its own thread).
     pub fn set_sampling(&self, on: bool) {
         let was = self.inner.sampling.swap(on, Ordering::SeqCst);
         if on && !was {
@@ -189,14 +199,29 @@ impl EngineMonitor {
                 ..FrameCounters::default()
             };
         }
+        if on != was {
+            let remote = lock(&self.inner.remote).clone();
+            if let Some(r) = remote {
+                r.set_sampling(on);
+            }
+        }
     }
 
     pub fn sampling(&self) -> bool {
         self.inner.sampling.load(Ordering::Relaxed)
     }
 
+    /// Where the counters are kept while the engine runs in another process (`None`: here).
+    pub(crate) fn set_counter_source(&self, source: Option<Arc<dyn CounterSource>>) {
+        *lock(&self.inner.remote) = source;
+    }
+
     /// Counters since the previous call (or since sampling started), then resets them.
     pub fn take_counters(&self) -> FrameCounters {
+        let remote = lock(&self.inner.remote).clone();
+        if let Some(c) = remote.and_then(|r| r.take_counters()) {
+            return c;
+        }
         let mut c = lock(&self.inner.counters);
         let now = Instant::now();
         let since = c.since.replace(now).unwrap_or(now);
