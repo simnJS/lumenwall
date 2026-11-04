@@ -70,9 +70,30 @@ pub fn program_bytes(name: &str, version: &Version) -> Vec<u8> {
     format!("#!/bin/sh\n# fake {name} {version}\nexit 0\n").into_bytes()
 }
 
+/// Files of a release archive besides the programs, the bundle marker and the licence,
+/// the same in every version, some in folders: on Windows the web host, FFmpeg's DLLs
+/// and the CEF runtime with its `locales` folder (packaging/release/windows-runtime.toml),
+/// on Linux the desktop files under `share/`.
+pub fn runtime_files() -> Vec<(&'static str, &'static [u8])> {
+    if target().contains("windows") {
+        vec![
+            ("lumenwall-web-host.exe", b"MZ fake web host"),
+            ("avcodec-62.dll", b"MZ fake avcodec"),
+            ("libcef.dll", b"MZ fake libcef"),
+            ("locales/en-US.pak", b"fake pak"),
+            ("licenses/FFmpeg-LGPL-3.0.txt", b"LGPL-3.0 text\n"),
+        ]
+    } else {
+        vec![(
+            "share/applications/lumenwall-ui.desktop",
+            b"[Desktop Entry]\n",
+        )]
+    }
+}
+
 /// A release archive in this platform's format: one top folder with the programs,
-/// the bundle marker and a licence file (plus `padding` bytes of filler, to watch the
-/// progress bar in the app).
+/// the bundle marker, a licence file and [`runtime_files`] (plus `padding` bytes of
+/// filler, to watch the progress bar in the app).
 pub fn release_archive(version: &Version, padding: usize) -> Vec<u8> {
     let exe = std::env::consts::EXE_SUFFIX;
     let top = format!("lumenwall-{version}-{}", target());
@@ -94,6 +115,10 @@ pub fn release_archive(version: &Version, padding: usize) -> Vec<u8> {
         ),
         ("LICENSE-MIT".into(), b"MIT licence text\n".to_vec(), 0o644),
     ];
+    for (name, data) in runtime_files() {
+        let mode = if name.ends_with(".exe") { 0o755 } else { 0o644 };
+        files.push((name.into(), data.to_vec(), mode));
+    }
     if padding > 0 {
         // Incompressible, so the download really is that large.
         let mut x: u32 = 0x9e37_79b9;

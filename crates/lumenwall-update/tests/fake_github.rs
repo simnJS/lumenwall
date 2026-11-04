@@ -13,8 +13,8 @@ use lumenwall_update::{
     download, install,
 };
 use support::{
-    FakeGitHub, FakeRelease, program_bytes, sha256_hex, sign, stranger_key, sums_signature_name,
-    target,
+    FakeGitHub, FakeRelease, program_bytes, runtime_files, sha256_hex, sign, stranger_key,
+    sums_signature_name, target,
 };
 
 const NOW: u64 = 1_800_000_000;
@@ -170,9 +170,21 @@ fn new_version_is_downloaded_verified_and_installed() {
     }
     std::fs::write(app.path().join(BUNDLE_MARKER), "old").unwrap();
     std::fs::write(app.path().join("notes.txt"), "user file").unwrap();
+    // One runtime file is already installed with the same content (CEF not updated):
+    // it is left alone, even while a running program keeps it open.
+    let (kept, kept_bytes) = runtime_files()
+        .into_iter()
+        .find(|(n, _)| *n == "libcef.dll" || n.ends_with(".desktop"))
+        .unwrap();
+    let kept_path = app.path().join(kept);
+    std::fs::create_dir_all(kept_path.parent().unwrap()).unwrap();
+    std::fs::write(&kept_path, kept_bytes).unwrap();
+    let before = file_identity(&kept_path);
+    let held = hold_open(&kept_path);
     let layout = Layout::of_dir(app.path());
     assert!(layout.bundle);
     let installed = install(&verified, &layout).expect("installed");
+    drop(held);
     assert_eq!(installed.version, v("0.2.0"));
     for p in ["lumenwall", "lumenwall-ui"] {
         assert_eq!(
@@ -185,6 +197,21 @@ fn new_version_is_downloaded_verified_and_installed() {
         app.path().join("LICENSE-MIT").is_file(),
         "bundle files added"
     );
+    // New files and folders of the archive (Windows: FFmpeg's DLLs, CEF, locales\).
+    for (name, bytes) in runtime_files() {
+        assert_eq!(
+            std::fs::read(app.path().join(name)).unwrap(),
+            bytes,
+            "{name}"
+        );
+        assert_eq!(
+            installed.files.contains(&std::path::PathBuf::from(name)),
+            name != kept,
+            "{name} in {:?}",
+            installed.files
+        );
+    }
+    assert_eq!(file_identity(&kept_path), before, "{kept} not rewritten");
     assert_eq!(
         std::fs::read_to_string(app.path().join("notes.txt")).unwrap(),
         "user file"
@@ -209,11 +236,34 @@ fn new_version_is_downloaded_verified_and_installed() {
             "lumenwall",
             "lumenwall-ui",
             BUNDLE_MARKER,
-            "notes.txt"
+            "notes.txt",
+            "share"
         ]
     );
     assert!(!names.iter().any(|n| n.starts_with(".lumenwall-update")));
     assert!(leftovers(downloads.path()).is_empty());
+}
+
+/// The inode, which a replacement changes.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+}
+
+/// Nothing to compare on Windows: there [`hold_open`] makes any replacement fail.
+#[cfg(not(unix))]
+fn file_identity(_: &Path) -> u64 {
+    0
+}
+
+/// Windows: opens `path` the way a program that does not share deletion keeps it, so
+/// that any rename of it (hence any replacement) fails while the handle lives.
+fn hold_open(path: &Path) -> std::fs::File {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1 /* FILE_SHARE_READ */);
+    options.open(path).unwrap()
 }
 
 #[test]
@@ -230,6 +280,9 @@ fn programs_outside_a_bundle_only_replace_what_is_there() {
     }
     let installed = install(&verified, &Layout::of_dir(bin.path())).unwrap();
     assert_eq!(installed.files.len(), 2);
+    // The archive's other files (Windows: the web host, DLLs, locales\) are not added to
+    // a folder that is not Lumenwall's.
+    assert!(!runtime_files().is_empty());
     let mut names = leftovers(bin.path());
     names.sort();
     let mut expected = [

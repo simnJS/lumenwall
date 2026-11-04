@@ -1,14 +1,21 @@
 //! Replacing the installed files with a verified archive's content.
 //!
 //! The archive is extracted into a staging folder inside the installation folder
-//! (same file system, so moves are renames). Then, file by file:
+//! (same file system, so moves are renames). Files whose content is already installed,
+//! byte for byte, are left alone: an update that keeps the same FFmpeg and CEF touches
+//! none of their ≈ 500 MB, nor the files a running engine or web host has open. Then,
+//! file by file, new files (and their folders, `locales\`) are moved in, and changed
+//! ones replaced:
 //!
 //! - Linux: the current file gets a hard-linked backup, and the new one is renamed over
 //!   it: the path always names a complete program, and running processes keep the old
 //!   one open.
-//! - Windows: a running `.exe` or `.dll` can be renamed but not overwritten, so the
-//!   current file is renamed to `<name>.lumenwall-old` and the new one moved in place.
-//!   Backups still in use are deleted by [`cleanup`] at the next start.
+//! - Windows: a running `.exe` or a loaded `.dll` (`libcef.dll` in a web host, FFmpeg's
+//!   DLLs in the engine) can be renamed but not overwritten, so the current file is
+//!   renamed to `<name>.lumenwall-old` and the new one moved in place. Backups still in
+//!   use are deleted by [`cleanup`] at the next start. A file another program holds open
+//!   without allowing that rename cannot be replaced: the update stops with a message
+//!   naming it.
 //!
 //! If any step fails, the files already replaced are put back.
 
@@ -55,7 +62,8 @@ impl Layout {
 pub struct Installed {
     pub version: Version,
     pub layout: Layout,
-    /// Files replaced or added, relative to the installation folder.
+    /// Files replaced or added, relative to the installation folder (not the ones that
+    /// were already installed with the same content).
     pub files: Vec<PathBuf>,
 }
 
@@ -86,6 +94,10 @@ pub fn install(verified: &Verified, layout: &Layout) -> Result<Installed, Error>
                 "no Lumenwall program in the installation folder".into(),
             ));
         }
+        let plan: Vec<PathBuf> = plan
+            .into_iter()
+            .filter(|rel| !unchanged(&staging.join(rel), &layout.dir.join(rel)))
+            .collect();
         replace_all(&staging, &layout.dir, &plan)?;
         Ok(plan)
     })();
@@ -130,6 +142,72 @@ fn remove_backups(dir: &Path, depth: usize) {
             tracing::debug!("{} still in use: {e}", path.display());
         }
     }
+}
+
+/// Whether `current` already holds exactly `new` (Unix: with the same executable bit),
+/// so that installing `new` would change nothing.
+fn unchanged(new: &Path, current: &Path) -> bool {
+    let (Ok(a), Ok(b)) = (std::fs::metadata(new), std::fs::symlink_metadata(current)) else {
+        return false;
+    };
+    if !b.is_file() || a.len() != b.len() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let exec = |m: &std::fs::Metadata| m.permissions().mode() & 0o111 != 0;
+        if exec(&a) != exec(&b) {
+            return false;
+        }
+    }
+    same_bytes(new, current).unwrap_or(false)
+}
+
+/// Compares two files of the same length, chunk by chunk (stops at the first difference).
+fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+    const CHUNK: usize = 1 << 20;
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut x, mut y) = (vec![0; CHUNK], vec![0; CHUNK]);
+    loop {
+        let n = fill(&mut a, &mut x)?;
+        let m = fill(&mut b, &mut y)?;
+        if x[..n] != y[..m] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Reads until `buf` is full or the file ends.
+fn fill(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
+}
+
+/// The error for a file that could not be moved aside or into place. On Windows, a
+/// program holding the file open without sharing its deletion (ERROR_SHARING_VIOLATION,
+/// ERROR_LOCK_VIOLATION) blocks any rename: say so, the user can close it and retry.
+fn move_error(path: &Path, e: &std::io::Error) -> Error {
+    if cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)) {
+        return Error::Io(format!(
+            "{} is open in another program and cannot be replaced; the update was undone, \
+             close that program and update again",
+            path.display()
+        ));
+    }
+    Error::io(path.display(), e)
 }
 
 struct Replaced {
@@ -184,7 +262,7 @@ fn replace_one(new: &Path, target: &Path) -> Result<Replaced, Error> {
             }
         }
         #[cfg(not(unix))]
-        std::fs::rename(target, &b).map_err(|e| Error::io(target.display(), &e))?;
+        std::fs::rename(target, &b).map_err(|e| move_error(target, &e))?;
         Some(b)
     } else {
         None
@@ -196,7 +274,7 @@ fn replace_one(new: &Path, target: &Path) -> Result<Replaced, Error> {
             #[cfg(not(unix))]
             let _ = std::fs::rename(b, target);
         }
-        return Err(Error::io(target.display(), &e));
+        return Err(move_error(target, &e));
     }
     Ok(Replaced {
         target: target.to_owned(),
@@ -296,5 +374,219 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// A release zip (`lumenwall-0.2.0/<name>` for each entry) and its `Verified`.
+    fn release(dir: &Path, entries: &[(&str, &[u8])]) -> Verified {
+        use std::io::Write;
+        let archive = dir.join("lumenwall-0.2.0-test.zip");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            z.start_file(format!("lumenwall-0.2.0/{name}"), opts)
+                .unwrap();
+            z.write_all(data).unwrap();
+        }
+        z.finish().unwrap();
+        Verified {
+            archive,
+            version: Version::new(0, 2, 0),
+            sha256: String::new(),
+        }
+    }
+
+    fn exe(name: &str) -> String {
+        format!("{name}{EXE}")
+    }
+
+    /// A bundle folder holding version 0.1.0's programs.
+    fn bundle(dir: &Path) -> Layout {
+        let app = dir.join("app");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(app.join(exe("lumenwall")), "old engine").unwrap();
+        std::fs::write(app.join(exe("lumenwall-ui")), "old app").unwrap();
+        std::fs::write(app.join(BUNDLE_MARKER), "0.1.0").unwrap();
+        let layout = Layout::of_dir(app);
+        assert!(layout.bundle);
+        layout
+    }
+
+    #[test]
+    fn unchanged_detects_identical_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        // Larger than one comparison chunk, differing only in the last byte.
+        let mut big = vec![7u8; (1 << 20) + 5];
+        std::fs::write(p("a"), &big).unwrap();
+        std::fs::write(p("b"), &big).unwrap();
+        *big.last_mut().unwrap() = 8;
+        std::fs::write(p("c"), &big).unwrap();
+        std::fs::write(p("short"), [7u8; 3]).unwrap();
+        std::fs::create_dir(p("folder")).unwrap();
+        assert!(unchanged(&p("a"), &p("b")));
+        assert!(!unchanged(&p("a"), &p("c")));
+        assert!(!unchanged(&p("a"), &p("short")));
+        assert!(!unchanged(&p("a"), &p("missing")));
+        assert!(!unchanged(&p("a"), &p("folder")));
+        assert!(unchanged(&p("short"), &p("short")));
+    }
+
+    #[test]
+    fn new_files_and_folders_are_added_and_unchanged_ones_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bundle(dir.path());
+        // CEF was not updated: its DLL is already there, byte for byte.
+        std::fs::write(layout.dir.join("libcef.dll"), "cef 156").unwrap();
+        let held = hold_open(&layout.dir.join("libcef.dll"));
+        let verified = release(
+            dir.path(),
+            &[
+                (&exe("lumenwall"), b"new engine"),
+                (&exe("lumenwall-ui"), b"new app"),
+                (BUNDLE_MARKER, b"0.2.0"),
+                ("libcef.dll", b"cef 156"),
+                ("avcodec-62.dll", b"ffmpeg 8"),
+                ("locales/en-US.pak", b"en-US"),
+                ("locales/fr.pak", b"fr"),
+            ],
+        );
+        let installed = install(&verified, &layout).expect("installed");
+        drop(held);
+        let mut files: Vec<String> = installed
+            .files
+            .iter()
+            .map(|f| f.to_string_lossy().replace('\\', "/"))
+            .collect();
+        files.sort();
+        let mut want = vec![
+            exe("lumenwall"),
+            exe("lumenwall-ui"),
+            BUNDLE_MARKER.to_owned(),
+            "avcodec-62.dll".to_owned(),
+            "locales/en-US.pak".to_owned(),
+            "locales/fr.pak".to_owned(),
+        ];
+        want.sort();
+        assert_eq!(files, want, "libcef.dll is not in the plan");
+        let read = |n: &str| std::fs::read_to_string(layout.dir.join(n)).unwrap();
+        assert_eq!(read(&exe("lumenwall")), "new engine");
+        assert_eq!(read("avcodec-62.dll"), "ffmpeg 8");
+        assert_eq!(read("locales/fr.pak"), "fr");
+        assert_eq!(read("libcef.dll"), "cef 156");
+        assert!(!layout.dir.join(STAGING).exists());
+        assert!(!verified.archive.exists());
+    }
+
+    /// Opens `path` without sharing its deletion, as a program reading it might (a
+    /// virus scanner, a backup tool; Python's `open` does): on Windows no rename of it
+    /// can succeed while the handle lives. (CEF itself shares deletion: every file of a
+    /// release folder can be renamed while its web host runs.)
+    fn hold_open(path: &Path) -> std::fs::File {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::share_mode(
+            &mut options,
+            1, /* FILE_SHARE_READ */
+        );
+        options.open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_changed_file_held_open_stops_the_update_and_everything_is_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bundle(dir.path());
+        std::fs::write(layout.dir.join("resources.pak"), "cef 156").unwrap();
+        let held = hold_open(&layout.dir.join("resources.pak"));
+        let verified = release(
+            dir.path(),
+            &[
+                (&exe("lumenwall"), b"new engine"),
+                (&exe("lumenwall-ui"), b"new app"),
+                ("locales/en-US.pak", b"en-US"),
+                ("resources.pak", b"cef 157"),
+            ],
+        );
+        let err = install(&verified, &layout).expect_err("resources.pak is in use");
+        let Error::Io(msg) = &err else {
+            panic!("{err:?}")
+        };
+        assert!(
+            msg.contains("resources.pak") && msg.contains("open in another program"),
+            "{msg}"
+        );
+        drop(held);
+        let read = |n: &str| std::fs::read_to_string(layout.dir.join(n)).unwrap();
+        assert_eq!(read(&exe("lumenwall")), "old engine", "put back");
+        assert_eq!(read(&exe("lumenwall-ui")), "old app", "put back");
+        assert_eq!(read("resources.pak"), "cef 156");
+        assert!(!layout.dir.join("locales").join("en-US.pak").exists());
+        let mut left = walk(&layout.dir);
+        left.sort();
+        // The emptied locales folder may stay; no backup, no staging folder.
+        left.retain(|n| n != "locales");
+        let mut want = vec![
+            exe("lumenwall"),
+            exe("lumenwall-ui"),
+            BUNDLE_MARKER.into(),
+            "resources.pak".into(),
+        ];
+        want.sort();
+        assert_eq!(left, want);
+        assert!(verified.archive.exists(), "kept for another try");
+    }
+
+    /// A DLL loaded by a running program (`libcef.dll` in a web host, FFmpeg's DLLs in
+    /// the engine): mapped as an image, it cannot be deleted or overwritten, only renamed.
+    #[cfg(windows)]
+    #[test]
+    fn a_loaded_dll_is_moved_aside_and_its_backup_removed_once_unloaded() {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryExW(name: *const u16, file: isize, flags: u32) -> isize;
+            fn FreeLibrary(module: isize) -> i32;
+        }
+        const LOAD_LIBRARY_AS_IMAGE_RESOURCE: u32 = 0x20;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = bundle(dir.path());
+        let system = std::env::var_os("SystemRoot").expect("SystemRoot");
+        let dll = layout.dir.join("libcef.dll");
+        std::fs::copy(
+            Path::new(&system).join("System32").join("version.dll"),
+            &dll,
+        )
+        .unwrap();
+        let wide: Vec<u16> = dll.as_os_str().encode_wide().chain([0]).collect();
+        // SAFETY: a NUL-terminated path; mapped as an image resource, no code runs.
+        let module = unsafe { LoadLibraryExW(wide.as_ptr(), 0, LOAD_LIBRARY_AS_IMAGE_RESOURCE) };
+        assert_ne!(module, 0, "{}", std::io::Error::last_os_error());
+        assert!(
+            std::fs::remove_file(&dll).is_err(),
+            "a loaded DLL cannot be deleted"
+        );
+
+        let verified = release(
+            dir.path(),
+            &[
+                (&exe("lumenwall"), b"new engine"),
+                (&exe("lumenwall-ui"), b"new app"),
+                ("libcef.dll", b"cef 157"),
+            ],
+        );
+        let installed = install(&verified, &layout).expect("installed");
+        assert!(installed.files.contains(&PathBuf::from("libcef.dll")));
+        assert_eq!(std::fs::read(&dll).unwrap(), b"cef 157");
+        let backup = layout.dir.join(format!("libcef.dll{OLD_SUFFIX}"));
+        assert!(backup.is_file(), "the loaded one was moved aside");
+        cleanup(&layout.dir);
+        assert!(backup.is_file(), "still loaded: kept");
+        // SAFETY: the module loaded above, freed once.
+        assert_ne!(unsafe { FreeLibrary(module) }, 0);
+        cleanup(&layout.dir);
+        assert!(!backup.exists(), "removed at the next start");
     }
 }

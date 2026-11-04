@@ -8,6 +8,9 @@
 # Published files, nothing else: Lumenwall-Setup.exe, lumenwall-<v>-x86_64-pc-windows-msvc.zip,
 # lumenwall-<v>-x86_64-unknown-linux-gnu.tar.gz, lumenwall-<v>-amd64.deb, install.sh,
 # SHA256SUMS, SHA256SUMS.minisig.
+# The Windows zip (and the installer made from it) also ships FFmpeg's LGPL DLLs (video
+# wallpapers) and lumenwall-web-host.exe with the CEF runtime (web wallpapers):
+# packaging/release/windows-runtime.toml lists them.
 # Procedure, key creation and checks: docs/RELEASING.md.
 # Third-party actions are pinned to a commit SHA (tag in the trailing comment).
 name: Release
@@ -104,47 +107,123 @@ jobs:
         with:
           # No cache: a release is built from this commit and crates.io only.
           cache: "false"
+          # Windows: BtbN's FFmpeg 8.1 LGPL shared build, pinned by SHA-256 (FFMPEG_DIR,
+          # LIBCLANG_PATH), for video wallpapers. No effect on Linux (system FFmpeg).
+          ffmpeg: "true"
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-about@0.9.3
 
+      # Windows: cl.exe hits MAX_PATH on CEF's C++ wrapper under a deep target folder
+      # (crates/lumenwall-web/README.md), so Cargo builds in a short one; the cef crate
+      # downloads CEF's distribution into CEF_PATH. BIN_DIR: where the programs land.
+      - name: Folders
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            temp=$(cygpath -m "$RUNNER_TEMP")
+            {
+              echo "CARGO_TARGET_DIR=$temp/t"
+              echo "CEF_PATH=$temp/cef"
+              echo "BIN_DIR=$temp/t/$TARGET/release"
+            } >> "$GITHUB_ENV"
+          else
+            echo "BIN_DIR=target/$TARGET/release" >> "$GITHUB_ENV"
+          fi
+
+      # Windows: with FFmpeg (video wallpapers). The DLLs are not imported by
+      # lumenwall.exe but loaded from its folder at the first video; package.py ships
+      # them (crates/lumenwall-video/README.md, "Windows distribution"). Linux enables
+      # FFmpeg by itself.
       - name: Build
-        run: cargo build --workspace --release --locked --target "$TARGET"
+        run: |
+          features=()
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            features=(--features lumenwall-engine/video-ffmpeg)
+          fi
+          cargo build --workspace --release --locked --target "$TARGET" "${features[@]}"
+
+      # Web wallpapers: lumenwall-web-host with CEF, in a build of its own so that the
+      # cef feature never reaches lumenwall.exe. The cef crate downloads CEF's windows64
+      # minimal distribution (175 MB, official CEF builds) and builds CEF's C++ wrapper
+      # with CMake and Ninja: both need the MSVC environment (vcvars64.bat).
+      - name: Build the web host (Windows, CEF)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'no Visual Studio with the C++ tools' }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            $env:PATH = "$vs\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;$env:PATH"
+          }
+          "ninja $(ninja --version), $((Get-Command cl).Source)"
+          cargo build --release --locked --target $env:TARGET -p lumenwall-web --features cef --bin lumenwall-web-host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The distribution the cef crate extracted: package.py takes the runtime files
+          # (windows-runtime.toml) from there, and its archive for CEF's licence.
+          $cef = @(Get-ChildItem -Directory "$env:CEF_PATH\*\cef_windows_x86_64")
+          if ($cef.Count -ne 1) { throw "expected one CEF distribution in $env:CEF_PATH, found $($cef.Count)" }
+          "CEF_RUNTIME=$($cef[0].FullName -replace '\\', '/')" >> $env:GITHUB_ENV
 
       # ---- AUTHENTICODE (1/2): plug the code-signing service in here ----------------
-      # Signs the programs in place, before package.py zips them: the zip, the
-      # installer made from it and SHA256SUMS then all carry the signed files.
-      # Skipped until the AUTHENTICODE_TOKEN secret exists (env.AUTHENTICODE above);
-      # fails while it exists but no signing command replaces this placeholder, so a
-      # release is never published unsigned by mistake. docs/RELEASING.md#authenticode-signing
-      - name: "AUTHENTICODE: sign lumenwall.exe and lumenwall-ui.exe"
+      # Signs in place, before package.py zips them: the zip, the installer made from
+      # it and SHA256SUMS then all carry the signed files. Our three programs, and the
+      # third-party DLLs that ship unsigned (FFmpeg's, CEF's); d3dcompiler_47.dll keeps
+      # Microsoft's signature. Skipped until the AUTHENTICODE_TOKEN secret exists
+      # (env.AUTHENTICODE above); fails while it exists but no signing command replaces
+      # this placeholder, so a release is never published unsigned by mistake.
+      # docs/RELEASING.md#authenticode-signing
+      - name: "AUTHENTICODE: sign the programs and the unsigned DLLs"
         if: runner.os == 'Windows' && env.AUTHENTICODE == 'true'
         env:
-          FILES: target/${{ matrix.target }}/release/lumenwall.exe target/${{ matrix.target }}/release/lumenwall-ui.exe
+          FILES: >-
+            ${{ env.BIN_DIR }}/lumenwall.exe ${{ env.BIN_DIR }}/lumenwall-ui.exe
+            ${{ env.BIN_DIR }}/lumenwall-web-host.exe
+            ${{ env.FFMPEG_DIR }}/bin/avutil-60.dll ${{ env.FFMPEG_DIR }}/bin/swresample-6.dll
+            ${{ env.FFMPEG_DIR }}/bin/swscale-9.dll ${{ env.FFMPEG_DIR }}/bin/avcodec-62.dll
+            ${{ env.FFMPEG_DIR }}/bin/avformat-62.dll
+            ${{ env.CEF_RUNTIME }}/libcef.dll ${{ env.CEF_RUNTIME }}/chrome_elf.dll
+            ${{ env.CEF_RUNTIME }}/vk_swiftshader.dll ${{ env.CEF_RUNTIME }}/vulkan-1.dll
         run: |
           echo "::error::AUTHENTICODE_TOKEN is set but no signing command is plugged in for: $FILES (docs/RELEASING.md#authenticode-signing)"
           exit 1
 
+      # Windows: with the features of what ships (ffmpeg-sys-next, the cef crates).
+      # package.py adds FFmpeg's and CEF's own notices to this file.
       - name: Third-party notices
         run: |
-          cargo about generate --workspace --locked --fail \
+          features=()
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            features=(--features "lumenwall-engine/video-ffmpeg lumenwall-web/cef")
+          fi
+          cargo about generate --workspace --locked --fail "${features[@]}" \
             -c packaging/about/about.toml packaging/about/about.hbs \
             -o "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html"
 
+      # Windows: also FFmpeg's DLLs and the CEF runtime, exactly the files of
+      # packaging/release/windows-runtime.toml, with their licences; package.py then
+      # checks the zip holds exactly the files of a release.
       - name: Package
         run: |
           py=python3
+          runtime=()
           if [[ "$RUNNER_OS" == Windows ]]; then
             py=python
+            runtime=(--ffmpeg-dir "$FFMPEG_DIR" --web-runtime "$CEF_RUNTIME")
           fi
           # Same inputs, same archive: timestamps come from the tagged commit.
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           export SOURCE_DATE_EPOCH
           "$py" packaging/release/package.py \
             --version "$VERSION" --target "$TARGET" \
-            --bin-dir "target/$TARGET/release" \
+            --bin-dir "$BIN_DIR" \
             --notices "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html" \
-            --out dist
+            --out dist "${runtime[@]}"
+          ls -l dist
 
       # System-wide package: /usr/bin, /usr/share; Depends from dpkg-shlibdeps,
       # FFmpeg Recommends from the headers the engine was built with (pkg-config).
@@ -155,7 +234,7 @@ jobs:
           export SOURCE_DATE_EPOCH
           python3 packaging/release/deb.py \
             --version "$VERSION" \
-            --bin-dir "target/$TARGET/release" \
+            --bin-dir "$BIN_DIR" \
             --notices "$RUNNER_TEMP/THIRD-PARTY-NOTICES.html" \
             --out dist
           dpkg-deb --info "dist/lumenwall-$VERSION-amd64.deb"
@@ -179,12 +258,13 @@ jobs:
           retention-days: 7
 
   # NSIS (zlib licence) runs on Linux: the installer is made from the Windows zip
-  # itself, so it holds exactly the files the archive and the updater have.
+  # itself, so it holds exactly the files the archive and the updater have. Solid LZMA
+  # over ≈ 565 MB (FFmpeg and CEF included) takes a few minutes.
   installer:
     name: windows installer
     needs: [version, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -272,6 +352,10 @@ jobs:
         run: |
           target/debug/examples/release_sign verify --version "$VERSION" dist
           (cd dist && sha256sum --check --strict SHA256SUMS)
+          # The Windows zip (and so the installer made from it) holds exactly a release's
+          # files: the programs, FFmpeg's DLLs, the CEF runtime with every locale, their
+          # licences and notices (packaging/release/windows-runtime.toml), nothing else.
+          python3 packaging/release/package.py --check "dist/lumenwall-$VERSION-x86_64-pc-windows-msvc.zip"
           # Exactly these files are published, and SHA256SUMS lists exactly them.
           files=(
             Lumenwall-Setup.exe

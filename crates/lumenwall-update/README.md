@@ -36,10 +36,11 @@ Without `RELEASE_PUBLIC_KEY` (`None` until the production key exists) the update
 
 ## Installation
 
-- **Bundle** (the folder extracted from a release archive, recognised by its `lumenwall.bundle` file): every file of the new archive is installed, other files in the folder are left alone.
-- **Programs copied elsewhere** (e.g. `~/.local/bin`): only `lumenwall`, `lumenwall-ui` and `lumenwall-web-host` already present there are replaced.
+- **Bundle** (the folder extracted from a release archive, recognised by its `lumenwall.bundle` file; every Windows installation is one, made by the installer or by the app's own copy): every file of the new archive is installed, new files and folders included (the Windows zip's FFmpeg DLLs, the CEF runtime and its `locales\` folder), other files in the folder are left alone.
+- **Programs copied elsewhere** (e.g. `~/.local/bin`): only `lumenwall`, `lumenwall-ui` and `lumenwall-web-host` already present there are replaced; nothing else of the archive is added to a folder that is not Lumenwall's.
+- **Unchanged files are left in place:** a file already installed with the same content (compared byte for byte; Unix: and the same executable bit) is neither rewritten nor moved. An update that keeps the same FFmpeg and CEF replaces the programs and a few small files, not the ≈ 500 MB of DLLs, and never touches the files a running engine or web host has open.
 - **Linux:** each new file is written in a staging folder inside the installation folder (same file system), `fsync`ed, then renamed over the old one after a hard-linked backup: the path always names a complete program; running processes keep the old one.
-- **Windows:** a running `.exe`/`.dll` cannot be overwritten but can be renamed: the old file becomes `<name>.lumenwall-old`, the new one takes its name. Backups still in use are removed at the next start (`cleanup`).
+- **Windows:** a running `.exe` or a loaded `.dll` (`libcef.dll` in a running web host, FFmpeg's DLLs in the engine) cannot be overwritten or deleted but can be renamed: the old file becomes `<name>.lumenwall-old`, the new one takes its name. Backups still in use are removed at the next start (`cleanup`, which also looks into `locales\`). Measured on the release folder: while the engine plays a video (FFmpeg's DLLs loaded) and while a web host runs with its four CEF subprocesses, every file of the folder, `locales\*.pak` included, can be renamed (CEF opens its data files sharing deletion), so an update never has to wait for them. A changed file that another program holds open without allowing renames (a virus scanner reading it, say) cannot be replaced: the update is undone and the message names the file.
 - Any failure puts back the files already replaced. Archives are extracted with strict checks (one top folder, no absolute paths, no `..`, no links or devices, size and entry limits).
 - The engine is restarted through the IPC `shutdown` request; the app then starts its new version and exits. The tray process (`lumenwall-ui --tray`) keeps running the previous version until the next session.
 
@@ -57,13 +58,14 @@ Copies installed by a package manager are never touched: Flatpak (`FLATPAK_ID`, 
 `cargo test -p lumenwall-update` runs, against a fake GitHub on `127.0.0.1` (`tests/support`) serving releases laid out like the workflow's (archive, installer, `install.sh`, `SHA256SUMS`, `SHA256SUMS.minisig`) and signed with the **test** key of `tests/keys` (public on purpose, never the release key):
 
 - up to date, then a conditional request answered `304`; no downgrade;
-- new version: download with progress, verification, installation into a bundle (permissions kept, user files untouched, no leftovers) and into a plain `bin` folder; only `SHA256SUMS.minisig`, `SHA256SUMS` and the archive are fetched;
+- new version: download with progress, verification, installation into a bundle (permissions kept, user files untouched, new files and folders added — on Windows the web host, an FFmpeg DLL, `libcef.dll`, `locales\` —, a runtime file already there with the same content left alone even while held open, no leftovers) and into a plain `bin` folder (the programs only); only `SHA256SUMS.minisig`, `SHA256SUMS` and the archive are fetched;
 - `SHA256SUMS.minisig` missing (release not offered; removed after the check: the archive is never fetched);
 - invalid signature (`SHA256SUMS` signed by another key, `SHA256SUMS` edited after signing, a signature made for another file, not a signature at all);
 - checksum mismatch (wrong signed hash, archive modified after signing), archive missing from `SHA256SUMS` (also: an older release's genuine list), more bytes than announced;
 - network down (next try in one hour), rate limit (deadline stored, no request until it passes, even on demand);
 - pre-release channel, release without assets, redirect to a foreign host refused;
-- engine restart over a real IPC endpoint (`tests/restart.rs`); archive extraction, rollback, cleanup, package-manager detection, release-notes text (unit tests).
+- engine restart over a real IPC endpoint (`tests/restart.rs`); archive extraction, rollback, cleanup, package-manager detection, release-notes text (unit tests);
+- installation (unit tests): byte comparison of unchanged files; new files and folders added while an unchanged `libcef.dll` held open is left alone; Windows: a loaded DLL (a copy of `version.dll` mapped as an image, which can then not be deleted) is moved aside and replaced, its backup kept by `cleanup` while it is loaded and removed once unloaded; a changed file held open without delete sharing stops the update, which names it and puts every replaced file back.
 
 To try the whole flow in the app (debug builds only; nothing is installed over the app itself):
 
