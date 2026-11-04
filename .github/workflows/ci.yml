@@ -132,6 +132,47 @@ jobs:
           LUMENWALL_GPU_TESTS: "1"
         run: cargo test --workspace --locked -- --ignored gpu
 
+  # Video wallpapers on Windows. `lumenwall-engine/video-ffmpeg` is off by default there
+  # (ffmpeg-sys-next needs FFmpeg's headers and import libraries to build); release builds
+  # turn it on. The DLLs are loaded at the first video, so the executable must start
+  # without them.
+  video-windows:
+    name: video (Windows, FFmpeg)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      FEATURES: lumenwall-engine/video-ffmpeg,lumenwall-video/ffmpeg
+    steps:
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          ffmpeg: "true"
+      - name: Clippy with FFmpeg
+        run: cargo clippy --workspace --all-targets --locked --features "$FEATURES" -- -D warnings
+      - name: Tests with FFmpeg
+        run: cargo test -p lumenwall-video -p lumenwall-engine --locked --features "$FEATURES"
+      - name: lumenwall.exe starts without the FFmpeg DLLs
+        run: |
+          cargo build -p lumenwall --locked --features lumenwall-engine/video-ffmpeg
+          # Only the Windows folders on PATH: an import entry on an FFmpeg DLL would make
+          # the loader refuse to start the executable.
+          PATH="$(cygpath -u "$SYSTEMROOT")/System32:$(cygpath -u "$SYSTEMROOT")" \
+            target/debug/lumenwall.exe --version
+      - name: Decode a generated H.264 clip on WARP
+        env:
+          WGPU_BACKEND: dx12
+          LUMENWALL_FFMPEG_LOG: warning
+        run: |
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30 \
+            -t 2 -c:v libopenh264 -pix_fmt yuv420p "$RUNNER_TEMP/clip.mp4"
+          cargo run -p lumenwall-video --locked --features ffmpeg --example video_png -- \
+            --times 0,1.5 --out "$RUNNER_TEMP/shots" "$RUNNER_TEMP/clip.mp4"
+          ls -l "$RUNNER_TEMP/shots"
+
   release:
     name: release build (${{ matrix.os }})
     strategy:

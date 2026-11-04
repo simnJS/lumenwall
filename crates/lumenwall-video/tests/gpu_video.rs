@@ -18,8 +18,10 @@ fn video() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// Render device; `WGPU_BACKEND=dx12|vulkan` restricts the backend (docs/CI.md).
 fn context() -> Option<GpuContext> {
     match GpuContext::new_headless(&ContextOptions {
+        backends: wgpu::Backends::from_env(),
         video_decode: true,
         ..ContextOptions::default()
     }) {

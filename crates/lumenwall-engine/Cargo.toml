@@ -12,8 +12,11 @@ default = ["we-shaders"]
 # Real Wallpaper Engine shaders through lumenwall-shader. Without it every WE shader is replaced by a
 # WGSL passthrough that follows the lumenwall-render binding contract (logged once per shader).
 we-shaders = ["dep:lumenwall-shader"]
-# FFmpeg video decoding on platforms where it is not enabled automatically (Windows: needs
-# an FFmpeg 8 shared build and its headers, see lumenwall-video's README). Always on for Linux.
+# FFmpeg video decoding on platforms where it is not enabled automatically. Windows: off by
+# default because building it needs an FFmpeg 8 shared build's headers and import libraries
+# (`FFMPEG_DIR`) and libclang; release builds turn it on. The executable does not import the
+# DLLs: they are loaded at the first video, from its folder (then PATH), see lumenwall-video's
+# README. Always on for Linux.
 video-ffmpeg = ["lumenwall-video/ffmpeg"]
 
 [dependencies]

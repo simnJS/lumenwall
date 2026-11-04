@@ -1,24 +1,34 @@
 //! FFmpeg API used by this crate: the types and constants of `ffmpeg-sys-next`, and its
-//! functions loaded at the first video (Linux).
+//! functions loaded at the first video (Linux, Windows).
 //!
 //! FFmpeg's shared libraries pull ≈ 135 other libraries (codecs, VA-API, VDPAU, OpenCL…):
 //! linked to the executable, the dynamic loader maps them at every start, scenes included
-//! (measured: 24.9 MiB RSS and 12 ms of start-up). On Linux the four libraries are opened
-//! with `dlopen` by [`load`], called before the first use (opening a video), by their
-//! sonames for the major versions of the headers the bindings were generated from
-//! (`libavcodec.so.62`…), and stay loaded for the rest of the process. The executable keeps
-//! no `DT_NEEDED` on them: no function of `ffmpeg-sys-next` is referenced, every call goes
-//! through the table below (`ffmpeg::tests::every_ffmpeg_call_is_loaded_at_run_time` checks
-//! the sources). FFmpeg stays a separate, replaceable shared library (deny.toml, LGPL rule).
+//! (measured: 24.9 MiB RSS and 12 ms of start-up). The four libraries are opened by [`load`],
+//! called before the first use (opening a video), for the major versions of the headers the
+//! bindings were generated from, and stay loaded for the rest of the process:
 //!
-//! Elsewhere (Windows) the functions of `ffmpeg-sys-next` are linked as before (import
-//! libraries of the DLLs), and [`load`] does nothing.
+//! - Linux: `dlopen` of the sonames (`libavcodec.so.62`…).
+//! - Windows: `LoadLibraryExW` of `avutil-60.dll`, `swscale-9.dll`, `avcodec-62.dll`,
+//!   `avformat-62.dll` (the names of FFmpeg's shared builds) by full path, from the first
+//!   folder holding all four: the executable's (where the installer puts them), then the
+//!   absolute folders of `PATH` (development builds, an FFmpeg installed elsewhere); never
+//!   the current directory. Their own dependencies (`swresample-6.dll`…) are resolved in the
+//!   same folder, then in System32.
+//!
+//! The executable keeps no dependency on them (no `DT_NEEDED`, no import entry): no function
+//! of `ffmpeg-sys-next` is referenced, every call goes through the table below
+//! (`ffmpeg::tests::every_ffmpeg_call_is_loaded_at_run_time` checks the sources), so it starts
+//! and plays scenes where FFmpeg is missing; video wallpapers then fail with the loader's
+//! message. FFmpeg stays a separate, replaceable shared library (deny.toml, LGPL rule).
+//!
+//! Elsewhere the functions of `ffmpeg-sys-next` are linked as before, and [`load`] does
+//! nothing.
 
 pub(crate) use ffmpeg_sys_next::*;
 
 /// Declares the functions loaded from each library: a wrapper per function with the
 /// signature of `ffmpeg-sys-next` (checked by a test), which shadows the linked one.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 macro_rules! ffmpeg_api {
     ($( $lib:ident ($major:expr) { $( fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?; )* } )*) => {
         #[allow(non_snake_case)]
@@ -28,7 +38,8 @@ macro_rules! ffmpeg_api {
 
         impl Api {
             fn open() -> Result<Self, String> {
-                $( let $lib = dl::Library::open(stringify!($lib), $major)?; )*
+                let set = dl::LibrarySet::locate(&[$( (stringify!($lib), $major), )*])?;
+                $( let $lib = set.open(stringify!($lib), $major)?; )*
                 // SAFETY: each symbol is the FFmpeg function of that name, from the library
                 // of the major version the bindings (and so the signatures) come from.
                 unsafe {
@@ -68,7 +79,7 @@ macro_rules! ffmpeg_api {
     };
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 ffmpeg_api! {
     avutil(LIBAVUTIL_VERSION_MAJOR) {
         fn av_buffer_ref(buf: *const AVBufferRef) -> *mut AVBufferRef;
@@ -188,11 +199,11 @@ ffmpeg_api! {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 static API: std::sync::OnceLock<Result<Api, String>> = std::sync::OnceLock::new();
 
 /// Opens the FFmpeg libraries (once; later calls return the first outcome).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn load() -> Result<(), String> {
     API.get_or_init(|| {
         let t0 = std::time::Instant::now();
@@ -210,7 +221,7 @@ pub(crate) fn load() -> Result<(), String> {
     .map_err(Clone::clone)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn api() -> &'static Api {
     match API.get_or_init(Api::open) {
         Ok(api) => api,
@@ -220,7 +231,7 @@ fn api() -> &'static Api {
 }
 
 /// Linked at build time: nothing to load.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn load() -> Result<(), String> {
     Ok(())
 }
@@ -228,6 +239,19 @@ pub(crate) fn load() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 mod dl {
     use std::ffi::{CStr, CString, c_void};
+
+    /// Libraries are found by soname through the dynamic loader's search path.
+    pub(super) struct LibrarySet;
+
+    impl LibrarySet {
+        pub(super) fn locate(_libraries: &[(&str, libc::c_int)]) -> Result<Self, String> {
+            Ok(Self)
+        }
+
+        pub(super) fn open(&self, name: &str, major: libc::c_int) -> Result<Library, String> {
+            Library::open(name, major)
+        }
+    }
 
     /// A library opened for the rest of the process (never closed: FFmpeg objects and
     /// threads may outlive any owner here).
@@ -270,6 +294,128 @@ mod dl {
             let p = unsafe { libc::dlsym(self.handle, c.as_ptr()) };
             if p.is_null() {
                 Err(format!("{}: {}", self.name, last_error()))
+            } else {
+                Ok(p)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod dl {
+    use std::ffi::{CStr, c_char, c_void};
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    /// `LoadLibraryExW` flags: the DLL's own dependencies are looked for in its folder, then
+    /// in the application folder and System32 (never the current directory or `PATH`).
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
+    const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
+    /// `ERROR_MOD_NOT_FOUND`.
+    const MOD_NOT_FOUND: i32 = 126;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryExW(file: *const u16, reserved: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    /// File name of FFmpeg's shared builds: `avcodec-62.dll`.
+    fn file_name(name: &str, major: libc::c_int) -> String {
+        format!("{name}-{major}.dll")
+    }
+
+    /// The folder all the DLLs are loaded from.
+    pub(super) struct LibrarySet {
+        dir: PathBuf,
+    }
+
+    impl LibrarySet {
+        /// The executable's folder, then the absolute folders of `PATH`: the first one holding
+        /// every library.
+        pub(super) fn locate(libraries: &[(&str, libc::c_int)]) -> Result<Self, String> {
+            let files: Vec<String> = libraries.iter().map(|&(n, m)| file_name(n, m)).collect();
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf));
+            let path_dirs = std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let complete = |d: &Path| files.iter().all(|f| d.join(f).is_file());
+            let found = exe_dir
+                .iter()
+                .chain(path_dirs.iter().filter(|d| d.is_absolute()))
+                .find(|d| complete(d));
+            if let Some(dir) = found {
+                tracing::debug!("FFmpeg DLLs found in {}", dir.display());
+                return Ok(Self { dir: dir.clone() });
+            }
+            let mut message = format!(
+                "the FFmpeg 8 DLLs ({}) are neither next to the executable",
+                files.join(", ")
+            );
+            if let Some(dir) = &exe_dir {
+                message += &format!(" ({})", dir.display());
+                let missing: Vec<&str> = files
+                    .iter()
+                    .filter(|f| !dir.join(f).is_file())
+                    .map(String::as_str)
+                    .collect();
+                if missing.len() < files.len() {
+                    message += &format!(", where {} is missing,", missing.join(", "));
+                }
+            }
+            Err(message + " nor in a folder of PATH")
+        }
+
+        pub(super) fn open(&self, name: &str, major: libc::c_int) -> Result<Library, String> {
+            let path = self.dir.join(file_name(name, major));
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            // SAFETY: NUL-terminated absolute path; FFmpeg's DLL initialisers have no
+            // precondition.
+            let handle = unsafe {
+                LoadLibraryExW(
+                    wide.as_ptr(),
+                    std::ptr::null_mut(),
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+                )
+            };
+            if handle.is_null() {
+                let e = std::io::Error::last_os_error();
+                let hint = if e.raw_os_error() == Some(MOD_NOT_FOUND) {
+                    " (a DLL it depends on, such as swresample, is missing from that folder)"
+                } else {
+                    ""
+                };
+                return Err(format!("FFmpeg 8 DLL {}: {e}{hint}", path.display()));
+            }
+            Ok(Library {
+                handle,
+                name: file_name(name, major),
+            })
+        }
+    }
+
+    /// A DLL loaded for the rest of the process (never freed: FFmpeg objects and threads may
+    /// outlive any owner here).
+    pub(super) struct Library {
+        handle: *mut c_void,
+        name: String,
+    }
+
+    impl Library {
+        /// Address of `symbol` (NUL-terminated).
+        pub(super) fn symbol(&self, symbol: &str) -> Result<*mut c_void, String> {
+            let c = CStr::from_bytes_with_nul(symbol.as_bytes()).map_err(|e| e.to_string())?;
+            // SAFETY: valid module handle and NUL-terminated name.
+            let p = unsafe { GetProcAddress(self.handle, c.as_ptr()) };
+            if p.is_null() {
+                let e = std::io::Error::last_os_error();
+                Err(format!(
+                    "{}: {}: {e}",
+                    self.name,
+                    &symbol[..symbol.len() - 1]
+                ))
             } else {
                 Ok(p)
             }

@@ -13,8 +13,10 @@ image that the compositor scales to the outputs (fill/fit/stretch/default, clamp
 - `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/research/platform.md`, `deny.toml`.
 - Public documentation: FFmpeg 8 headers and API docs (`hwcontext_vulkan.h`, `avcodec.h`),
   FFmpeg 8.0 library sources read only to learn the API contract of a caller-provided
-  Vulkan device (queue families, frame locking, semaphores), Vulkan specification, wgpu /
-  wgpu-hal 30 docs. Reference wallpaper 3655057993 used as test input only.
+  Vulkan device (queue families, frame locking, semaphores), FFmpeg's `-init_hw_device`
+  documentation (D3D11VA device = DXGI adapter index), Vulkan specification, wgpu /
+  wgpu-hal 30 docs, Win32 documentation (`LoadLibraryExW` search flags, `dxgi.h`).
+  Reference wallpaper 3655057993 used as test input only.
 
 No upstream code, fork or third-party Wallpaper Engine reimplementation was read.
 
@@ -34,18 +36,32 @@ wrappers of its own. FFmpeg stays a separate shared library; `build.rs` also rej
 `FFMPEG_STATIC`/`PKG_CONFIG_ALL_STATIC`. The WTFPL exception was already prepared in
 `deny.toml` (legal confirmation still pending there).
 
-**Loaded at the first video (Linux).** FFmpeg's libraries pull ≈ 135 other libraries; linked to
-the executable they were mapped at every start, scenes included (24.9 MiB RSS, 12–18 ms of
-start-up). `ffmpeg::sys` re-exports the types and constants of `ffmpeg-sys-next` and replaces
-its 40 functions with wrappers over a table that `dlopen`/`dlsym` (libc, no new crate) fill on
-the first call of `load_decoder` (`VideoPlayer::open`, and lumenwall-engine's support check of
-a video wallpaper): `libavutil.so.60`, `libswscale.so.9`, `libavcodec.so.62`,
-`libavformat.so.62`, the majors of the headers the bindings come from, never closed. The
-executable has no `DT_NEEDED` on FFmpeg (`readelf -d lumenwall`: libasound, libpulse, libgcc_s,
-libm, libc), so it also starts where FFmpeg is missing (video wallpapers then fail with the
-loader's message). Loading takes 13–15 ms at the first video. The wrappers have the bindings'
-signatures (checked at compile time by a test) and a test fails if a call bypasses the table.
-On Windows the functions stay linked through the import libraries of the DLLs.
+**Loaded at the first video (Linux, Windows).** FFmpeg's libraries pull ≈ 135 other libraries;
+linked to the executable they were mapped at every start, scenes included (24.9 MiB RSS,
+12–18 ms of start-up). `ffmpeg::sys` re-exports the types and constants of `ffmpeg-sys-next`
+and replaces its 40 functions with wrappers over a table filled on the first call of
+`load_decoder` (`VideoPlayer::open`, and lumenwall-engine's support check of a video
+wallpaper), for the majors of the headers the bindings come from, never closed:
+
+- Linux: `dlopen`/`dlsym` (libc, no new crate) of `libavutil.so.60`, `libswscale.so.9`,
+  `libavcodec.so.62`, `libavformat.so.62`. The executable has no `DT_NEEDED` on FFmpeg
+  (`readelf -d lumenwall`: libasound, libpulse, libgcc_s, libm, libc). Loading takes 13–15 ms.
+- Windows: `LoadLibraryExW`/`GetProcAddress` (kernel32, declared by hand: no new crate) of
+  `avutil-60.dll`, `swscale-9.dll`, `avcodec-62.dll`, `avformat-62.dll` by full path, from
+  the first folder holding all four: the executable's (the installer's layout), then the
+  absolute folders of `PATH` (`cargo test`/examples, an FFmpeg installed elsewhere), never the
+  current directory. `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`:
+  their own dependencies (`swresample-6.dll`, system DLLs) come from the same folder, then
+  System32. The import libraries are linked but no function is referenced, so `lumenwall.exe`
+  has no import entry on FFmpeg (`llvm-readobj --coff-imports`; CI starts it with only the
+  Windows folders on `PATH`). Loading takes 6–8 ms at the first video (BtbN's build, 128 MiB
+  of DLLs, warm file cache).
+
+The executable therefore starts and plays scenes where FFmpeg is missing; video wallpapers then
+fail with the loader's message (Windows: `the FFmpeg 8 DLLs (avutil-60.dll, swscale-9.dll,
+avcodec-62.dll, avformat-62.dll) are neither next to the executable (…) nor in a folder of
+PATH`, test `missing_ffmpeg`). The wrappers have the bindings' signatures (checked at compile
+time by a test) and a test fails if a call bypasses the table.
 
 ## Decoding paths (chosen at open, automatic fallback)
 
@@ -68,18 +84,30 @@ turn, then hands the decoder to its thread. Candidates for `--hwdec auto`:
    layout/value in the `AVVkFrame`, so FFmpeg's next use of the image waits for our read.
    Works on NVIDIA (proprietary 595) and AMD (RADV, iGPU) here; needs Vulkan 1.3, the
    decode extensions and separate compute/transfer families. NV12 only (other formats,
-   e.g. 10-bit P010, use the download path of the same decoder).
+   e.g. 10-bit P010, use the download path of the same decoder). Also works on Windows 11
+   when wgpu renders through Vulkan (lumenwall-render prefers it to DX12): NVIDIA driver
+   621.01 and AMD's driver for a Radeon iGPU, with BtbN's FFmpeg 8.1 build (built with
+   `--enable-vulkan`).
 2. **Hardware decoder of the rendering GPU, frames copied** (`ffmpeg::hw`): NVIDIA → CUDA
    (NVDEC), then FFmpeg's own Vulkan device; AMD/Intel → VA-API on the render node of the
-   rendering GPU (PCI bus id, then vendor), then Vulkan; Windows → D3D11VA. Decoded frames
-   are downloaded (`av_hwframe_transfer_data`) into pooled frames, then uploaded.
+   rendering GPU (PCI bus id, then vendor), then Vulkan; Windows → D3D11VA on the DXGI
+   adapter wgpu renders on (`select::pick_dxgi_adapter`: same PCI vendor and device ids,
+   else same vendor; FFmpeg's default adapter when wgpu renders on WARP), enumerated with
+   raw COM calls (`ffmpeg::dxgi`), except on NVIDIA where CUDA comes first (FFmpeg's D3D11
+   download costs ≈ 3× NVDEC's copy there, see the measurements) and D3D11VA second.
+   Decoded frames are downloaded (`av_hwframe_transfer_data`) into pooled frames, then
+   uploaded.
 3. **Software** (libavcodec frame + slice threads), planes uploaded.
 
 `--hwdec nvdec-copy` = CUDA then software; `--hwdec no` = software. A decoder that silently
 falls back to software (`get_format` without the hardware format) counts as a failure of its
 candidate. `LUMENWALL_VIDEO_DECODERS=zerocopy,cuda,vulkan,vaapi,d3d11va` overrides the order of
 `auto` (measurements); `LUMENWALL_FFMPEG_LOG=warning|info|verbose|debug` raises FFmpeg's log level
-(errors only by default).
+(errors only by default). The tests and `video_png` honour `WGPU_BACKEND=vulkan|dx12`.
+
+The chosen path is logged at `info` when a video opens, e.g. `video: D3D11VA decoder on device
+0 (NVIDIA GeForce RTX 4080 SUPER)` and `video '…': h264 3840x2160 (d3d11 (nv12)), … D3D11VA
+hardware decoding, copy through system memory`.
 
 DMA-BUF import (VA-API → `texture_from_dmabuf_fd`) was not needed: FFmpeg's Vulkan decoder
 gives true zero copy on the same device with AMD's RADV too, without per-frame imports; wgpu
@@ -137,12 +165,38 @@ RGB, gray, big-endian) are converted to 8-bit 4:4:4 by libswscale (warning logge
 - Colors: PSNR 58.5 dB against libswscale's accurate BT.709 limited → RGB conversion of the
   same frame (identical for zero copy and copy paths); AMD RADV zero copy 57.5 dB.
 
+### Windows 11 (RTX 4080 SUPER, driver 621.01, and an AMD Radeon integrated GPU; BtbN FFmpeg 8.1.3 LGPL; same video)
+
+`lumenwall.exe` (release, `--silent -w 40x40x640x360`, default 30 fps cap, Vulkan), steady
+state over 10 s after 4 s of warm-up:
+
+| Path | Process CPU (% of one core) | Working set | Private bytes |
+|---|---|---|---|
+| **Zero copy** (default here) | **3.0 %** | 233 MiB | 459 MiB |
+| D3D11VA + copy (`LUMENWALL_VIDEO_DECODERS=d3d11va`) | 38.9 % | 334 MiB | 705 MiB |
+
+`video_png --bench 12 --fps 30` (dev profile, dependencies optimised), process CPU time for
+12 s of video, as % of one core at real time; throughput in parentheses:
+
+| Path | RTX 4080 SUPER | AMD iGPU (`--low-power`) |
+|---|---|---|
+| Zero copy (Vulkan) | 6.2 % (4.3×) | 8.2 % (3.7×) |
+| NVDEC (CUDA) + copy | 12.9 % (3.8×) | — |
+| D3D11VA + copy, wgpu on Vulkan | 38.0 % (3.5×) | 13.7 % (2.8×) |
+| D3D11VA + copy, wgpu on DX12 | 35.7 % (3.4×) | 13.2 % (3.1×) |
+| Software | 140.9 % (7.8×) | — |
+
+The plane upload costs the same on every copy path (1.3–1.5 ms per 4K frame), so NVIDIA's
+extra D3D11VA cost is in FFmpeg's D3D11 download (staging copy + `Map`), hence CUDA first on
+NVIDIA. Every hardware path gives the software frame (GPU test, mean difference < 0.5/255),
+on Vulkan and on DX12 (`WGPU_BACKEND=dx12`).
+
 ## Build and test
 
 | Feature | Default | Notes |
 |---|---|---|
 | `ffmpeg` | off | lumenwall-engine enables it on Linux (FFmpeg 8 dev files + libclang for bindgen; CI's setup action installs them). Without it `VideoPlayer::open` returns `VideoError::Unsupported` and video wallpapers are refused with a clear message. |
-| lumenwall-engine `video-ffmpeg` | off | Windows: an FFmpeg 8 shared build; `FFMPEG_DIR` (include + lib). |
+| lumenwall-engine `video-ffmpeg` | off | Windows: an FFmpeg 8 shared build; `FFMPEG_DIR` (include + lib), libclang. Release builds turn it on. |
 
 - `cargo test -p lumenwall-video --features ffmpeg`: pacing (loop timeline, decimation, clock),
   queue, decoder selection, pixel-format layouts; lumenwall-render: conversion matrices
@@ -155,9 +209,62 @@ RGB, gray, big-endian) are converted to 8-bit 4:4:4 by libswscale (warning logge
   (PNG to `target/agent-video/shots`), `--bench SECONDS` for throughput, `--low-power` for
   the integrated GPU. Through the engine:
   `cargo run -p lumenwall-engine --release --example render_png -- --scaling fill 3655057993`.
-- Windows: `cargo check/clippy --target x86_64-pc-windows-gnu` pass without FFmpeg, and with
-  `--features lumenwall-engine/video-ffmpeg` when `FFMPEG_DIR` points at FFmpeg 8 headers. Never
-  run on Windows.
+### Windows
+
+`ffmpeg-sys-next` generates its bindings from FFmpeg's headers (bindgen, libclang) and links
+the import libraries, so the feature needs an FFmpeg 8 SDK at build time; the workspace check
+without it builds and tests everything else. Development and CI use the same official LGPL
+build (never a GPL or static one), unpacked outside the repository:
+
+- URL: <https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1.zip>
+  (BtbN's FFmpeg-Builds, release branch 8.1, `lgpl-shared`; month-end autobuilds are kept
+  two years)
+- SHA-256: `5cef7bc48e513f3cee7c881e8b2999d835541edb1846c3e89443a67f8f8556ab`
+- Contents: `bin/` (DLLs, `ffmpeg.exe`), `include/`, `lib/` (`avcodec.lib`… MSVC import
+  libraries), `LICENSE.txt` (LGPL-3.0: the build uses `--enable-version3`).
+
+```powershell
+# Unpacked in %LOCALAPPDATA%\lumenwall-dev\ffmpeg\extract\ffmpeg-n8.1.3-…-lgpl-shared-8.1
+$env:FFMPEG_DIR = "$env:LOCALAPPDATA\lumenwall-dev\ffmpeg\extract\ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-shared-8.1"
+$env:PATH = "$env:FFMPEG_DIR\bin;$env:PATH"          # DLLs for tests and examples
+$env:CARGO_TARGET_DIR = "target/agent-<name>"
+cargo test -p lumenwall-video --features ffmpeg
+$env:LUMENWALL_GPU_TESTS = "1"; $env:LUMENWALL_WE_WORKSHOP = "C:\Program Files (x86)\Steam\steamapps\workshop\content\431960"
+cargo test -p lumenwall-video --features ffmpeg -- --ignored gpu      # zero copy (Vulkan)
+$env:WGPU_BACKEND = "dx12"; cargo test -p lumenwall-video --features ffmpeg -- --ignored gpu   # D3D11VA copy
+cargo build -p lumenwall --release --features lumenwall-engine/video-ffmpeg
+```
+
+- libclang: bindgen finds `C:\Program Files\LLVM\bin\libclang.dll`; elsewhere set
+  `LIBCLANG_PATH`. `ffmpeg-sys-next`'s build script also compiles a small C probe with MSVC.
+- sccache as `rustc-wrapper` fails on `ffmpeg-sys-next` (its build script emits ≈ 1 400
+  `--cfg` flags; sccache re-spawns rustc with a 40 000-character command line, over
+  Windows' 32 767-character limit: os error 206): build the feature with `RUSTC_WRAPPER=`
+  (empty).
+- CI: job `video (Windows, FFmpeg)` (`docs/CI.md`).
+
+### Windows distribution (for the release workflow and the installer)
+
+- Build: the setup action with `ffmpeg: "true"`, then
+  `cargo build --workspace --release --locked --target x86_64-pc-windows-msvc --features lumenwall-engine/video-ffmpeg`
+  (no sccache; `FFMPEG_STATIC`/`PKG_CONFIG_ALL_STATIC` are rejected by `build.rs`). The
+  third-party notices must be generated with the same feature, so that `ffmpeg-sys-next`
+  (WTFPL) is listed.
+- Ship next to `lumenwall.exe`, from the same archive's `bin/`: `avutil-60.dll`,
+  `swresample-6.dll` (needed by avcodec), `swscale-9.dll`, `avcodec-62.dll`,
+  `avformat-62.dll` (128 MiB, 51 MiB gzip-compressed). Not `avfilter`/`avdevice` nor the
+  `.exe` tools.
+- Licence: LGPL-3.0-or-later (the build uses `--enable-version3`): the archive's
+  `LICENSE.txt` (LGPLv3 text) plus the GPLv3 text it incorporates, a notice that Lumenwall
+  uses FFmpeg under the LGPL, and the corresponding source of that exact build (FFmpeg
+  `n8.1.3-27-g8dca1586f4` and BtbN's build scripts at the `autobuild-2026-10-31-12-59` tag).
+  BtbN's DLLs also contain statically linked libraries (dav1d, libvpx, libaom, OpenH264,
+  libass, HarfBuzz, FreeType… see `ffmpeg -buildconf`) whose notices are not in the archive.
+  The legal check of `deny.toml` is still pending; a minimal LGPL build of our own (only the
+  demuxers, decoders and hwaccels a wallpaper needs) would be much smaller and carry far
+  fewer notices.
+- The DLLs stay replaceable by the user (loaded by name at run time, never statically
+  linked), which is what the LGPL asks of a combined work.
 
 ## Deviations and decisions
 
@@ -182,7 +289,17 @@ RGB, gray, big-endian) are converted to 8-bit 4:4:4 by libswscale (warning logge
   only). Zero copy is NV12 only (10-bit streams go through the download path).
 - Audio and video loops are independent: a sound track a few ms longer than the picture
   drifts slowly over many loops (the reference wallpaper's track is 7 ms longer).
-- Zero copy needs Vulkan (Linux, and Windows when wgpu picks Vulkan); on DX12 Windows uses
-  D3D11VA with a copy (D3D11 shared-texture import not written, never tested on Windows).
+- Zero copy needs Vulkan (Linux, and Windows when wgpu picks Vulkan, the default when the
+  driver has it); on DX12 Windows copies through system memory (NVDEC on NVIDIA, D3D11VA
+  elsewhere). Zero copy
+  on DX12 (follow-up) would mirror the Vulkan path with FFmpeg's D3D12VA device
+  (`AV_HWDEVICE_TYPE_D3D12VA`, FFmpeg ≥ 7) on wgpu's own `ID3D12Device`: lumenwall-render
+  would expose the raw device and queue (wgpu-hal `as_hal::<Dx12>`), FFmpeg's
+  `AVD3D12VAFrame` NV12 resources would be wrapped once each (`texture_from_raw` +
+  `create_texture_from_hal`, plane views `R8Unorm`/`Rg8Unorm`, wgpu's `TEXTURE_FORMAT_NV12`),
+  and each frame's fence would be waited on wgpu's queue (`ID3D12CommandQueue::Wait`) and
+  signalled back after the conversion. The D3D11VA route (copy into a shared NT-handle
+  texture opened by D3D12, keyed mutex or shared fence) also works but keeps a GPU copy.
 - Untested here: VA-API copy path (the AMD iGPU decodes zero copy through RADV instead),
-  Intel GPUs, Windows, Wayland layer-shell compositors.
+  Intel GPUs, Wayland layer-shell compositors, two GPUs of the same vendor on Windows
+  (`pick_dxgi_adapter` is unit tested only for that case).

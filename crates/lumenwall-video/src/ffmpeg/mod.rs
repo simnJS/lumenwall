@@ -1,5 +1,5 @@
 //! FFmpeg demuxing and decoding (feature `ffmpeg`), raw `ffmpeg-sys-next` FFI through [`sys`]
-//! (FFmpeg's libraries are opened at the first video on Linux).
+//! (FFmpeg's libraries are opened at the first video on Linux and Windows).
 //!
 //! [`Source`] owns the demuxer and the decoder and runs on the decoding thread (it is opened
 //! on the caller's thread, which decodes the first frame to size the GPU resources). It
@@ -7,6 +7,8 @@
 //! shown), flushed, and the demuxer seeks back to the start while [`LoopTimeline`] keeps the
 //! media time continuous.
 
+#[cfg(windows)]
+mod dxgi;
 pub(crate) mod hw;
 mod io;
 pub(crate) mod sys;
@@ -962,7 +964,7 @@ mod tests {
 
     /// Every FFmpeg function this crate calls goes through the run-time table of `sys`: a call
     /// to a function missing there would link FFmpeg to the executable again.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn every_ffmpeg_call_is_loaded_at_run_time() {
         sys::same_signatures();
