@@ -53,6 +53,11 @@ The script prints its time estimate first. Results go to `-OutDir` (default
 | `-LumenwallOutputs` | all | Lumenwall outputs (`DISPLAY1`, …) given as `-r <output> --bg <wallpaper>`; empty = the wallpaper alone, every monitor. Keep the same monitors as `-WeMonitors`. |
 | `-IpcEndpoint` | `lumenwall-bench-vs-we` | Private named pipe of the bench daemon (`LUMENWALL_IPC_ENDPOINT`). |
 | `-RelaunchLumenwall` | off | Start the user's daemon (`lumenwall.exe`, no arguments) at the end even when it was not running at the start. |
+| `-UserLumenwallExe` | the daemon running at the start, else `-LumenwallExe` | The user's own daemon, relaunched at the end. Set `-LumenwallExe` to a development build and the user keeps their installed daemon. |
+| `-LumenwallLocalAppData` | the user's | `LOCALAPPDATA` of the bench daemon and its client commands: its shader, pipeline and Vulkan driver caches stay out of `%LOCALAPPDATA%\Lumenwall` (the log still goes to the user's log folder). |
+| `-WarmLumenwall` | off | Show each wallpaper for 5 s on the bench daemon before the measured runs, so a fresh private cache is filled. |
+| `-Engines` | `we,lumenwall` | Measure one engine only (no Lumenwall bench daemon when it is left out). |
+| `-LumenwallEnv` | none | `NAME=value` switches for the bench daemon (recorded in `machine.json`), to compare variants of one build. |
 | `-KeepWallpaperEngine` | off | Leave WE running at the end. By default it is closed, and the last idle baseline is taken with neither engine running. |
 | `-WeConfigReference` | none | WE `config.json` to put back at the end instead of the copy taken at the start (useful when an earlier start of WE already rewrote it). |
 | `-CoverWaitSeconds`, `-AllowCoveringWindows` | 180, off | See the prerequisites. |
@@ -123,6 +128,9 @@ the notes.
 | `processes.csv` | Per process of the tree over each window (to see which process does the work). |
 | `results.csv`, `summary.md` | Written by `summarize.ps1`. |
 | `restore.json`, `backup\` | The restore checks and the backups. |
+
+Wallpaper Engine's `-playInWindow` is not offered: `-control mute` does not reach a wallpaper played in a
+window (measured: audible).
 
 ## Limits
 

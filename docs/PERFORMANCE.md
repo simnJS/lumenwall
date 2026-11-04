@@ -83,7 +83,7 @@ Facts measured while the GPU release was written; they size the next optimisatio
 | Scene → hot-loaded video → scene (`apply` over IPC) | RSS 194 → 569 → 305 MiB (heap 102 MiB kept); `malloc_trim(0)`: 227 MiB in 5 ms. Zero-copy video → scene: 253 → 218 MiB after trim. `glibc.malloc.arena_max=2`: no change; jemalloc (`LD_PRELOAD`): no reduction |
 | Video applied to a scene device (no decode queues) | NVDEC + copy: 8.3 % CPU, 1480 wake-ups/s, RSS 600 MiB, VRAM 683 MiB; the same video started alone (zero copy): 2.5 %, 783 wake-ups/s, 274 MiB, 222 MiB. A scene device created with decode queues: +4 MiB VRAM, +7–17 MiB RSS, +35–55 ms device creation, same wake-ups |
 | Render targets (headless) | 3463520581: 452 MiB of targets, 388 MiB of image composites, of which 121 MiB (B) and 10 MiB (A) are never written; 1960765686: 253 MiB of targets, 190 MiB of composites never written |
-| GPU time | Headless at full clocks: 0.35–0.80 ms/frame for the heaviest scenes (3840×2160). In a 480×270 window the scene still renders at its own size: 5.8–7.3 ms/frame at the low clocks the driver keeps |
+| GPU time | Headless at full clocks: 0.35–0.80 ms/frame for the heaviest scenes (3840×2160). In a 480×270 window the scene still renders at its own size: 5.8–7.3 ms/frame at the low clocks the driver keeps (since part A below, scenes render at the size they are displayed at) |
 | Web 3044696375, Chromium switches (`--renderer-process-limit=1`, `--disable-background-networking`, `--num-raster-threads=1`, `--js-flags=--lite-mode`, `--enable-low-end-device-mode`) | 6.1–7.6 % CPU and 445–463 MiB PSS against 6.6 % and 459 MiB without: no gain beyond noise |
 
 ### Optimisations from the baseline (same machine and method)
@@ -108,3 +108,124 @@ The five together, baseline build against the last one, runs interleaved:
 | Scene → video → scene over IPC | video: 9.7–10.3 % CPU, 1780–1960 wake-ups/s, RSS 568 MiB, VRAM 675 MiB; scene again: RSS 304 MiB, VRAM 258 MiB; switch 185–208 ms | 2.2–2.3 %, 610–830 wake-ups/s, RSS 203 MiB, VRAM 222 MiB; RSS 165–172 MiB, VRAM 174 MiB; 231 ms (the first video of a process loads FFmpeg, 13–15 ms) |
 | GPU released after a pause | 3018340632 RSS 117 MiB (163 shared objects), 3463520581 130 MiB | 30 MiB (35), 38 MiB |
 | VRAM in the window | 3463520581 642 MiB, 1960765686 436 MiB | 514 MiB, 245 MiB |
+
+## Windows, part A: GPU, VRAM and render thread against Wallpaper Engine
+
+### Starting point (desktop)
+
+Release build of main 376a97d against Wallpaper Engine 2.8.42 (ultra preset), `tools/bench-vs-we/`, monitor 1
+(2560×1440), 30 fps, 3 repetitions of 30 s, 4 November 2026, system CPU 8–10 % (details and raw data:
+[`benchmarks/lumenwall-vs-wallpaper-engine.md`](benchmarks/lumenwall-vs-wallpaper-engine.md#starting-point-release-build-of-main)).
+Main measured the same as the installed 0.1.0.
+
+| Wallpaper | Engine | CPU (% of a core) | Private | GPU 3D | Dedicated VRAM | Shared GPU memory | Command → first GPU |
+|---|---|---|---|---|---|---|---|
+| 3463520581 (3840×2160) | Wallpaper Engine | 2.71 | 517 MiB | 3.23 % | 323 MiB | 3 MiB | 462 ms |
+| 3463520581 | Lumenwall main | 5.50 | 703 MiB | 6.63 % | 608 MiB | 43 MiB | 808 ms |
+| 3018340632 (3440×1440) | Wallpaper Engine | 1.51 | 284 MiB | 2.89 % | 275 MiB | 3 MiB | 331 ms |
+| 3018340632 | Lumenwall main | 2.94 | 356 MiB | 5.21 % | 264 MiB | 43 MiB | 719 ms |
+
+Black-box hint about the render size: Wallpaper Engine's GPU time over Lumenwall's is 0.555 on 3018340632
+(shown at 2560×1072: 0.553 of the scene's pixels) and 0.487 on 3463520581 (0.444): Wallpaper Engine renders the
+whole scene, image chains included, at the size it is displayed at. On NVIDIA/Windows every Vulkan memory block
+is also committed private memory, so the private bytes follow the GPU memory below.
+
+### Changes
+
+Measured headless (`render_png` example, release, RTX 4080 SUPER, driver 621.01, Vulkan, output 2560×1440,
+BelowNormal priority while the PC was in use). Each line against the line before.
+
+| Change | Effect |
+|---|---|
+| Render-graph aliasing: a scene builder allocates its render targets when the scene is built; transient targets (composites, effect `fbos`, bloom) whose frame lifetimes (first to last access) do not overlap share one texture. A target read before it is written in a frame (feedback, accumulation) keeps its own; the first draw into a shared texture clears it | Pixel-identical on the 8 scenes. Tracked GPU memory of 3463520581 386 → 268 MiB |
+| `_rt_FullFrameBuffer` (and bloom, `_rt_Reflection`) at the displayed size: `render_scale` = displayed pixels per scene pixel on the largest output showing the scene, at most 1. The camera keeps the scene's space | 3463520581: 268 → 233 MiB, GPU 0.83 → 0.63 ms/frame (full clocks, frame only) |
+| Image composites and effect targets at the displayed size too, reporting their nominal size to the shaders (`RenderTarget::resolution`): texel offsets keep their length in texture coordinates (blur radii, aberration offsets) and only the sampling density follows the output. `LUMENWALL_FULL_SIZE_CHAINS=1` keeps them at the scene's size (read once in `build_scene`, where an engine setting will plug in) | 3018340632: 0.47 → 0.32 ms/frame, 98 → 76 MiB; 3463520581: 233 → 213 MiB |
+| Flexible aliasing: a target rendered below its nominal size may be rendered up to 1.5× larger to share a texture with a target of a close size | 3463520581: render targets 148 → 80 MiB, GPU time unchanged (0.514 / 0.529 ms) |
+| Allocator blocks 4–8 MiB (`MemoryHints::Manual`) instead of 8–64 MiB: targets and textures above 8 MiB get memory of their exact size | Reserved − allocated: 3463520581 88 → 27 MiB, 3018340632 68 → 13 MiB; steady dedicated VRAM 355 → 295 and 174 → 119 MiB |
+| Two swap-chain images on Windows (frame latency 1): at 30 fps the presented image is released long before the next frame | One output-sized image less: 14 MiB per 2560×1440 output (by construction, not measured headless) |
+| Per-frame uploads through a `wgpu::util::StagingBelt` (dirty uniform range and particle streams copied in the frame's encoder) | No staging buffer created per call any more (`Queue::write_buffer` made one per particle stream write) |
+| Dependencies and hazard copies from the slots a shader samples only: `genericimage4` names `_rt_FullFrameBuffer` in slots its compiled combination never samples | The 4 full-scene hazard copies of 3463520581 and their 14 MiB scratch target are gone; pixel-identical |
+| Frame reordering (`schedule.rs`): image chains first, scene draws together, every conflicting pair of operations kept in order; budget of 8 MiB of transient targets kept alive by deferred draws | 3463520581: render passes 89 → 65, GPU 0.470 → 0.414 ms, `finish` 0.39 → 0.33 ms, reserved memory unchanged (191.9 MiB); pixel-identical with the aliasing slack at 1 |
+
+### Before and after (headless, same session, 3 runs each)
+
+| | 3463520581 main | 3463520581 now | 3018340632 main | 3018340632 now |
+|---|---|---|---|---|
+| GPU per frame (composition included, clocks of the moment) | 1.14–1.16 ms | 0.65–0.69 ms | 0.70–0.74 ms | 0.35–0.36 ms |
+| Render-thread CPU per frame (update, encode, `finish`, submit, composition) | 0.87–0.89 ms | 0.41–0.52 ms | 0.22–0.23 ms | 0.19–0.22 ms |
+| of which wgpu's `CommandEncoder::finish` | – | 0.30–0.40 ms | – | 0.13–0.15 ms |
+| Render passes and copies per frame | 96 | 65 | 24 | 23 |
+| GPU memory tracked by Lumenwall | 386 MiB | 136 MiB | 127 MiB | 76 MiB |
+| Allocator reserved / allocated | – | 192 / 175 MiB | – | 112 / 99 MiB |
+| Dedicated VRAM of the process (steady) | 515 MiB | 199 MiB | 235 MiB | 119 MiB |
+| Shared GPU memory | 28 MiB | 22 MiB | 18 MiB | 18 MiB |
+| Private bytes | 603–638 MiB | 296–344 MiB | 335–368 MiB | 206–255 MiB |
+
+Headless runs have no swap chain but a 2560×1440 output texture and its PNG read-back buffer (14 MiB each).
+
+### Projection to the desktop bench against Wallpaper Engine
+
+Desktop = main's desktop value scaled by the headless ratio (GPU time) or shifted by the headless difference
+(memory, minus one swap-chain image). To be confirmed by the final bench.
+
+| Metric | 3463520581 main → projected (WE) | 3018340632 main → projected (WE) |
+|---|---|---|
+| Dedicated VRAM | 608 → ≈ 278 MiB (323) | 264 → ≈ 134 MiB (275) |
+| Private bytes (follow VRAM) | 703 → ≈ 390 MiB (517) | 356 → ≈ 240 MiB (284) |
+| GPU 3D | 6.63 → ≈ 3.3–3.8 % (3.23) | 5.21 → ≈ 2.5 % (2.89) |
+| Shared GPU memory | 43 → ≈ 37–43 MiB (3) | 43 → ≈ 43 MiB (3) |
+
+Still above Wallpaper Engine: GPU time on 3463520581 (borderline: 55 composite render passes of tiny draws,
+each with its barrier) and shared GPU memory. The shared memory is a baseline of the Vulkan device here: 18–20
+MiB headless on every scene measured (2 to 156 passes), plus about 20 MiB on the desktop (the swap chain and its
+presentation); Wallpaper Engine (Direct3D 11) shows 3 MiB. Direct3D 12 through wgpu is worse (below).
+
+### Vulkan or Direct3D 12 (headless, same build, `LUMENWALL_GPU_BACKEND`)
+
+| | 3463520581 Vulkan | 3463520581 DX12 | 3018340632 Vulkan | 3018340632 DX12 |
+|---|---|---|---|---|
+| GPU per frame | 0.68 ms | 0.91 ms | 0.35 ms | 0.38 ms |
+| `finish` + submit | 0.84 ms | 0.78 ms | 0.20 ms | 0.34 ms |
+| Scene load | 543 ms | 1178 ms | 548 ms | 684 ms |
+| Dedicated / shared GPU memory | 232 / 23 MiB | 265 / 82 MiB | 119 / 18 MiB | 152 / 52 MiB |
+| Private bytes | 367 MiB | 485 MiB | 230 MiB | 299 MiB |
+
+Vulkan stays first on Windows, Direct3D 12 as the fallback (part C's switch in lumenwall-engine).
+
+### Render thread: where the CPU goes
+
+Lumenwall's own work per frame is small (scene update 0.01–0.06 ms, graph encode 0.01–0.06 ms). wgpu 30 defers
+validation, state tracking, barriers and Vulkan encoding to `CommandEncoder::finish`, which costs ≈ 8.5 µs per
+render pass whatever the number of draws (8 scenes: 3 passes 0.045 ms … 24 passes 0.32 ms … 96 passes 0.84 ms);
+render bundles change nothing. Recording the scene graph directly through wgpu-hal is the next step (task
+"Perf D").
+
+### Visual comparison (headless, 2560×1440, particles off, frame 44, against main)
+
+| Scene (shown at) | Default (all targets at the displayed size) | `LUMENWALL_FULL_SIZE_CHAINS=1` (scene target only) |
+|---|---|---|
+| 1712475860 (343×193, 1×) | identical | identical |
+| 1960765686 (0.67×) | 44.2 dB | 44.2 dB |
+| 2234978675 (0.60×) | 40.1 dB | 45.9 dB |
+| 3018340632 (0.74×) | 45.7 dB | 52.7 dB |
+| 3044659344 (0.67×, clock) | 52.5 dB | 52.5 dB |
+| 3089056751 (0.67×, clock) | 44.0 dB | 44.0 dB |
+| 3372348904 (portrait, 0.36×) | 36.5 dB | 36.5 dB |
+| 3463520581 (0.67×) | 40.5 dB | 48.4 dB |
+
+PSNR of the frame against main's (99 dB = identical). The differences are resampling: edges of fine detail
+(main renders at the scene's size and the composition reduces it) and, for 3372348904, the clamped side bands of
+a portrait scene, whose edge column is resampled. With every target at the displayed size, each effect that
+displaces texture coordinates (shake, sway, water waves) resamples at the display's resolution, so thin details
+are a little softer (darker thin hair strands on 3463520581), as on Wallpaper Engine if it renders at the
+displayed size as its GPU time suggests.
+
+### Tools
+
+- `LUMENWALL_PROFILE_PASSES=1` (headless): GPU time of every render pass and copy of a frame (timestamp
+  queries), grouped by target kind, the 30 most expensive first.
+- Headless debug logs (`RUST_LOG=lumenwall_engine::headless=debug,lumenwall_engine::scene=debug`): CPU split of a
+  frame (update, encode, `finish`, submit), the device allocator's blocks, GPU memory of the targets by kind.
+- Switches for measurements: `LUMENWALL_SCENE_SIZE_TARGET=1`, `LUMENWALL_FULL_SIZE_CHAINS=1`,
+  `LUMENWALL_NO_TARGET_ALIASING=1`, `LUMENWALL_ALIAS_SLACK`, `LUMENWALL_REORDER_BUDGET_MIB` (0 = spec order),
+  `LUMENWALL_GPU_BLOCKS=<min>-<max>`, `LUMENWALL_FRAME_LATENCY`, `LUMENWALL_GPU_BACKEND=vulkan|dx12`.

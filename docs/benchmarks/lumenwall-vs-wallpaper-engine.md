@@ -309,6 +309,51 @@ WE's video decoded at 55.4 % of the RTX's video engine with two monitors (two de
 during WE's web and video runs (builds again). The two Lumenwall runs of web and video were
 refused with the same errors as above.
 
+## Starting point: release build of main
+
+Measured on 4 November 2026, 17:06–17:16, by the part A of the optimization work (task "Perf A"), to know where
+main stood before any change: the installed 0.1.0 predates some performance commits. Raw data:
+[`main-baseline/`](lumenwall-vs-wallpaper-engine/main-baseline/).
+
+- Lumenwall: release build of main 376a97d (`cargo build --release -p lumenwall`, same features as the
+  installed copy), run as the bench daemon with a private `LOCALAPPDATA` (its caches outside the user's folder,
+  filled first by `-WarmLumenwall`). The person's own daemon (the installed 0.1.0) was stopped and relaunched at
+  the end (`-UserLumenwallExe` logic: the build under test is never relaunched in its place).
+- Same method as above, monitor 1 only, 30 fps, **3 repetitions** of 10 s warm-up and 30 s of samples, WE
+  2.8.42 on the same settings, 3463520581 and 3018340632 only.
+- Conditions: whole-machine CPU 8–10 % during the runs (other agents' builds); the RTX ran at higher clocks than
+  in the first report (1,600–1,850 MHz against about 1,000: other GPU load on the desktop), so the GPU
+  percentages of both engines are lower than above while their ratio stays the same.
+- Restored: WE closed by the Restart Manager, `config.json`, `distribution\config.json`, `config.toml` and
+  `ui.json` hashes identical, the person's daemon relaunched, audio peak 0.
+
+Mean of the 3 run means ± half their range.
+
+| Metric | 3463520581 WE | 3463520581 Lumenwall main | 3018340632 WE | 3018340632 Lumenwall main |
+|---|---|---|---|---|
+| CPU, process tree (% of a core) | 2.71 ± 0.13 | 5.50 ± 0.97 | 1.51 ± 0.05 | 2.94 ± 0.88 |
+| Private bytes | 517 MiB | 703 ± 2 MiB | 284 ± 1 MiB | 356 ± 4 MiB |
+| Working set | 72 ± 1 MiB | 215 ± 1 MiB | 65 ± 3 MiB | 205 ± 5 MiB |
+| GPU 3D (RTX) | 3.23 ± 0.46 % | 6.63 ± 0.61 % | 2.89 ± 0.45 % | 5.21 ± 0.63 % |
+| Dedicated GPU memory | 323 MiB | 608 MiB | 275 ± 1 MiB | 264 MiB |
+| Shared GPU memory | 3 MiB | 43 MiB | 3 ± 1 MiB | 43 MiB |
+| Command → first GPU activity | 462 ms | 808 ms | 331 ms | 719 ms |
+| Empty and resident (private) | 3 MiB | 74 MiB | | |
+
+Main measured the same as the installed 0.1.0: the earlier performance commits (image composites allocated only
+when used, Linux-only allocator trimming and loader restrictions) did not show on Windows.
+
+Black-box observation used by part A: WE's GPU time is 0.555 of Lumenwall's on 3018340632 and 0.487 on
+3463520581, close to the share of each scene's pixels shown on a 2560×1440 monitor (0.553 and 0.444): WE renders
+the whole scene at the displayed size, Lumenwall main at the scene's own size. The optimizations that followed,
+their headless before/after measurements and the projection against these WE numbers are in
+[`docs/PERFORMANCE.md`](../PERFORMANCE.md#windows-part-a-gpu-vram-and-render-thread-against-wallpaper-engine);
+the desktop "after" comes from the final bench, once parts A, B and C have landed.
+
+WE's `-control openWallpaper … -playInWindow` (public command line) cannot be used to vary the output size:
+`-control mute` does not reach a wallpaper played in a window, which was audible for about a second during a
+probe (the audio guard of the script stopped it). The script no longer offers it.
+
 ## Reproduce
 
 ```powershell
