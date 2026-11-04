@@ -14,13 +14,24 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use crate::error::{RenderError, Result};
 use crate::texture::{AddressMode, SamplerKey};
 
-/// Backends compiled in and tried, in order of preference.
+/// Backends compiled in and tried, in order of preference. `LUMENWALL_GPU_BACKEND=vulkan` or
+/// `dx12` (Windows) restricts the choice to one of them (measurements, driver problems).
 #[must_use]
 pub fn default_backends() -> wgpu::Backends {
-    if cfg!(windows) {
+    let compiled = if cfg!(windows) {
         wgpu::Backends::VULKAN | wgpu::Backends::DX12
     } else {
         wgpu::Backends::VULKAN
+    };
+    let forced = match std::env::var("LUMENWALL_GPU_BACKEND").as_deref() {
+        Ok("vulkan") => wgpu::Backends::VULKAN,
+        Ok("dx12") => wgpu::Backends::DX12,
+        _ => compiled,
+    };
+    if compiled.contains(forced) {
+        forced
+    } else {
+        compiled
     }
 }
 
@@ -109,6 +120,28 @@ impl MemoryToken {
 impl Drop for MemoryToken {
     fn drop(&mut self) {
         self.counter.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+/// Sub-allocation block sizes of the device's memory allocator: 4 to 8 MiB device-local blocks
+/// (wgpu's `MemoryUsage` hint grows them to 64 MiB). Render targets and textures above the
+/// block size get memory of their exact size, the small ones share blocks that cannot hold much
+/// unused space. Measured (headless, 2560x1440): reserved minus allocated 88 → 27 MiB on
+/// 3463520581 and 68 → 13 MiB on 3018340632; on NVIDIA/Windows every reserved byte is also a
+/// committed private byte. `LUMENWALL_GPU_BLOCKS=<min>-<max>` (MiB) overrides it for
+/// measurements.
+fn memory_hints() -> wgpu::MemoryHints {
+    const MIB: u64 = 1024 * 1024;
+    let (min, max) = std::env::var("LUMENWALL_GPU_BLOCKS")
+        .ok()
+        .and_then(|v| {
+            let (a, b) = v.split_once('-')?;
+            let (a, b) = (a.trim().parse::<u64>().ok()?, b.trim().parse::<u64>().ok()?);
+            Some((a, b.max(a)))
+        })
+        .unwrap_or((4, 8));
+    wgpu::MemoryHints::Manual {
+        suballocated_device_memory_block_size: min * MIB..max * MIB,
     }
 }
 
@@ -283,7 +316,7 @@ impl GpuContext {
             // Large spans (3 × 4K) need the adapter's real texture limits.
             required_limits: adapter.limits(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            memory_hints: memory_hints(),
             trace: wgpu::Trace::Off,
         };
         let video_device = (options.video_decode

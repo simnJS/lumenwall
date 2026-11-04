@@ -30,6 +30,20 @@ pub fn choose_surface_format(
     formats.first().map(|f| (*f, f.remove_srgb_suffix()))
 }
 
+/// Frames queued ahead of the display: swap-chain images − 1. One: a wallpaper renders at most
+/// at the configured rate (30 fps by default), far below the display's refresh, so the image it
+/// presented is released long before the next frame and a third image would only hold memory
+/// (one output-sized image: 14 MiB at 2560x1440). Windows only for now: Wayland compositors
+/// may hold a buffer until their next frame callback, which was not measured with two images.
+/// `LUMENWALL_FRAME_LATENCY` overrides it (measurements).
+fn frame_latency() -> u32 {
+    std::env::var("LUMENWALL_FRAME_LATENCY")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| (1..=3).contains(&n))
+        .unwrap_or(if cfg!(windows) { 1 } else { 2 })
+}
+
 /// A configured window surface.
 pub struct OutputSurface {
     surface: wgpu::Surface<'static>,
@@ -95,7 +109,7 @@ impl OutputSurface {
                 .copied()
                 .unwrap_or(wgpu::CompositeAlphaMode::Auto)
         };
-        config.desired_maximum_frame_latency = 2;
+        config.desired_maximum_frame_latency = frame_latency();
         surface.configure(ctx.device(), &config);
         ctx.note_resources(1);
         Ok(Self {
