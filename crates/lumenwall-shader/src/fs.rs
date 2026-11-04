@@ -11,6 +11,14 @@ use std::path::PathBuf;
 /// order of spec 03 §2.2 (wallpaper folder, `scene.pkg`, assets…).
 pub trait ShaderFs: Sync {
     fn read(&self, path: &str) -> Option<Cow<'_, [u8]>>;
+
+    /// Identity of the file set: two calls returning the same `Some(id)` read the same
+    /// files, so a [`crate::ShaderCompiler`] may keep what it read and preprocessed under
+    /// that id instead of reading every unit and include again for each pass. `None` (the
+    /// default): every pass reads its files.
+    fn identity(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Plain directory.

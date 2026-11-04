@@ -477,6 +477,7 @@ impl Project {
             warnings: &mut self.warnings,
             arenas: &mut scene.arenas,
             model_states: false,
+            files: HashMap::new(),
         };
         f(&mut loader)
     }

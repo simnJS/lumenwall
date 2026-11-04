@@ -180,12 +180,52 @@ impl PassShader {
 
 type Memo = Mutex<HashMap<[u8; 32], Arc<OnceLock<Result<Arc<CompiledProgram>, ShaderError>>>>>;
 
+/// What the passes of one file set ([`ShaderFs::identity`]) read and preprocessed.
+#[derive(Default)]
+struct UnitMemo {
+    fs: Option<u64>,
+    /// Preprocessed units by path relative to `shaders/` (`genericimage2.vert`).
+    units: HashMap<String, Result<Arc<we::ScannedUnit>, ShaderError>>,
+    /// Raw files by VFS path (units, includes, compatibility files), absent ones too.
+    files: HashMap<String, Option<Arc<[u8]>>>,
+    /// Loaded passes by shader and combos: a pass equal to an earlier one of the same file
+    /// set is neither assembled nor hashed again.
+    passes: HashMap<(String, PassCombos), Result<PassShader, ShaderError>>,
+}
+
+/// File access that keeps every file read under one identity in a [`UnitMemo`].
+struct MemoFs<'a> {
+    inner: &'a dyn ShaderFs,
+    id: u64,
+    memo: &'a Mutex<UnitMemo>,
+}
+
+impl ShaderFs for MemoFs<'_> {
+    fn read(&self, path: &str) -> Option<std::borrow::Cow<'_, [u8]>> {
+        let lock = || self.memo.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = lock().files.get(path) {
+            return f.as_deref().map(|b| std::borrow::Cow::Owned(b.to_vec()));
+        }
+        let bytes: Option<Arc<[u8]>> = self.inner.read(path).map(|b| Arc::from(b.as_ref()));
+        let mut m = lock();
+        if m.fs == Some(self.id) {
+            m.files.insert(path.to_owned(), bytes.clone());
+        }
+        bytes.map(|b| std::borrow::Cow::Owned(b.to_vec()))
+    }
+
+    fn identity(&self) -> Option<u64> {
+        Some(self.id)
+    }
+}
+
 /// Compiles passes, deduplicating identical programs in memory and on disk.
 /// `Sync`: share one instance and load passes from several threads.
 pub struct ShaderCompiler {
     options: CompileOptions,
     cache: Option<cache::DiskCache>,
     memo: Memo,
+    units: Mutex<UnitMemo>,
 }
 
 impl ShaderCompiler {
@@ -203,6 +243,7 @@ impl ShaderCompiler {
             options,
             cache,
             memo: Mutex::new(HashMap::new()),
+            units: Mutex::new(UnitMemo::default()),
         }
     }
 
@@ -210,10 +251,37 @@ impl ShaderCompiler {
         &self.options
     }
 
-    /// Drops the in-memory program table (call once a scene is loaded; the
-    /// passes keep their own `Arc`s, the disk cache is untouched).
+    /// Drops the in-memory program table and the preprocessed units (call once a
+    /// scene is loaded; the passes keep their own `Arc`s, the disk cache is
+    /// untouched).
     pub fn clear_memory_cache(&self) {
         self.memo.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *self.units.lock().unwrap_or_else(|e| e.into_inner()) = UnitMemo::default();
+    }
+
+    /// One unit (`<shader>.vert` or `.frag`) read and preprocessed (spec 03 §4).
+    /// With a file set identity, each unit and each file is read once per identity:
+    /// the passes of a scene share a few shaders and their includes.
+    fn unit(&self, fs: &dyn ShaderFs, rel: &str) -> Result<Arc<we::ScannedUnit>, ShaderError> {
+        let scan = |fs: &dyn ShaderFs| {
+            let text = fs::read_shader_file(fs, rel)
+                .ok_or_else(|| ShaderError::NotFound(rel.to_owned()))?;
+            we::preprocess_unit(fs, &text).map(Arc::new)
+        };
+        let Some(id) = fs.identity() else {
+            return scan(fs);
+        };
+        if let Some(u) = self.memo_for(id).units.get(rel) {
+            return u.clone();
+        }
+        // Not under the lock: other threads keep loading passes meanwhile.
+        let unit = scan(&MemoFs {
+            inner: fs,
+            id,
+            memo: &self.units,
+        });
+        self.memo_for(id).units.insert(rel.to_owned(), unit.clone());
+        unit
     }
 
     /// Textual stage of spec 03 §1 steps 1–5.
@@ -222,14 +290,16 @@ impl ShaderCompiler {
         fs: &dyn ShaderFs,
         req: &PassRequest,
     ) -> Result<PreparedPass, ShaderError> {
-        let read = |ext: &str| {
-            let rel = fs::with_extension(req.shader, ext);
-            fs::read_shader_file(fs, &rel).ok_or(ShaderError::NotFound(rel))
+        let vs = self.unit(fs, &fs::with_extension(req.shader, "vert"));
+        let fsu = self.unit(fs, &fs::with_extension(req.shader, "frag"));
+        // Same error as reading both files before preprocessing either.
+        let (vs, fsu) = match (vs, fsu) {
+            (Err(e @ ShaderError::NotFound(_)), _) | (_, Err(e @ ShaderError::NotFound(_))) => {
+                return Err(e);
+            }
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+            (Ok(v), Ok(f)) => (v, f),
         };
-        let vs_text = read("vert")?;
-        let fs_text = read("frag")?;
-        let vs = we::preprocess_unit(fs, &vs_text)?;
-        let fsu = we::preprocess_unit(fs, &fs_text)?;
         let mut warnings: Vec<String> = Vec::new();
         warnings.extend(vs.warnings.iter().map(|w| format!("vertex: {w}")));
         warnings.extend(fsu.warnings.iter().map(|w| format!("fragment: {w}")));
@@ -309,13 +379,36 @@ impl ShaderCompiler {
         })
     }
 
+    /// [`Self::prepare`] then [`Self::compile`]. With a file set identity, a request equal to
+    /// an earlier one (same shader and combos) returns that pass again.
     pub fn load_pass(
         &self,
         fs: &dyn ShaderFs,
         req: &PassRequest,
     ) -> Result<PassShader, ShaderError> {
-        let p = self.prepare(fs, req)?;
-        self.compile(p)
+        let Some(id) = fs.identity() else {
+            return self.prepare(fs, req).and_then(|p| self.compile(p));
+        };
+        let key = (req.shader.to_owned(), req.combos.clone());
+        if let Some(p) = self.memo_for(id).passes.get(&key) {
+            return p.clone();
+        }
+        let pass = self.prepare(fs, req).and_then(|p| self.compile(p));
+        let mut m = self.memo_for(id);
+        m.passes.insert(key, pass.clone());
+        pass
+    }
+
+    /// The memo of the file set `id`, emptied first when it held another one.
+    fn memo_for(&self, id: u64) -> std::sync::MutexGuard<'_, UnitMemo> {
+        let mut m = self.units.lock().unwrap_or_else(|e| e.into_inner());
+        if m.fs != Some(id) {
+            *m = UnitMemo {
+                fs: Some(id),
+                ..UnitMemo::default()
+            };
+        }
+        m
     }
 
     /// Loads many passes in parallel (rayon). Results are in request order.

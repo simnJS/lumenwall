@@ -39,6 +39,21 @@ Wallpaper Engine shader text (+ combos, constants, textures) → one validated n
 
 `ShaderCompiler::new(options, Some(dir))`: key = blake3(final vertex + fragment sources, which contain every include and combo `#define`, options, crate version, cache format, naga major). Entry = postcard(module + reflection) behind a blake3 checksum; atomic write (temp + rename); a corrupt entry is a miss. A cached pass loads in ~30 µs. Identical programs are also shared in memory (`Arc`), compiled once even when requested concurrently; `load_passes` compiles in parallel with rayon. `clear_memory_cache()` drops the in-memory table after loading.
 
+The disk cache key needs the final sources, so every pass still runs the textual stage (`prepare`). When the file system reports an identity (`ShaderFs::identity`, the VFS generation in the engine), the compiler keeps each preprocessed unit (`<shader>.vert` / `.frag` after §4) and each file it read under that identity: the passes of a scene share a few shaders and their includes, so each one is read and preprocessed once instead of once per pass. `load_pass` also keeps each loaded pass by shader and combos (`PassCombos` is `Hash`): a pass equal to an earlier one is neither assembled nor hashed again. A new identity, or `clear_memory_cache()`, starts over; without an identity nothing changes. The prepared and loaded passes are identical (`tests/unit_memo.rs`).
+
+## Performance
+
+Measured on Windows 11 (Ryzen 9 7950X3D, RTX 4080 SUPER, release, warm shader and pipeline caches) with a headless harness outside the repository that builds the real scenes through `lumenwall_engine::build_scene`; the machine was in use (a game running), so the absolute times are high.
+
+| Scene build (median of 5, interleaved; min–max) | Before (main b4d1db6) | Units and files once | + passes once, one lookup per folder read |
+|---|---|---|---|
+| 3463520581 (156 passes, 67 images) | 474 ms (382–716) / 244 ms (237–304) | 157 ms (141–169) | 98 ms (94–116) |
+| 3018340632 (27 passes, 11 effects) | 151 ms (138–365) / 106 ms (104–117) | 139 ms (122–157) | 96 ms (95–105) |
+
+The two "before" values are two sessions with different background load; each "after" was measured interleaved with the "before" of its session (first session: units and files; second: everything).
+
+Where it went, from timing probes in `prepare` (removed since): on 3463520581 the textual stage took 153–239 ms of a 247–364 ms build, 84 % of it in 873 file reads through the VFS (≈ 230 µs each: the assets folder is opened from disk, after missing in the wallpaper folder and the `.pkg`). With the unit memo: 44 reads, `prepare` 12–15 ms for the 156 passes; with the pass memo, `prepare` runs 19 times for the 156 passes (22 for the 27 of 3018340632), what is left being the first read of each distinct file. Compiling from the warm disk cache stays at 2–4 ms per scene (34–38 ms when cold).
+
 ## Coverage of the relaxations (spec 03 §10.2)
 
 | Rule | Implementation | Tests (`tests/dialect.rs`) |
