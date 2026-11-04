@@ -214,7 +214,9 @@ CI makes the same ones but AV1 with Ubuntu's, `packaging/ffmpeg/test-clips.sh`, 
 decodes them in software on WARP). For 3655057993,
 the frame at 1.5 s is byte-identical on all six paths; the GPU tests pass
 on Vulkan and on DX12 (`gpu_decode_paths_agree`, `gpu_loop_continues_the_timeline`), and
-the unit tests of lumenwall-video and lumenwall-engine with the feature on. `lumenwall.exe
+the unit tests of lumenwall-video and lumenwall-engine with the feature on. Through the
+engine (`render_png 3655057993`, headless): zero copy, D3D11VA and software. On the AMD
+Radeon integrated GPU (`video_png --low-power`): zero copy and D3D11VA. `lumenwall.exe
 --version` starts with only the Windows folders on `PATH`.
 
 ## Build and test
