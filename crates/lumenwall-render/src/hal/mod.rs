@@ -1605,9 +1605,10 @@ fn raw_buffer(b: &wgpu::Buffer) -> Res<vk::Buffer> {
 }
 
 /// Puts textures the direct frame uses for the first time in their resting states for
-/// wgpu-core: render targets are cleared to transparent black first (their initialisation,
-/// which wgpu-core would otherwise do lazily, then over a frame it never saw), depth buffers
-/// go to `DEPTH_STENCIL_WRITE`, everything else to `RESOURCE`.
+/// wgpu-core: render targets go through an empty render pass that loads them first, so that
+/// wgpu-core initialises them now (to transparent black, its lazy clear, which would otherwise
+/// land over a frame it never saw) unless wgpu already wrote them (kept as they are); depth
+/// buffers go to `DEPTH_STENCIL_WRITE`, everything else to `RESOURCE`.
 fn adopt(ctx: &GpuContext, textures: &[(wgpu::Texture, Use)]) {
     let mut enc = ctx
         .device()
@@ -1624,7 +1625,7 @@ fn adopt(ctx: &GpuContext, textures: &[(wgpu::Texture, Use)]) {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

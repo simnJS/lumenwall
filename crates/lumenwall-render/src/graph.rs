@@ -2918,8 +2918,10 @@ impl RenderScene {
 
     /// Something outside the uniform buffer changed (video frame written into
     /// a texture, thumbnail loaded…). Call it after every write into one of the scene's
-    /// textures through the queue (`GpuTexture::write_level0`): a scene recorded directly in
-    /// Vulkan then puts its textures back in their sampled state before the next frame.
+    /// textures or targets through wgpu (`GpuTexture::write_level0`, a queue write or a copy
+    /// into a target): a scene recorded directly in Vulkan then puts them back in their sampled
+    /// state before the next frame. Readbacks through [`crate::headless::read_texture_rgba8`]
+    /// need nothing.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.textures_written = true;
@@ -3067,11 +3069,15 @@ impl RenderScene {
             }
             Some(d) => {
                 if std::mem::take(&mut self.textures_written) {
-                    // Textures written through the queue are in `COPY_DST` for wgpu-core: back
-                    // to their sampled state before the frame samples them.
+                    // Textures and targets written through wgpu (queue writes, copies) are in
+                    // another state for wgpu-core: back to their sampled state before the frame
+                    // samples them.
                     crate::hal::restore_textures(
                         encoder,
-                        self.textures.iter().map(GpuTexture::texture),
+                        self.textures
+                            .iter()
+                            .map(GpuTexture::texture)
+                            .chain(self.targets.iter().map(|t| t.texture())),
                     );
                 }
                 let next = ctx
