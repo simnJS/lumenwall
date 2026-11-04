@@ -229,3 +229,21 @@ displayed size as its GPU time suggests.
 - Switches for measurements: `LUMENWALL_SCENE_SIZE_TARGET=1`, `LUMENWALL_FULL_SIZE_CHAINS=1`,
   `LUMENWALL_NO_TARGET_ALIASING=1`, `LUMENWALL_ALIAS_SLACK`, `LUMENWALL_REORDER_BUDGET_MIB` (0 = spec order),
   `LUMENWALL_GPU_BLOCKS=<min>-<max>`, `LUMENWALL_FRAME_LATENCY`, `LUMENWALL_GPU_BACKEND=vulkan|dx12`.
+
+## Windows, part B: CPU and RAM of scene content (measured by part B)
+
+Headless harness that builds the real scenes through `build_scene`, Windows 11, Ryzen 9 7950X3D, RTX 4080 SUPER,
+release, warm shader and pipeline caches, Vulkan only, medians of 5 interleaved runs against main b4d1db6 (a game
+was running on the machine). Headless renders of the 8 installed scenes, both builds back to back: 16/16
+byte-identical.
+
+| Change | Before | After |
+|---|---|---|
+| Scene load: shader units, includes and passes read and assembled once, scene files read once, one canonicalize per folder read | scene build 3463520581 244 ms (237–304), 3018340632 106 ms (104–117); `prepare` run for each of the 156 / 27 passes; parse 7 / 2 ms | 98 ms (94–116), 96 ms (95–105); `prepare` 19 / 22 runs; parse 4 / 1 ms |
+
+| Fact | Measurement |
+|---|---|
+| Per-frame CPU of scene content (`SceneRuntime::update`), 30 fps | 3018340632 72–81 µs (particle simulation 17 µs, of which `turbulence` on the 2 ash systems most; `write_stream` 55 µs), 3463520581 96–136 µs (16 puppets 20 µs, palettes 1 µs, particles 19 µs, `write_stream` 56 µs, the image loop the rest). The heap allocations per frame (10 / 19) all came from `write_stream`'s `Queue::write_buffer`, removed by part A (staging belt) |
+| Process memory, Vulkan on NVIDIA/Windows | every `VkDeviceMemory` is committed private memory (protect 0x404, never resident): +64.1 MiB private for a 64 MiB texture, 545 of 715 MiB private on 3463520581, 200 of 356 on 3018340632 (main). Rust heap after load 3.6 / 2.0 MiB live (peak 12 / 33 MiB while loading, returned); process heap 20 / 16 MiB committed with 5 / 2.6 MiB free, `HeapCompact` recovers nothing |
+| Working set | made of load-time pages: `K32EmptyWorkingSet` after 40 frames (8–11 ms, first frame after +2–5 ms) → 19 MiB (3018340632) and 49 MiB (3463520581) 330 frames later, headless (part C) |
+| Threads at 30 fps (main, `GetThreadTimes`, game running) | 3018340632: render thread 2.65 % of a core (update 72 µs + encode/submit 644 µs per frame), one NVIDIA driver thread 0.70 %; 3463520581: 6.85 % (update 119 µs + encode/submit 1983 µs), driver thread 2.34 %, 12 other threads ≈ 0. With the content update at 20–60 µs, the process CPU is the render thread's encode and submit plus that driver thread, which follows what is submitted |
