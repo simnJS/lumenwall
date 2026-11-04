@@ -50,6 +50,9 @@ pub struct HeadlessOptions {
     pub hwdec: lumenwall_video::HwDecode,
     /// Constant level fed to every audio spectrum band (audio-reactive checks; 0 = silence).
     pub audio_level: f32,
+    /// Render `_rt_FullFrameBuffer` at the scene's own size, as before the displayed-size
+    /// rendering (comparisons). Also set by `LUMENWALL_SCENE_SIZE_TARGET=1`.
+    pub scene_size_target: bool,
 }
 
 impl Default for HeadlessOptions {
@@ -74,6 +77,7 @@ impl Default for HeadlessOptions {
             software: false,
             hwdec: lumenwall_video::HwDecode::Auto,
             audio_level: 0.0,
+            scene_size_target: crate::scene::scene_size_target_forced(),
         }
     }
 }
@@ -148,6 +152,7 @@ pub fn render_headless(
             particles: opts.particles,
             parallax: true,
             debug: opts.debug.clone(),
+            display: (!opts.scene_size_target).then_some(((opts.width, opts.height), opts.scaling)),
         },
     )?;
     let load_time = t0.elapsed();

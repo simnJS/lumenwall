@@ -1706,6 +1706,15 @@ fn build_renderer(
     // One provider per scene: the shader ids it hands out belong to that scene's builder
     // (translations still come from the on-disk cache).
     let mut shaders = default_provider();
+    // The scene renders at the size it is displayed at on the largest output showing it.
+    let largest = r
+        .surfaces
+        .outputs()
+        .iter()
+        .filter(|o| target_for(plan, &o.name).is_some_and(|t| plan.targets[t].key == tplan.key))
+        .map(|o| o.physical_size)
+        .fold(size, |a, b| if b.0 * b.1 > a.0 * a.1 { b } else { a });
+    let display = (!crate::scene::scene_size_target_forced()).then_some((largest, tplan.scaling));
     let runtime = build_scene(
         &r.ctx,
         &mut wp.project,
@@ -1717,6 +1726,7 @@ fn build_renderer(
             particles: plan.particles,
             parallax: plan.parallax,
             debug: plan.debug.clone(),
+            display,
         },
     )?;
     let s = runtime.stats;

@@ -27,8 +27,8 @@ use lumenwall_render::targets::{ScopeId, composite_names, scaled_size};
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
     BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
-    ImageSpec, Op, PassId, PuppetGeometry, RenderScene, RtId, SceneBuilder, SkinVertex, SlotSource,
-    TextureRef, Vertex, add_image_with_options,
+    ImageSpec, Op, PassId, PuppetGeometry, RenderScene, RtId, ScalingMode, SceneBuilder,
+    SkinVertex, SlotSource, TextureRef, Vertex, add_image_with_options,
 };
 use lumenwall_scene::{
     BuildOptions, ConstantSource, ImagePasses, MAX_PARENT_DEPTH, MainTextureFormat, ObjectIndex,
@@ -60,6 +60,10 @@ pub struct SceneOptions {
     pub particles: bool,
     pub parallax: bool,
     pub debug: DebugPlan,
+    /// Largest output the scene is shown on and its scaling mode: `_rt_FullFrameBuffer` is
+    /// rendered at the size the scene is displayed at, never above the scene's own size
+    /// ([`render_size`]). `None`: the scene's own size.
+    pub display: Option<((u32, u32), ScalingMode)>,
 }
 
 impl Default for SceneOptions {
@@ -70,8 +74,50 @@ impl Default for SceneOptions {
             particles: true,
             parallax: true,
             debug: DebugPlan::default(),
+            display: None,
         }
     }
+}
+
+/// `LUMENWALL_SCENE_SIZE_TARGET=1`: render `_rt_FullFrameBuffer` at the scene's own size whatever
+/// the output (before/after comparisons of [`render_size`]).
+#[must_use]
+pub fn scene_size_target_forced() -> bool {
+    std::env::var_os("LUMENWALL_SCENE_SIZE_TARGET").is_some_and(|v| v != "0")
+}
+
+/// `LUMENWALL_NO_TARGET_ALIASING=1`: every render target keeps its own memory (comparisons of
+/// the render-graph aliasing).
+fn target_aliasing_disabled() -> bool {
+    std::env::var_os("LUMENWALL_NO_TARGET_ALIASING").is_some_and(|v| v != "0")
+}
+
+/// Size of `_rt_FullFrameBuffer` for a scene of logical size `logical` shown on `display`:
+/// the scene's own size scaled to the pixels it covers on the output (the larger of the two
+/// axis ratios, so neither axis is rendered below its displayed resolution), never above 1.
+/// The camera keeps the scene's coordinate space: only the target, its viewport and the
+/// composition change. Deviation from the reference, which renders at the scene size whatever
+/// the output (docs/PERFORMANCE.md).
+#[must_use]
+pub fn render_size(logical: (u32, u32), display: Option<((u32, u32), ScalingMode)>) -> (u32, u32) {
+    let Some(((ow, oh), mode)) = display else {
+        return logical;
+    };
+    let (lw, lh) = (logical.0.max(1) as f32, logical.1.max(1) as f32);
+    if ow == 0 || oh == 0 {
+        return logical;
+    }
+    let uv = lumenwall_render::compose::uv_range(mode, ow, oh, logical.0, logical.1);
+    let du = (uv.u1 - uv.u0).abs().max(f32::MIN_POSITIVE);
+    let dv = (uv.v1 - uv.v0).abs().max(f32::MIN_POSITIVE);
+    let scale = (ow as f32 / (du * lw)).max(oh as f32 / (dv * lh));
+    if !scale.is_finite() || scale >= 1.0 {
+        return logical;
+    }
+    (
+        ((lw * scale).ceil() as u32).clamp(1, logical.0.max(1)),
+        ((lh * scale).ceil() as u32).clamp(1, logical.1.max(1)),
+    )
 }
 
 /// Load statistics.
@@ -495,7 +541,18 @@ pub fn build_scene(
         nearest: false,
         mipmaps: false,
     };
-    let st = b.targets.create_scene_targets(ctx, logical, full_sampler);
+    // The scene target at the size the scene is displayed at (`render_size`).
+    let rendered = render_size(logical, opts.display);
+    if rendered != logical {
+        tracing::debug!(
+            "scene {}x{} rendered at {}x{} (displayed size)",
+            logical.0,
+            logical.1,
+            rendered.0,
+            rendered.1
+        );
+    }
+    let st = b.targets.create_scene_targets(ctx, rendered, full_sampler);
     let root = b.targets.scene_scope();
     let mut textures = TextureCache::default();
     let mut stats = SceneStats::default();
@@ -514,7 +571,8 @@ pub fn build_scene(
         &build,
         root,
         st.full,
-        logical,
+        // `_rt_Reflection` follows the scene target.
+        rendered,
     );
 
     // Phase 1: creation order.
@@ -966,7 +1024,15 @@ pub fn build_scene(
             &op_marks,
         ))
     });
+    if !dynamic_layers && !target_aliasing_disabled() {
+        // Render-graph aliasing: lumenwall-render lets targets whose frame lifetimes never
+        // overlap share memory, and keeps its own for any target read before it is written
+        // (feedback, accumulation). Every target but the scene's, which the outputs read after
+        // the frame. Layers that scripts add or reorder would change the lifetimes.
+        b.targets.mark_transient_all(&[st.full]);
+    }
     let mut scene_rt = b.build().map_err(|e| e.to_string())?;
+    log_target_memory(scene_rt.targets(), stats.texture_bytes);
     // Images invisible at start: their passes are disabled (Q8, live visibility).
     for img in &mut images {
         let shown = chain_visible(&project.settings, &img.visible);
@@ -1057,6 +1123,50 @@ pub fn build_scene(
     // Layers scripts created or registered while loading (`init`, module top level).
     rt.apply_layer_changes(ctx, project);
     Ok(rt)
+}
+
+/// Debug breakdown of the GPU memory of a scene's render targets (RGBA8, 4 bytes a pixel).
+fn log_target_memory(targets: &lumenwall_render::targets::RenderTargetPool, texture_bytes: u64) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    // Scene, bloom, composites, hazard copies, effect fbos and the rest.
+    let mut sums = [0u64; 5];
+    let (mut largest, mut count, mut shared) = (Vec::new(), 0usize, 0usize);
+    for t in targets.iter() {
+        if t.shares().is_some() {
+            // Its memory is another target's (render-graph aliasing).
+            shared += 1;
+            continue;
+        }
+        let (w, h) = t.size();
+        let bytes = u64::from(w) * u64::from(h) * 4;
+        let label = t.label();
+        let k = match label {
+            "_rt_FullFrameBuffer" => 0,
+            "_rt_4FrameBuffer" | "_rt_8FrameBuffer" | "_rt_Bloom" => 1,
+            l if l.starts_with("_rt_imageLayerComposite_") => 2,
+            "lumenwall.scratch" => 3,
+            _ => 4,
+        };
+        sums[k] += bytes;
+        count += 1;
+        if bytes >= 8 << 20 {
+            largest.push(format!("{label} {w}x{h}"));
+        }
+    }
+    let mib = |b: u64| b as f64 / 1048576.0;
+    tracing::debug!(
+        "GPU memory: textures {:.1} MiB; {count} render targets {:.1} MiB (scene {:.1}, bloom {:.1}, composites {:.1}, hazard copies {:.1}, effects and others {:.1}), {shared} more sharing their memory; 8 MiB or more: {}",
+        mib(texture_bytes),
+        mib(sums.iter().sum()),
+        mib(sums[0]),
+        mib(sums[1]),
+        mib(sums[2]),
+        mib(sums[3]),
+        mib(sums[4]),
+        largest.join(", ")
+    );
 }
 
 /// `(upper-case name, value)` combos.

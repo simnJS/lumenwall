@@ -19,7 +19,7 @@ use crate::dynbuf::{
 use crate::error::{RenderError, Result};
 use crate::math::{SKIN_VERTEX_SIZE, SkinVertex, VERTEX_SIZE, Vertex};
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
-use crate::targets::{RT_FORMAT, RenderTargetPool, RtId};
+use crate::targets::{Access, AliasPlan, RT_FORMAT, RenderTargetPool, RtId, plan_aliasing};
 use crate::texture::{
     GpuTexture, SamplerKey, TextureUpload, VolumeUpload, default_texture, default_volume,
     upload_texture, upload_volume,
@@ -524,7 +524,8 @@ impl<'c> SceneBuilder<'c> {
             .write_bytes(frame_globals::TEXEL_SIZE_HALF, bytemuck::cast_slice(&tsh));
         Self {
             ctx,
-            targets: RenderTargetPool::new(),
+            // Allocated by `build`, so that transient targets can share memory.
+            targets: RenderTargetPool::deferred(),
             textures: Vec::new(),
             shaders: Vec::new(),
             dynbuf,
@@ -730,6 +731,9 @@ impl<'c> SceneBuilder<'c> {
     pub fn build(mut self) -> Result<RenderScene> {
         let ctx = self.ctx;
         let device = ctx.device();
+        // GPU memory of the render targets, transient ones sharing textures.
+        let alias = self.alias_plan();
+        self.targets.materialize(ctx, &alias.shares);
 
         // Frame-global copies into pass blocks.
         let mut patches = Vec::new();
@@ -839,6 +843,8 @@ impl<'c> SceneBuilder<'c> {
             scene_size: self.scene_size,
             bundles_stale: false,
             bundle_runs: Vec::new(),
+            aliased: !alias.shares.is_empty(),
+            unshare_pending: false,
         };
 
         let mut pipelines: HashMap<PipelineKey, wgpu::RenderPipeline> = HashMap::new();
@@ -847,12 +853,71 @@ impl<'c> SceneBuilder<'c> {
             let pass = scene.compile_pass(ctx, shader, rec, &mut pipelines)?;
             scene.passes.push(pass);
         }
+        // The first draw into each shared texture clears it (see `AliasPlan::clear_first`).
+        let mut pending = alias.clear_first;
+        for op in &scene.ops {
+            if let Op::Draw(p) = op
+                && let Some(pass) = scene.passes.get_mut(p.0 as usize)
+                && pending.remove(&pass.desc.target)
+            {
+                pass.clear_first = true;
+            }
+        }
         // Kept for passes added later (RenderScene::extend): modules and pipelines are reused.
         scene.shaders = std::mem::take(&mut self.shaders);
         scene.pipelines = pipelines;
         scene.analyse_ops();
         scene.rebuild_bindings(ctx)?;
         Ok(scene)
+    }
+
+    /// Which transient targets share a texture ([`plan_aliasing`] over the frame operations).
+    /// Only a deferred pool (a new scene) is planned; an extension allocates as it goes.
+    fn alias_plan(&self) -> AliasPlan {
+        if !self.targets.is_deferred() {
+            return AliasPlan::default();
+        }
+        let mut accesses = Vec::new();
+        for (i, op) in self.ops.iter().enumerate() {
+            match *op {
+                Op::Clear { target, .. } => accesses.push((i, target, Access::Clear)),
+                // A copy may cover only part of its destination: counted as a read of both.
+                Op::Copy { src, dst } => {
+                    accesses.push((i, src, Access::Read));
+                    accesses.push((i, dst, Access::Read));
+                }
+                Op::Draw(p) => {
+                    let Some(rec) =
+                        p.0.checked_sub(self.pass_base)
+                            .and_then(|l| self.passes.get(l as usize))
+                    else {
+                        continue;
+                    };
+                    let d = &rec.desc;
+                    for t in d
+                        .slots
+                        .iter()
+                        .flatten()
+                        .map(|b| b.texture)
+                        .chain(d.slot0_variants.iter().copied())
+                    {
+                        if let TextureRef::Target(r) = t {
+                            accesses.push((i, r, Access::Read));
+                        }
+                    }
+                    let write = if d.blend.reads_destination() || d.write_mask != WriteMask::All {
+                        Access::Read
+                    } else {
+                        Access::Overwrite
+                    };
+                    accesses.push((i, d.target, write));
+                }
+            }
+        }
+        plan_aliasing(&accesses, |t| {
+            (self.targets.is_transient(t) && !self.depth_targets.contains(&t))
+                .then(|| self.targets.get(t).size())
+        })
     }
 
     /// Compiles the passes added to a scene being extended and gives the scene its resources
@@ -1038,6 +1103,9 @@ struct CompiledPass {
     hazard_scratch: Option<RtId>,
     res0: Option<UniformSlot>,
     enabled: bool,
+    /// The target's texture is shared with other transient targets and this pass writes it
+    /// first in the frame: its render pass starts with a clear to transparent black.
+    clear_first: bool,
 }
 
 enum Item {
@@ -1150,6 +1218,10 @@ pub struct RenderScene {
     /// Passes recorded in each of `bundles`: a rebuild reuses the bundle of an unchanged
     /// run. Emptied when bind groups or the dynamic buffer change.
     bundle_runs: Vec<Vec<usize>>,
+    /// Some transient targets share a texture (planned on the frame order of the build).
+    aliased: bool,
+    /// The frame order changed: shared targets get their own textures before the next frame.
+    unshare_pending: bool,
 }
 
 /// Default number of extra frames rendered after the last change when the
@@ -1486,6 +1558,7 @@ impl RenderScene {
             hazard_scratch: None,
             res0,
             enabled: true,
+            clear_first: false,
         })
     }
 
@@ -1763,11 +1836,26 @@ impl RenderScene {
         self.analyse_ops();
         self.bundles_stale = true;
         self.dirty = true;
+        // Lifetimes were planned on the old order (lumenwall-engine marks no transient target
+        // in scenes whose scripts reorder layers; this keeps any other caller correct).
+        self.unshare_pending |= self.aliased;
     }
 
     /// Rebuilds segments and bundles now if the structure changed (also done by
     /// [`Self::encode`]).
     pub fn refresh(&mut self, ctx: &GpuContext) {
+        if self.unshare_pending {
+            self.unshare_pending = false;
+            self.aliased = false;
+            self.targets.unshare(ctx);
+            for p in &mut self.passes {
+                p.clear_first = false;
+            }
+            if let Err(e) = self.rebuild_bindings(ctx) {
+                tracing::error!(target: "lumenwall_render", "render targets not rebound: {e}");
+            }
+            return;
+        }
         if self.bundles_stale {
             self.build_segments();
             self.build_bundles(ctx);
@@ -1820,7 +1908,11 @@ impl RenderScene {
                             dst: scratch,
                         });
                     }
-                    if cur.as_ref().is_none_or(|c| c.0 != target) {
+                    if pass.clear_first {
+                        // Shared texture: start from transparent black, as a fresh target.
+                        flush(&mut cur, &mut segments);
+                        cur = Some((target, Some(wgpu::Color::TRANSPARENT), Vec::new()));
+                    } else if cur.as_ref().is_none_or(|c| c.0 != target) {
                         flush(&mut cur, &mut segments);
                         cur = Some((target, None, Vec::new()));
                     }
