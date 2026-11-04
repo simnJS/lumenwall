@@ -53,6 +53,11 @@ pub struct HeadlessOptions {
     /// Render `_rt_FullFrameBuffer` at the scene's own size, as before the displayed-size
     /// rendering (comparisons). Also set by `LUMENWALL_SCENE_SIZE_TARGET=1`.
     pub scene_size_target: bool,
+    /// Frames per second the run is held to in real time (`--pace`): each frame starts no
+    /// earlier than `i / pace` seconds after the first, so a measurement leaves the GPU to
+    /// whatever else runs. `None` (default): frames back to back. The measured CPU split
+    /// (update, encode, finish, submit) never includes the wait.
+    pub pace: Option<f32>,
 }
 
 impl Default for HeadlessOptions {
@@ -78,6 +83,7 @@ impl Default for HeadlessOptions {
             hwdec: lumenwall_video::HwDecode::Auto,
             audio_level: 0.0,
             scene_size_target: crate::scene::scene_size_target_forced(),
+            pace: None,
         }
     }
 }
@@ -245,7 +251,15 @@ pub fn render_headless(
     let mut finish_submit = (Duration::ZERO, Duration::ZERO);
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
+    let paced_from = Instant::now();
     for i in 0..opts.frames {
+        if let Some(fps) = opts.pace.filter(|f| *f > 0.0) {
+            // Real-time pacing (`--pace`), before the frame's measured work.
+            let due = paced_from + Duration::from_secs_f64(f64::from(i) / f64::from(fps));
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+        }
         let time = opts.start_time + f64::from(i) * f64::from(dt);
         let cursor = opts.pointer.map_or(
             Vec2::new(opts.width as f32, opts.height as f32) * 0.5,

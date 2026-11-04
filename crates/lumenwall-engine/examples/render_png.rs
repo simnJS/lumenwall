@@ -4,6 +4,8 @@
 //! cargo run -p lumenwall-engine --example render_png -- [options] <id-or-path>...
 //!   --size WxH         output size (default 1920x1080)
 //!   --frames N         frames simulated (default 1)
+//!   --pace F           hold the run to F frames per second in real time (measurements on a
+//!                      PC in use; default: frames back to back)
 //!   --fps F            simulated frame rate (default 30)
 //!   --start T          scene time of the first frame in seconds (default 1); every step,
 //!                      the first one included, lasts 1/fps
@@ -86,6 +88,7 @@ fn main() {
                 }
             }
             "--software" => opts.software = true,
+            "--pace" => opts.pace = val().parse().ok(),
             "--no-particles" => opts.particles = false,
             "--click" => {
                 opts.clicks = val()
