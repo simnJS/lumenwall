@@ -940,7 +940,8 @@ impl Local {
         None
     }
 
-    /// Media for the scenes whose scripts handle it: the system's media sessions are followed
+    /// Media for the scenes whose scripts handle it or that sample the cover
+    /// (`SceneRuntime::wants_media_artwork`): the system's media sessions are followed
     /// while one does, and a change reaches their scripts at their next frame, requested now
     /// (the scripts may only have event handlers, like those of 3372348904). A scene that just
     /// started gets the current state.
@@ -975,6 +976,9 @@ impl Local {
             if let Some(enabled) = media.status {
                 s.runtime.media_status(enabled);
             }
+            // `$mediaThumbnail`: uploaded only when the cover changed.
+            s.runtime
+                .set_media_artwork(&r.ctx, media.artwork.as_deref());
             s.runtime.media_changed(media.snapshot);
             for o in r.outputs.iter_mut().filter(|o| o.target == t && !o.paused) {
                 request(r.surfaces.as_mut(), o);
@@ -2099,12 +2103,15 @@ fn build_renderer(
         s.skipped_objects,
         r.ctx.memory().bytes() as f64 / 1048576.0,
     );
+    // Media followed only for scenes whose scripts handle it or that sample the cover.
+    let wants_media =
+        crate::script::media::wants_media(&wp.project) || runtime.wants_media_artwork();
     Ok(Renderer::Scene(Box::new(SceneSlot {
         runtime,
         updated_at: u64::MAX,
         serial: 0,
         clock: crate::clock::SceneClock::new(),
-        wants_media: crate::script::media::wants_media(&wp.project),
+        wants_media,
         media_ready: false,
     })))
 }

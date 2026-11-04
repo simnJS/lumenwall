@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lumenwall_assets::Vfs;
+use lumenwall_render::dynbuf::UniformSlot;
 use lumenwall_render::targets::ScopeId;
 use lumenwall_render::{
     GpuContext, ImageHandle, ImagePass, Op, RtId, SceneBuilder, add_image_with_puppet,
@@ -34,7 +35,7 @@ use crate::particles::{self, ParticleRuntime};
 use crate::script::SceneScripts;
 use crate::shaders::ShaderProvider;
 use crate::text;
-use crate::texture::TextureCache;
+use crate::texture::{MediaThumbnail, TextureCache};
 
 /// Runtime state of a parked object (destroyed layer), kept for reuse.
 #[derive(Default)]
@@ -158,6 +159,8 @@ struct ImageSetup {
     animated: Vec<AnimatedPass>,
     time: bool,
     frame_inputs: bool,
+    /// Resolution uniforms of the slots sampling a media thumbnail.
+    media: Vec<(MediaThumbnail, UniformSlot)>,
 }
 
 /// Passes of a prepared image and their uniforms: the image branch of `build_scene`
@@ -169,6 +172,11 @@ fn add_image(
 ) -> Result<ImageSetup, String> {
     let passes: Vec<ImagePass> = img.passes.iter().map(|p| p.pass.clone()).collect();
     let handle = add_image_with_puppet(b, &img.spec, &passes, None).map_err(|e| e.to_string())?;
+    let media = super::media::resolution_uniforms(
+        b,
+        &handle.passes,
+        img.passes.iter().map(|p| p.media.as_slice()),
+    );
     let s = &project.settings;
     let general = project.scene.as_ref().ok_or("not a scene project")?.general;
     let ambient = s.value(general.ambient_color).vec3();
@@ -260,6 +268,7 @@ fn add_image(
         animated,
         time,
         frame_inputs,
+        media,
     })
 }
 
@@ -523,6 +532,9 @@ impl SceneRuntime {
         l.object_ops.insert(idx, ext.ops);
         self.live.extend(setup.live);
         self.frame_inputs |= setup.frame_inputs;
+        if !setup.media.is_empty() {
+            self.add_media_users(l.textures.media_targets(), setup.media);
+        }
         if setup.time || !setup.animated.is_empty() {
             self.animated = true;
             if let Some(s) = &mut self.scripts {

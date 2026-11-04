@@ -7,6 +7,8 @@
 //! Pages subscribe themselves ([`crate::web`]: the page's host already wakes the engine loop).
 //! Scenes need the loop to call `SceneRuntime::media_changed` / `media_status` and to redraw the
 //! outputs showing them: [`MediaFeed`] and [`wants_media`] are that API (wired by `engine.rs`).
+//! Scenes that sample `$mediaThumbnail` (`SceneRuntime::wants_media_artwork`) also get the
+//! cover through [`SceneMedia::artwork`].
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -190,6 +192,8 @@ pub(crate) struct SceneMedia {
     /// `mediaPropertiesChanged`, `mediaPlaybackChanged`, `mediaTimelineChanged`,
     /// `mediaThumbnailChanged` (spec 06 §8.4: all four on any change).
     pub snapshot: MediaSnapshot,
+    /// The cover, shared with the hub (`SceneRuntime::set_media_artwork`: `$mediaThumbnail`).
+    pub artwork: Option<Arc<Artwork>>,
 }
 
 /// The engine's subscription for scenes: taken while a scene wants media, dropped otherwise.
@@ -207,7 +211,12 @@ impl MediaFeed {
         self.sync_with(MediaHub::system(), wanted, waker);
     }
 
-    fn sync_with(&mut self, hub: &MediaHub, wanted: bool, waker: impl FnOnce() -> MediaWaker) {
+    pub(crate) fn sync_with(
+        &mut self,
+        hub: &MediaHub,
+        wanted: bool,
+        waker: impl FnOnce() -> MediaWaker,
+    ) {
         match (wanted, self.subscription.is_some()) {
             (true, false) => self.subscription = Some(hub.subscribe(waker())),
             (false, true) => *self = Self::default(),
@@ -238,6 +247,7 @@ impl MediaFeed {
         SceneMedia {
             status,
             snapshot: scene_snapshot(state, &mut self.thumbnails),
+            artwork: state.session.as_ref().and_then(|n| n.artwork.clone()),
         }
     }
 }
@@ -388,7 +398,7 @@ pub(crate) mod tests {
     }
 
     /// A hub whose fake source hands its sink to the test.
-    fn fake_hub() -> (MediaHub, Arc<Mutex<Option<MediaSink>>>) {
+    pub(crate) fn fake_hub() -> (MediaHub, Arc<Mutex<Option<MediaSink>>>) {
         let sink = Arc::new(Mutex::new(None));
         let s = Arc::clone(&sink);
         let hub = MediaHub::new(move |new| {
@@ -424,11 +434,14 @@ pub(crate) mod tests {
         assert_eq!(m.snapshot.state, ScriptPlayback::Playing);
         assert!(m.snapshot.thumbnail.has_thumbnail);
         assert_eq!(m.snapshot.duration, 180.0);
+        // The cover itself, shared with the hub (`$mediaThumbnail`).
+        assert_eq!(m.artwork.as_ref().map(|a| a.key), Some(42));
         // A new track: the four events again, the status only once.
         publish(playing("Next", None));
         let m = feed.poll().unwrap();
         assert_eq!(m.status, None);
         assert!(!m.snapshot.thumbnail.has_thumbnail);
+        assert!(m.artwork.is_none());
         // A scene loaded now gets everything.
         let c = feed.current().unwrap();
         assert_eq!(c.status, Some(true));
