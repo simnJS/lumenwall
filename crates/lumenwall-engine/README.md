@@ -52,9 +52,9 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
 | `particles` | Definition + material + texture (sprite sheet from the `.tex`, `TEX0FORMAT`) → `ParticleSystem` and a vertex stream of the graph; per frame `update` + `write_vertices` into one reused buffer + uniforms of spec 05 §12.2. |
 | `script` | SceneScript (`lumenwall-script`): the scene's `SceneHost` (layers, effects, materials, scene members, clock, cursor, display, spectrum, script properties), script loading at the end of `build_scene`, per-frame tick inside `SceneRuntime::update`, events, cursor hit tests, the `TextSink` junction. Absent (no runtime, no cost) when no created object carries a script. `script/dynamic.rs`: layers scripts create, destroy and sort (scene-model side, pools). |
 | `scene/layers.rs` | GPU side of the layers scripts create after load: `RenderScene::extend`, parking and reuse, draw order (see "Layers created by scripts"). |
-| `vulkan_driver` | `restrict_vulkan_loader` (first call of `main`, Linux): `VK_LOADER_DRIVERS_SELECT` set to the manifest glob of the driver used last time (`<cache>/vulkan-driver`: glob, PCI vendor and device), so the loader does not open the other drivers (Mesa's stay mapped: ≈ 50 MiB RSS, 25 ms per instance here). `open_gpu` lifts it and opens again with every driver when the restricted loader finds no adapter or not the remembered one, then remembers the new choice. Untouched when the user sets a loader driver variable; nothing on Windows. |
+| `vulkan_driver` | `restrict_vulkan_loader` (first call of `main`, Linux and Windows): `VK_LOADER_DRIVERS_SELECT` set to the manifest glob of the driver used last time (`<cache>/vulkan-driver`: glob, PCI vendor and device), so the loader does not open the other drivers (Linux: Mesa's stay mapped, ≈ 50 MiB RSS, 25 ms per instance here). Windows: the glob is the adapter's manifest name read from its driver's registry key (`*nv-vk64.json`, `lumenwall_platform::vulkan_registry`), and the implicit layers the other adapters' drivers register are turned off with `VK_LOADER_LAYERS_DISABLE` (AMD's `VK_LAYER_AMD_switchable_graphics` lives in `amdvlk64.dll`, which the loader mapped into every Vulkan process even with only the NVIDIA driver selected). `open_gpu` lifts it and opens again with every driver when the restricted loader finds no adapter or not the remembered one, then remembers the new choice. Untouched when the user sets a loader driver variable. |
 | `audio` | Scene sounds (`lumenwall-audio` player, `random`/`loop` modes, zero-copy data), spectrum capture (Pulse/PipeWire-pulse on Linux, WASAPI on Windows) feeding `g_AudioSpectrum*` through the frame block, automute. |
-| `engine` | `Engine`: platform backend selection (desktop, X11 fallback, window), GPU context, outputs, event loop, pause (platform and user), pointer, screenshots, statistics; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device); `engine/release.rs`: GPU released after a long pause and restored on resume (Frame loop below). |
+| `engine` | `Engine`: in this process (`Local`) or, on Windows, in an engine process of its own (`engine/remote.rs`, `engine/host.rs`, below). `Local`: platform backend selection (desktop, X11 fallback, window), GPU context (one backend per instance, `gpu_backends`: Vulkan, then DX12 when Vulkan has no adapter; `LUMENWALL_GPU_BACKEND=vulkan\|dx12`), outputs, event loop, pause (platform and user), pointer, screenshots, statistics, scene media events; live plan changes (`EngineControl::Reload`: wallpapers reused or loaded before anything is released, outputs rebound, surfaces reopened only for layout/layer/pause-policy changes, idle without wallpaper: no surface, no GPU device); `engine/release.rs`: GPU released after a long pause and restored on resume (Frame loop below). |
 | `monitor` | `EngineMonitor`: outputs, wallpapers, states, property values (rewritten on changes only) and frame counters (recorded only while sampling) for the IPC daemon. |
 | `headless` | `render_headless`: one wallpaper, N frames at a fixed step, PNG files. |
 | `model3d` | Spec 09: `Builder3d` (before the creation loop: `.mdl` → static meshes, model materials through `Project::load_model_material`, 3D shaders, textures, `_rt_Reflection`, the scene depth buffer; draws in render order, reflection pass first) and `Scene3d` (per frame: camera pose from the paths, `V`, `P`, lights, visibility and the uniforms of every 3D pass, compare-on-write). |
@@ -81,10 +81,20 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   particles (with their `starttime` warm-up), scripts (`init` again, in-memory `localStorage`
   lost), videos (from the start, with a fresh sound track) and web pages (reloaded; the output
   keeps its image until the page's first frame).
-- Freed heap pages go back to the system (`malloc_trim(0)`, glibc only) after a wallpaper is
-  unloaded by a new plan and after the GPU release: glibc keeps them in its arenas otherwise
-  (scene → video → scene: 249 → 220 MiB RSS; released GPU: 117 → 101 MiB). 1–3 ms, on those
-  events only.
+- Freed heap pages go back to the system (`malloc_trim(0)` with glibc; on Windows
+  `HeapOptimizeResources` and `HeapCompact` on every heap, `lumenwall_platform::process`) after
+  a wallpaper is unloaded by a new plan and after the GPU release: glibc keeps them in its
+  arenas otherwise (scene → video → scene: 249 → 220 MiB RSS; released GPU: 117 → 101 MiB),
+  the Windows heaps keep them committed. 1–3 ms (glibc), 0.1–0.4 ms (Windows), on those events
+  only.
+- Windows: the working set is emptied (`K32EmptyWorkingSet`) 1 s after the first frame of a
+  load (start, new wallpaper, GPU restore), when every output pauses and after the GPU release:
+  what loading touched (driver and shader-compiler pages, decoded files, the mapped `.pkg`)
+  goes back to the system and the frames fault back only what they use. 3–14 ms; private bytes
+  unchanged.
+- Windows: the instance and the device are created on a thread while the platform opens
+  (the adapter is checked against the first output's surface afterwards), and each output's
+  swap chain is created on a thread while its renderer is built.
 - One scene per target, updated and encoded once per loop iteration even when several outputs
   show it; each output then composes it with its own scaling and clamp.
 - Scene time (`clock.rs`, `SceneClock`, one per scene, read as `FrameState::time`/`dt`): the
@@ -99,6 +109,37 @@ lumenwall (CLI, config, plan) ──EnginePlan──▶ Engine::load ── Wall
   frames coming, but a frame is only redrawn when a script changed something: unchanged writes
   report no change, and the frame globals (`g_Time`, pointer, spectrum) are not rewritten when no
   pass reads them.
+
+### Engine process (Windows)
+
+A process that has opened a Vulkan device keeps the GPU driver loaded for good: measured with a
+bare wgpu program on an RTX 4080 SUPER, 1.2 MiB private at start, ≥ 30 MiB private, 45 MiB
+working set and 6 driver threads after its device and instance are destroyed (`nvoglv64`,
+`nvgpucomp64`, `nvspcap64`, `nvrtum64` stay mapped). So on Windows the daemon never opens one:
+
+- `main` calls `run_engine_host` right after `restrict_vulkan_loader`. With the hidden first
+  argument `--lumenwall-engine-host` the process is an engine process: it runs `Local` on its
+  main thread and nothing else (no command line, configuration or IPC server). Otherwise it is
+  a daemon, whose `Engine` is `engine/remote.rs`.
+- The engine process starts when a plan brings a wallpaper while none runs, with that plan; a
+  new plan is applied in place by the same process (its GPU device included); it ends when the
+  last wallpaper goes (`clear`), and the daemon then trims its heaps and working set.
+- It is tied to the daemon by a job object (`KILL_ON_JOB_CLOSE`, `lumenwall_platform::process`):
+  it dies with the daemon however the daemon ends; the end of its stdin also stops it.
+- It is restarted once with the current plan when it dies unexpectedly; a second death within
+  30 s leaves the targets in error (`the engine process stopped unexpectedly (…); apply a
+  wallpaper to try again`) until the next plan.
+- One JSON object per line on its stdin and stdout (`engine/wire.rs`): plans and controls one
+  way; answers, the monitor's report on change, frame counters on request (`get_stats`) and log
+  records the other. Records are re-emitted by the daemon through callsites of their own target
+  and level (`engine/logfwd.rs`), so the daemon's filter and log file treat them like its own;
+  `log` records (wgpu, naga) included, through tracing-log.
+- The process restricts the Vulkan loader itself (the daemon's variables are removed from its
+  environment) and follows the system's media sessions only while one of its scenes handles
+  media events; the daemon follows none.
+- `LUMENWALL_ENGINE_PROCESS=0` keeps the engine in the daemon; `--list-properties` and
+  `--dump-structure` always do. Linux: the engine stays in the daemon (the driver cost there is
+  covered by the GPU release and `malloc_trim`; the split is not measured on Linux yet).
 
 ### lumenwall-render extensions
 
@@ -254,12 +295,11 @@ the windshield comes before the interior in `body.mdl`; the preview shows the in
 | Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumenwall-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
 | Web wallpapers on Windows | Refused (`unsupported_reason`): the Direct3D shared texture import is not written. |
 | Web page audio and automute | `--volume`, `--silent` and pause apply; automute does not (the page's stream comes from the host process, which the detector would count as another application and mute the page in a loop), and that stream can automute the scene sounds of other outputs (spec 07 §15.6). |
-| Web media integration | Listeners register, but no MPRIS / Windows media source feeds them. |
 | `thisScene.createLayer` / `destroyLayer` / `sortLayer` | Neutral results (`undefined` / `false`): layers cannot be added to the render graph after load. Scripts that build layers in `init` (audio visualizers) fail there. |
 | Web wallpapers | Load error (`lumenwall-web` not integrated). |
 | Created layers | Puppet meshes are not created after load (the image gets the plain quad); scripts carried by a creation configuration do not run; a created particle system starts at the layer's origin but does not follow later `origin` writes (like the scene's own systems); 3D models (`.mdl`) cannot be created. |
 | Sound layers | Listed and found (`getLayer('jump')`), but `play()`/`stop()` are neutral: the scene does not drive the audio player yet. |
-| Media events | No media source (MPRIS / Windows media session) yet: `SceneRuntime::media_changed` / `media_status` are the entry points. |
+| Media cover in scenes | Scene scripts get the media events (title, artist, album, playback, timeline, thumbnail state and colours) from the system's media session (GSMTC on Windows, MPRIS on Linux, followed only while a scene's scripts handle them); the cover image itself (`$mediaThumbnail` texture) is not bound yet. |
 | Script effects on fixed state | Effect visibility, particle `origin`/`scale`/`angles` (read by `lumenwall-particles` at creation), camera/bloom/clear-colour members: scripts can read and write them, the image is unchanged. |
 | `localStorage` | In memory (not persisted between runs). |
 | Span groups | Each member output shows the whole wallpaper (no per-output slice yet). |
