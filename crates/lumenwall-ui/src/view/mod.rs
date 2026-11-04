@@ -144,6 +144,9 @@ impl App {
                     .padding(Padding::default().bottom(layout::STATUS_H + sp::L)),
             );
         }
+        if let Some(dialog) = self.setup_dialog(t) {
+            layers = layers.push(dialog);
+        }
         drawn::drawn(self.window_frame(t, layers.into()), &self.drawn)
     }
 

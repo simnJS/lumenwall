@@ -324,23 +324,6 @@ mod settings_portal {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn reads_kde_animation_factor() {
-        let ini = "[General]\nAnimationDurationFactor=3\n[KDE]\nLookAndFeelPackage=x\nAnimationDurationFactor=0\n";
-        assert_eq!(super::kde_factor(ini), Some(0.0));
-        assert_eq!(
-            super::kde_factor("[KDE]\nAnimationDurationFactor=0.5"),
-            Some(0.5)
-        );
-        assert_eq!(
-            super::kde_factor("[General]\nAnimationDurationFactor=0"),
-            None
-        );
-    }
-}
-
 #[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -421,4 +404,21 @@ pub fn registry_set_run(key: &str, value: &str, data: Option<&str>) -> std::io::
         return Err(std::io::Error::from_raw_os_error(status as i32));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_kde_animation_factor() {
+        let ini = "[General]\nAnimationDurationFactor=3\n[KDE]\nLookAndFeelPackage=x\nAnimationDurationFactor=0\n";
+        assert_eq!(super::kde_factor(ini), Some(0.0));
+        assert_eq!(
+            super::kde_factor("[KDE]\nAnimationDurationFactor=0.5"),
+            Some(0.5)
+        );
+        assert_eq!(
+            super::kde_factor("[General]\nAnimationDurationFactor=0"),
+            None
+        );
+    }
 }

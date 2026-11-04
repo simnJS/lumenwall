@@ -69,6 +69,8 @@ pub struct UiConfig {
     pub last_session: Option<u64>,
     /// Automatic update checks and the pre-release channel.
     pub updates: crate::updater::Prefs,
+    /// Answers to the installation dialog.
+    pub setup: crate::setup::Prefs,
 }
 
 impl Default for UiConfig {
@@ -89,6 +91,7 @@ impl Default for UiConfig {
             workshop_mature: false,
             last_session: None,
             updates: crate::updater::Prefs::default(),
+            setup: crate::setup::Prefs::default(),
         }
     }
 }
@@ -135,7 +138,8 @@ impl UiConfig {
     }
 }
 
-/// Start with the session: a desktop entry on Linux, a `Run` registry value on Windows.
+/// Start with the session: a desktop entry on Linux, a `Run` registry value on Windows
+/// (the same ones the installation dialog and the Windows installer write).
 /// It launches `lumenwall-ui --background`, which starts the daemon and the tray.
 pub mod autostart {
     #[cfg(not(windows))]
@@ -145,7 +149,9 @@ pub mod autostart {
 
     #[cfg(not(windows))]
     pub fn is_enabled() -> bool {
-        entry().is_some_and(|p| p.is_file())
+        entry().is_some_and(|p| {
+            std::fs::read_to_string(p).is_ok_and(|t| !t.lines().any(|l| l.trim() == "Hidden=true"))
+        })
     }
 
     #[cfg(not(windows))]
@@ -158,36 +164,25 @@ pub mod autostart {
             };
         }
         let exe = std::env::current_exe()?;
-        let exe = exe
-            .to_string_lossy()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let text = format!(
-            "[Desktop Entry]\nType=Application\nName=Lumenwall\nComment=Animated wallpapers\n\
-             Exec=\"{exe}\" --background\nIcon=lumenwall\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
-        );
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, text)
+        crate::setup::linux::write_autostart(&path, &exe).map_err(std::io::Error::other)
     }
 
     #[cfg(windows)]
-    const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    use crate::setup::windows::{RUN_KEY, RUN_VALUE};
 
     #[cfg(windows)]
     pub fn is_enabled() -> bool {
-        crate::platform::registry_string(true, RUN, "Lumenwall").is_some()
+        crate::platform::registry_string(true, RUN_KEY, RUN_VALUE).is_some()
     }
 
     #[cfg(windows)]
     pub fn set(enabled: bool) -> std::io::Result<()> {
         if enabled {
             let exe = std::env::current_exe()?;
-            let cmd = format!("\"{}\" --background", exe.display());
-            crate::platform::registry_set_run(RUN, "Lumenwall", Some(&cmd))
+            let cmd = crate::setup::windows::run_command(&exe);
+            crate::platform::registry_set_run(RUN_KEY, RUN_VALUE, Some(&cmd))
         } else {
-            crate::platform::registry_set_run(RUN, "Lumenwall", None)
+            crate::platform::registry_set_run(RUN_KEY, RUN_VALUE, None)
         }
     }
 }

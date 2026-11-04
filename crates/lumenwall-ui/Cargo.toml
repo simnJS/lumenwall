@@ -46,7 +46,8 @@ zbus = "5.19"
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "27.0", default-features = false, features = ["dx12"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+# Win32_System_Com and Win32_UI_Shell: the Start menu shortcut (setup/windows.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 tray-icon = { version = "0.26", default-features = false }
 rfd = { version = "0.16", default-features = false }
 

@@ -5,6 +5,10 @@ USAGE:
     lumenwall-ui --tray           Tray icon only (pause, mute, open, quit)
     lumenwall-ui --background     Start the engine if needed, then the tray icon
                               (what "Start with my session" runs)
+    lumenwall-ui --setup          Open the window with the installation dialog
+                              (menu entry, start-up, GNOME extension)
+    lumenwall-ui --stop-engine    Ask the running engine to quit and wait for it
+                              (exit 0: stopped, 3: none was running, 1: error)
 
 DEVELOPER OPTIONS:
     --fake-daemon             Talk to an in-process fake engine (real IPC transport)
