@@ -94,4 +94,41 @@ mod tests {
         assert!(extension_version().is_some());
         assert!(APP_ENTRY.contains("\nExec=lumenwall-ui\n"));
     }
+
+    /// `packaging/linux/install.sh` writes the same files as the app.
+    #[test]
+    fn install_script_matches_the_app() {
+        let script = std::fs::read_to_string(packaging().join("linux/install.sh")).unwrap();
+        let list = script.split("ICONS=\"").nth(1).unwrap();
+        let list = &list[..list.find('"').unwrap()];
+        let mut theirs: Vec<&str> = list.split_whitespace().collect();
+        theirs.sort();
+        let mut ours: Vec<&str> = ICONS.iter().map(|(n, _)| *n).collect();
+        ours.sort();
+        assert_eq!(theirs, ours, "ICONS in install.sh");
+        assert!(script.contains(&format!("UUID=\"{EXTENSION_UUID}\"")));
+        assert!(script.contains(&format!(
+            "RELEASE_KEY=\"{}\"",
+            lumenwall_update::RELEASE_PUBLIC_KEY.unwrap()
+        )));
+        // The autostart entry, line by line (the program path lines differ only by
+        // how they are produced).
+        let body = script.split("write_autostart_entry() {").nth(1).unwrap();
+        let body = &body[..body.find("} >").unwrap()];
+        let sh: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("echo \""))
+            .map(|l| l.trim_end_matches('"').to_owned())
+            .collect();
+        let rust = super::super::desktop::autostart_entry(Path::new("/x/lumenwall-ui")).unwrap();
+        let rust: Vec<&str> = rust.lines().collect();
+        assert_eq!(sh.len(), rust.len(), "{sh:#?}");
+        for (a, b) in sh.iter().zip(&rust) {
+            if a.starts_with("TryExec=") || a.starts_with("Exec=") {
+                assert_eq!(a.split('=').next(), b.split('=').next());
+            } else {
+                assert_eq!(a, b);
+            }
+        }
+    }
 }

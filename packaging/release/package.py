@@ -17,6 +17,7 @@ Archive layout (what crates/lumenwall-update installs):
         LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-NOTICES.html, README.txt
         share/applications/*.desktop     Linux
         share/icons/hicolor/...          Linux
+        share/gnome-shell/extensions/lumenwall@simnjs.github.io/   Linux
 
 Linux gets a .tar.gz, Windows a .zip. Entries are sorted, owned by root, with
 fixed permissions and the SOURCE_DATE_EPOCH timestamp when it is set, so the same
@@ -36,6 +37,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PROGRAMS = ["lumenwall", "lumenwall-ui"]
 OPTIONAL_PROGRAMS = ["lumenwall-web-host"]
+EXTENSION = "lumenwall@simnjs.github.io"
 
 README = """Lumenwall {version} ({target})
 ================================
@@ -59,24 +61,27 @@ The "lumenwall.bundle" file tells the updater that this whole folder is
 Lumenwall's: leave it here.
 """
 
-LINUX = """Install for your user (optional)
---------------------------------
-    mkdir -p ~/.local/opt ~/.local/bin
-    mv lumenwall-{version}-{target} ~/.local/opt/lumenwall
-    ln -sf ~/.local/opt/lumenwall/lumenwall ~/.local/opt/lumenwall/lumenwall-ui ~/.local/bin/
-    cp ~/.local/opt/lumenwall/share/applications/*.desktop ~/.local/share/applications/
-    cp -r ~/.local/opt/lumenwall/share/icons/hicolor ~/.local/share/icons/
+LINUX = """Install for your user
+--------------------
+Start ./lumenwall-ui: at the first start it offers to copy the programs to
+~/.local/bin and to add the menu entry, the icons, the start-up entry and, on
+GNOME, the Shell extension. Each item can be left out; Settings > Installation
+repairs or removes them later. The same, from a terminal, without this folder:
+
+    curl -fsSL https://github.com/simnJS/lumenwall/releases/latest/download/install.sh | sh
 
 Lumenwall needs the Vulkan loader, and FFmpeg's shared libraries for video
 wallpapers.
 
 """
 
-WINDOWS = """Install (optional)
-------------------
-Move this folder to %LOCALAPPDATA%\\Programs\\Lumenwall and pin lumenwall-ui.exe to
-Start. Keep it in a folder your account can write to (not Program Files), so the
-app can update itself.
+WINDOWS = """Install
+-------
+The installer (lumenwall-{version}-x86_64-windows-setup.exe on the release page)
+is the simplest way. From this folder, start lumenwall-ui.exe: at the first
+start it offers to copy itself to %LOCALAPPDATA%\\Programs\\Lumenwall and to add
+a Start menu shortcut and the start with Windows. Keep Lumenwall in a folder
+your account can write to (not Program Files), so the app can update itself.
 
 """
 
@@ -134,6 +139,10 @@ def stage(args: argparse.Namespace) -> Path:
         for desktop in sorted((ROOT / "packaging" / "linux").glob("*.desktop")):
             shutil.copy2(desktop, apps / desktop.name)
         shutil.copytree(ROOT / "packaging" / "linux" / "icons" / "hicolor", top / "share" / "icons" / "hicolor")
+        shutil.copytree(
+            ROOT / "packaging" / "gnome-extension" / EXTENSION,
+            top / "share" / "gnome-shell" / "extensions" / EXTENSION,
+        )
     return top
 
 
