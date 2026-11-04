@@ -11,7 +11,7 @@ use crate::config::{self, LoadedConfig};
 use crate::daemon::{Daemon, DaemonInit};
 use crate::logging::{self, LogOptions};
 use crate::plan::{self, PlanServices};
-use crate::services::{self, Engine, PlaylistCatalog, WallpaperResolver};
+use crate::services::{self, Engine, PlaylistCatalog, PowerSource, WallpaperResolver};
 use crate::settings::{Scaling, WallpaperRef};
 use crate::signals;
 use crate::watch::{self, FileWatcher};
@@ -38,6 +38,8 @@ pub struct Services {
     pub engine: Box<dyn Engine>,
     /// IPC endpoint of the daemon (`None`: no IPC, no single-instance check).
     pub ipc: Option<lumenwall_ipc::Endpoint>,
+    /// Power source for "pause on battery" (`None`: the setting never pauses).
+    pub power: Option<Arc<dyn PowerSource>>,
 }
 
 /// Where user-facing text goes: help, "running with", property listing, argument errors.
@@ -152,6 +154,7 @@ pub fn run(args: Vec<OsString>, services: Services, console: Console<'_>) -> Exi
         playlists: services.playlists.clone(),
         control,
         monitor: engine.monitor(),
+        power: services.power.clone(),
         log_filter: logging.filter_handle(),
         log_config: loaded
             .config

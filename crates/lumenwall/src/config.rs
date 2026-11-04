@@ -12,6 +12,7 @@
 //! scaling = "fill"
 //! fullscreen-pause-ignore-appids = ["mpv"]
 //! gpu-release-delay = 300         # seconds paused before the GPU is released; 0 = never
+//! pause-on-battery = true         # pause every output while on battery (default false)
 //!
 //! [properties]
 //! bloom = true                    # booleans become "1"/"0"
@@ -65,6 +66,9 @@ pub struct Config {
     /// Seconds every output stays paused before the GPU device and its memory are released
     /// (0 = never; default 300).
     pub gpu_release_delay: Option<i64>,
+    /// Pause every output while the computer runs on battery (Wallpaper Engine's "on battery:
+    /// pause"); default false ("keep running", Wallpaper Engine's default too).
+    pub pause_on_battery: Option<bool>,
     /// Default scaling of the window and of the outputs without their own value.
     pub scaling: Option<Scaling>,
     pub clamp: Option<Clamp>,
@@ -367,6 +371,7 @@ mod tests {
             fullscreen-pause = false
             fullscreen-pause-only-active = true
             fullscreen-pause-ignore-appids = ["mpv", ""]
+            pause-on-battery = true
             scaling = "fill"
             clamp = "border"
             layer = "top"
@@ -414,6 +419,7 @@ mod tests {
         assert_eq!(config.fps, Some(60));
         assert_eq!(config.scaling, Some(Scaling::Fill));
         assert_eq!(config.hwdec, Some(HwDecode::NvdecCopy));
+        assert_eq!(config.pause_on_battery, Some(true));
         assert_eq!(config.properties["bloom"].to_text(), "1");
         assert_eq!(config.properties["off"].to_text(), "0");
         assert_eq!(config.properties["count"].to_text(), "3");

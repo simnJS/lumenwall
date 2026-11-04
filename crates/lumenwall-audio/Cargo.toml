@@ -1,6 +1,6 @@
 [package]
 name = "lumenwall-audio"
-description = "Scene sound playback and audio capture for audio-reactive wallpapers."
+description = "Scene sound playback and audio capture for audio-reactive wallpapers; now playing and power source."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["playback", "wasapi"]
+default = ["playback", "wasapi", "power", "media"]
 # Scene sound playback: symphonia decoding + cpal output stream (ALSA on Linux, WASAPI on Windows).
 playback = ["dep:cpal", "dep:symphonia", "dep:rtrb"]
 # Windows backends: WASAPI loopback capture (cpal) and IAudioSessionManager2 automute. No-op elsewhere.
@@ -17,6 +17,12 @@ wasapi = ["dep:cpal", "dep:windows", "dep:windows-core"]
 pipewire = ["dep:pipewire"]
 # Linux PulseAudio-protocol backends (needs libpulse; also works on pipewire-pulse).
 pulse = ["dep:libpulse-binding", "dep:libpulse-sys"]
+# Power source for the application's "pause on battery": Windows power setting notifications,
+# Linux UPower over D-Bus. Event-driven (README, "Power and media sources").
+power = ["dep:windows", "dep:windows-core", "dep:zbus", "dep:futures-core"]
+# Now playing for scripts and web pages (title, artist, artwork, playback, timeline): Windows
+# Global System Media Transport Controls, Linux MPRIS over D-Bus. Artwork decoded by `image`.
+media = ["dep:windows", "dep:windows-core", "dep:zbus", "dep:futures-core", "dep:image"]
 
 [dependencies]
 realfft = "3.5"
@@ -26,11 +32,20 @@ serde_json.workspace = true
 symphonia = { version = "0.6", optional = true, default-features = false, features = ["opt-simd", "mp3", "ogg", "vorbis", "wav", "flac", "pcm", "adpcm", "aac", "isomp4"] }
 cpal = { version = "0.18", optional = true }
 rtrb = { version = "0.3", optional = true }
+# Artwork of the media being played: decoded (PNG, JPEG...), downscaled, re-encoded as PNG.
+image = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { version = "0.10", optional = true }
 libpulse-binding = { version = "2.30", optional = true }
 libpulse-sys = { version = "1.23", optional = true, default-features = false }
+# D-Bus client for UPower (system bus) and MPRIS (session bus). zbus 6: pure Rust, MIT, with its
+# own small runtime (no tokio, no async-io). Not zbus 5 for new code: its zvariant is
+# unmaintained (RUSTSEC-2026-0370, merged into zbus 6).
+zbus = { version = "6.2", optional = true, default-features = false, features = ["default-rt", "proxy"] }
+# `Stream::poll_next`, to wait on several D-Bus signal streams and a stop request at once
+# (already in the tree through zbus).
+futures-core = { version = "0.3", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [
@@ -38,11 +53,24 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    # Power source: PowerSettingRegisterNotification (callback, no window), GetSystemPowerStatus.
+    "Win32_System_Power",
+    "Win32_System_SystemServices",
+    "Win32_UI_WindowsAndMessaging",
+    # Now playing: Global System Media Transport Controls and the artwork stream.
+    "Foundation",
+    "Foundation_Collections",
+    "Media",
+    "Media_Control",
+    "Storage",
+    "Storage_Streams",
 ] }
 # Required by the `#[implement]` macro of the COM callbacks.
 windows-core = { version = "0.62", optional = true }
 
 [dev-dependencies]
+# The `now_playing` example prints the sources' debug log (`RUST_LOG=lumenwall_audio=debug`).
+tracing-subscriber.workspace = true
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

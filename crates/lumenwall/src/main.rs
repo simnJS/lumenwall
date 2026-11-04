@@ -12,8 +12,8 @@ use lumenwall::plan::{ExecutionPlan, OutputMode};
 use lumenwall::playlist::{PathStyle, RealFs, WeConfigCatalog};
 use lumenwall::services::{
     Control, Engine, EngineSnapshot, FrameCounters, Monitor, MonitorChange, MonitorListener,
-    OutputSnapshot, ServiceError, StopReason, TargetSnapshot, TargetStatus, Waker,
-    WallpaperResolver,
+    OutputSnapshot, PowerCallback, PowerSource, ServiceError, StopReason, TargetSnapshot,
+    TargetStatus, Waker, WallpaperResolver,
 };
 use lumenwall::settings::{Clamp, HwDecode, Layer, Scaling, WallpaperSource};
 use lumenwall_engine::{EngineControl, EnginePlan, Stopped};
@@ -37,6 +37,7 @@ fn main() -> ExitCode {
         )),
         engine: Box::new(LumenEngine(lumenwall_engine::Engine::new(resolver))),
         ipc: Some(lumenwall_ipc::Endpoint::for_current_user()),
+        power: Some(Arc::new(SystemPower)),
     };
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     let console = Console {
@@ -61,6 +62,15 @@ impl WallpaperResolver for Resolver {
             }
             WallpaperSource::WorkshopId(id) => Ok(self.0.workshop_dir(id)?),
         }
+    }
+}
+
+/// The system's power source: Windows power notifications, UPower on Linux.
+struct SystemPower;
+
+impl PowerSource for SystemPower {
+    fn watch(&self, on_change: PowerCallback) -> Box<dyn Send> {
+        Box::new(lumenwall_audio::power::PowerWatch::start(on_change))
     }
 }
 

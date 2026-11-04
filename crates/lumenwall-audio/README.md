@@ -1,14 +1,14 @@
 # lumenwall-audio
 
-Scene sound playback, audio capture and spectrum analysis for audio-reactive wallpapers.
+Scene sound playback, audio capture and spectrum analysis for audio-reactive wallpapers, and the two system sources wallpapers and the daemon follow: what is playing (media integration) and the power source (pause on battery).
 
 ## Sources (clean room)
 
-- `specs/07-plateforme-audio-video-web.md` §11 (scene sounds), §12 (automute), §13 (capture, FFT, bands, smoothing), §2.2/§2.4 (`--volume`, `--silent`, `--noautomute`, `--no-audio-processing`), §9.4, §21 (tests), §22 (Windows), QO-12 to QO-15.
-- `specs/02-modele-scene.md` §7.6 (sound object keys).
-- `docs/research/platform.md`, `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`.
-- Public sources/docs of `realfft`, `symphonia` 0.6, `cpal` 0.18, `rtrb`, `libpulse-binding` 2.30, `pipewire` 0.10, `windows` 0.62.
-- Reference wallpaper 3018340632, used only as test input (`docs/TESTING.md`).
+- `specs/07-plateforme-audio-video-web.md` §11 (scene sounds), §12 (automute), §13 (capture, FFT, bands, smoothing), §2.2/§2.4 (`--volume`, `--silent`, `--noautomute`, `--no-audio-processing`), §9.4, §15.5 and §16 (media, MPRIS), §21 (tests), §22 (Windows), QO-12 to QO-15, QO-22, QO-23.
+- `specs/06-scripting.md` §8.4 (media events), `specs/02-modele-scene.md` §7.6 (sound object keys).
+- `docs/research/platform.md`, `docs/PERFORMANCE.md`, `docs/PARITY-POLICY.md`, `docs/parity/lumenwall-vs-wallpaper-engine.md` §13 and §15.
+- Public sources/docs of `realfft`, `symphonia` 0.6, `cpal` 0.18, `rtrb`, `libpulse-binding` 2.30, `pipewire` 0.10, `windows` 0.62 (`Windows.Media.Control`, `PowerSettingRegisterNotification`), `zbus` 6.2, `image` 0.25; the MPRIS 2.2 and UPower D-Bus interface documentation; Wallpaper Engine's public web wallpaper documentation (`wallpaperRegisterMedia*Listener`).
+- Reference wallpapers 3018340632 and 3372348904, used only as test input (`docs/TESTING.md`).
 
 ## Coverage
 
@@ -64,6 +64,41 @@ Capture measured with `voluntary_ctxt_switches` of `/proc/<pid>/task/*/status` o
 - Not ours: with every output paused, the only remaining wake-ups of the process on the development machine (NVIDIA 595.99.02, Vulkan) come from driver threads created inside `vkCreateDevice` (`libnvidia-glcore`): an unnamed thread at ~100/s (`pthread_cond_timedwait`, 10 ms), `[vkrt]` ~10/s, `[vkps]` ~4/s, 0.00 % CPU. They live as long as the wgpu device does, with or without audio.
 - `DEFAULT_VOLUME` is 64 (50 % in the UI, gain 0.5); `REFERENCE_DEFAULT_VOLUME` is the reference's 15 (12 %, gain 0.12, −18.6 dB). The `lumenwall` application sets the volume; per-wallpaper levels are applied by it on top of this global volume.
 
+## Power and media sources
+
+### Power source (`power`, pause on battery)
+
+`PowerWatch::start(callback)` reports `on_battery` once known, then each change; dropping it stops. The `lumenwall` daemon starts it only while its `pause-on-battery` setting is on (default off, Wallpaper Engine's "on battery: keep running" default) and pauses the engine while the callback says "on battery".
+
+- Windows: `PowerSettingRegisterNotification(GUID_ACDC_POWER_SOURCE, DEVICE_NOTIFY_CALLBACK)`: a callback, no window, no thread of ours. First value from `GetSystemPowerStatus` (`ACLineStatus`); the system also calls back right after the registration. `PoDc` (battery) and `PoHot` (short-term source such as a UPS) count as battery. The callback's context is a registration number looked up in a table, so a notification racing with the unregistration finds nothing.
+- Linux: UPower `OnBattery` on the system bus, read with `Properties.Get`, then followed through `PropertiesChanged` on `/org/freedesktop/UPower`; read again when `org.freedesktop.UPower` reappears (`NameOwnerChanged`). One `lumenwall-power` thread inside `zbus::block_on`. No system bus or no UPower: logged once, the state stays "on mains".
+
+### Now playing (`media`)
+
+`MediaHub::system()` shares one source between every consumer. `subscribe(waker)` starts it on the first subscriber, the last `MediaSubscription` dropped stops it (thread ends, registrations removed). After each change the source wakes the subscribers; `poll()` returns the new `MediaState` (`available`, and the session's title, artist, subtitle, album, album artist, genres, content type, playback state, position, duration, artwork). Unchanged states (same fields, position moving only with the playback) are not published.
+
+- Windows: `GlobalSystemMediaTransportControlsSessionManager` on a `lumenwall-media` thread in the multithreaded apartment: the system's current session (the one the volume flyout shows), followed through `CurrentSessionChanged`, `MediaPropertiesChanged`, `PlaybackInfoChanged`, `TimelinePropertiesChanged`. The handlers only set a flag; the thread then reads what changed. The thumbnail stream is read on a media properties change only and decoded only when its bytes changed. The timeline position is brought to "now" from `LastUpdatedTime` while playing.
+- Linux: MPRIS on the session bus (`lumenwall-media` thread in `zbus::block_on`): `ListNames`, the owner and `PlaybackStatus` of each `org.mpris.MediaPlayer2.*`, `GetAll` of the player followed; then `PropertiesChanged` of `org.mpris.MediaPlayer2.Player`, `Seeked` and `NameOwnerChanged` only. Metadata per §16.3 (`xesam:title`, first `xesam:artist`, `xesam:album`, first `xesam:albumArtist`, `xesam:genre`, `mpris:length` in µs, `mpris:artUrl`). The position is read again only when the playback state changes.
+- Artwork (`decode_artwork`): PNG, JPEG, WebP, GIF, BMP or TGA up to 32 MiB and 8192 px per side, reduced to 512 px per side, re-encoded as PNG (fast compression), RGBA8 pixels kept for the palette. Decoded on the source thread, never on the render thread.
+- Consumers (`lumenwall-engine`): web pages subscribe while they have a media listener (`web.rs`) and get `wallpaperRegisterMedia*Listener` events with the colours of `lumenwall_web::media::MediaEvent::thumbnail_from_png`; scenes whose scripts handle a media event get `mediaStatusChanged` and the four events of spec 06 §8.4 with the same colours (`script/media.rs`, `MediaFeed`, wired by the engine loop).
+
+### Idle cost (measured)
+
+Windows 11 (10.0.26300), release build of `examples/now_playing.rs` (`cargo run -p lumenwall-audio --release --example now_playing -- 90 <mode>`), one media session open (a paused music player), on mains. Process CPU time and per-thread context switches (`\Thread(now_playing*)\Context Switches/sec`) over 60 s, sampled 15 to 20 s after start; the worker's own count comes from its debug log at stop.
+
+| Mode | Threads once settled | Process CPU over 60 s | Context switches | Lumenwall's thread woken |
+|---|---|---|---|---|
+| none (baseline) | 1 | 0.0 ms | 0/s | — |
+| power | 1 (none of ours) | 0.0 ms | 0/s | no thread |
+| media | 5 | 0.0 ms | 0.05/s, one thread | not counted in that run |
+| both | 5 | 0.0 ms | 0.12–0.32/s (3 runs), one thread | 0 times in 80 s (counted in the last run) |
+
+- 0.0 ms is below the 15.6 ms accounting granularity of `TotalProcessorTime`.
+- The remaining switches are on one thread that appears with the media session client (the system's COM/RPC plumbing). Lumenwall's `lumenwall-media` thread waits on a condition variable without timeout and was not woken once while the session did not change.
+- First state 30–50 ms after the subscription (session manager, properties, a 512×512 artwork decoded and re-encoded: about 500 kB of PNG).
+- While a player plays, the media thread wakes as often as that player updates its timeline (its own events); not measured here (nothing is played on the test machine).
+- Linux (UPower, MPRIS): by construction one thread each, blocked in the zbus runtime's reactor on the bus socket with no timer armed between signals; signals come only on a change (UPower `OnBattery`, a player's properties, a seek). Not measured: no Linux machine was available for this change.
+
 ## Build and test matrix
 
 | Feature | Default | Status on the dev machine |
@@ -72,6 +107,8 @@ Capture measured with `voluntary_ctxt_switches` of `/proc/<pid>/task/*/status` o
 | `wasapi` | yes (no-op off Windows) | `cargo check`/`clippy` for `x86_64-pc-windows-gnu` only, never run |
 | `pulse` | no | built, tested: no server, mute server, live pipewire-pulse capture (~10 windows/s) and watcher. libpulse dev files are absent: `libpulse-sys` links its `libpulse.so.0` fallback |
 | `pipewire` | no | **not compiled**: `libpipewire-0.3`/`libspa-0.2` dev files are not installed. Written against pipewire 0.10.1; run `cargo check -p lumenwall-audio --features pipewire` where they are |
+| `power` | yes | Windows: built, tested (notification decoding), run (`now_playing`: on mains, registration callback received). Linux (UPower, zbus): `cargo clippy --target x86_64-unknown-linux-gnu --no-default-features --features power,media --lib -- -D warnings` from Windows only, never run |
+| `media` | yes | Windows: built, tested (hub, artwork), run against a real session (`now_playing`). Linux (MPRIS, zbus): MPRIS interpretation tested on every system; the bus glue only type-checked as above, never run |
 
 Linux release builds should enable `pipewire,pulse` (runtime fallback: PipeWire if its socket exists, else Pulse).
 
@@ -90,8 +127,14 @@ Linux release builds should enable `pipewire,pulse` (runtime fallback: PipeWire 
 - Automute only reacts to media being played (rule 5: Wallpaper Engine mutes while other applications *play* audio): paused, muted or inaudible streams, calls, speech synthesis, notification sounds and Lumenwall's own streams do not count (table above). The reference counts any stream with a PID and a non-zero volume, paused or muted (QO-13), so a voice call or an idle speech stream muted the wallpapers.
 - `PlayerConfig::default()` uses volume 64 instead of the reference's 15 (barely audible).
 - Mono/surround devices: mono files are duplicated, extra device channels get the matching source channel or silence.
+- Media: no polling (rule 1, QO-23): the reference queries the MPRIS position every frame; here the position is extrapolated from the last sample while playing and read again on a state change or a `Seeked` signal. The timeline is therefore sent with each change, not at a fixed rate.
+- Media: a missing session bus or media session manager is not fatal (rule 2, QO-22): `available` stays false.
+- MPRIS: only the followed player's signals are applied, and another player becomes the followed one when it starts playing (QO-23; the reference applies every player's signals). Without a playing player, the first paused one is followed (the reference follows none until one plays), as Windows' current session keeps a paused player's track.
+- MPRIS: `contentType` is empty (MPRIS does not say); artwork behind an `http(s)://` URL is not downloaded (privacy: nothing leaves the machine), only `file://` URLs are read.
+- Artwork is reduced to 512 px per side and handed to pages as PNG, whatever the player gave.
 
 ## Not tested
 
 - PipeWire backends (not compiled; the automute watcher's node `info` and mute handling were written against pipewire 0.10.1 and are unchecked), Windows backends (not run; the ducking notifications in particular), default-device change following on every backend, audible output and device reopen after a device change.
 - No captured reference output is available: spectrum parity is checked against a literal f64 transcription of the formula and hand-computed values. Bands whose power is exactly zero mathematically (perfectly periodic quantised test tones) depend on FFT rounding and cannot match bit for bit; real audio never has them.
+- Power: the switch to battery itself (the test machine is a desktop on mains); UPower on a real system. Media: a playing session's timeline events on Windows, session changes between players, every MPRIS player.

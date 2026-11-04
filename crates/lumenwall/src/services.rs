@@ -42,6 +42,19 @@ pub trait PlaylistCatalog: Send + Sync {
     }
 }
 
+/// Receives `true` on battery, `false` on mains (see [`PowerSource::watch`]).
+pub type PowerCallback = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// Whether the computer runs on battery, for "pause on battery" (`lumenwall-audio`'s
+/// `PowerWatch`: Windows power notifications, UPower on Linux). Only watched while the setting
+/// is on.
+pub trait PowerSource: Send + Sync {
+    /// Starts following the power source: `on_change` gets the current state as soon as it is
+    /// known, then each change (possibly the same value twice), from any thread, maybe before
+    /// this returns; it must not block. Dropping the returned value stops the notifications.
+    fn watch(&self, on_change: PowerCallback) -> Box<dyn Send>;
+}
+
 /// Wakes the engine's blocking event loop from another thread (calloop ping, Win32 event...)
 /// so that it drains the control channel. Must be cheap and never block.
 pub trait Waker: Send + Sync {
