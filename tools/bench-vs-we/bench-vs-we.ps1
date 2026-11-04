@@ -51,6 +51,18 @@ param(
     # Frame-rate cap for both engines; 0 = Wallpaper Engine's own setting (passed to Lumenwall).
     [ValidateRange(0, 1000)] [int] $Fps = 0,
     [string] $LumenwallExe = (Join-Path $env:USERPROFILE 'Desktop\lumenwall-0.1.0-x86_64-pc-windows-msvc\lumenwall.exe'),
+    # The user's own daemon, relaunched at the end. Default: the executable of the daemon running
+    # at the start, else -LumenwallExe. Set it when -LumenwallExe is a development build, so that
+    # the build under test never replaces the user's daemon.
+    [string] $UserLumenwallExe,
+    # LOCALAPPDATA of the bench daemon and its client commands: its caches (shaders, pipelines,
+    # Vulkan driver choice) and logs then stay out of the user's %LOCALAPPDATA%\Lumenwall. Empty =
+    # the user's own folder (the installed release shares its caches, as in the first report).
+    [string] $LumenwallLocalAppData,
+    # Show every wallpaper once on the Lumenwall bench daemon (5 s each) before the measured runs,
+    # so that a fresh -LumenwallLocalAppData has its shader and pipeline caches filled, as the
+    # user's installed copy and Wallpaper Engine's own caches are.
+    [switch] $WarmLumenwall,
     [string] $WeDir = 'C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine',
     [string] $WorkshopDir = 'C:\Program Files (x86)\Steam\steamapps\workshop\content\431960',
     # Key of the user section in Wallpaper Engine's config.json.
@@ -481,10 +493,18 @@ function Get-WeMonitorMap {
     catch { "unknown ($_)" }
 }
 
+# Environment of the bench daemon and of the client commands that reach it.
+function Get-LwEnv {
+    $e = @{ LUMENWALL_IPC_ENDPOINT = $IpcEndpoint }
+    if ($LumenwallLocalAppData) { $e.LOCALAPPDATA = $LumenwallLocalAppData }
+    $e
+}
+
 function Start-LumenwallDaemon([string] $FirstWallpaper) {
     $psi = [Diagnostics.ProcessStartInfo]::new($LumenwallExe)
     foreach ($a in (Get-LwArgs $FirstWallpaper)) { $psi.ArgumentList.Add($a) }
-    $psi.Environment['LUMENWALL_IPC_ENDPOINT'] = $IpcEndpoint
+    $lwEnv = Get-LwEnv
+    foreach ($k in $lwEnv.Keys) { $psi.Environment[$k] = $lwEnv[$k] }
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $script:LwProcess = [Diagnostics.Process]::Start($psi)
@@ -523,12 +543,13 @@ function Open-Wallpaper([string] $Engine, $Wp) {
         if ($errors) { return ($errors -join '; ') }
         return $null
     }
-    $r = Invoke-Exe $LumenwallExe (Get-LwArgs $Wp.Dir) @{ LUMENWALL_IPC_ENDPOINT = $IpcEndpoint }
+    $r = Invoke-Exe $LumenwallExe (Get-LwArgs $Wp.Dir) (Get-LwEnv)
     if ($r.ExitCode -ne 0 -or $r.Output -notmatch 'sent to it') {
         # The refusal is logged by the client (stderr is often empty for a GUI build): say what the log says.
         $why = @($r.Output -split "`r?`n" | Where-Object { $_ -match ' ERROR ' } | ForEach-Object { $_ -replace '^\S+\s+ERROR\s+', '' })[0]
         if (-not $why) { $why = $r.Output }
-        $log = Join-Path $env:LOCALAPPDATA "lumenwall\logs\lumenwall.$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')).log"
+        $logRoot = if ($LumenwallLocalAppData) { $LumenwallLocalAppData } else { $env:LOCALAPPDATA }
+        $log = Join-Path $logRoot "lumenwall\logs\lumenwall.$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')).log"
         if (-not $why -and (Test-Path -LiteralPath $log)) { $why = (Get-Content -LiteralPath $log -Tail 20 | Where-Object { $_ -match ' ERROR ' } | Select-Object -Last 1) -replace '^\S+\s+ERROR\s+', '' }
         return "exit $($r.ExitCode): $why"
     }
@@ -696,6 +717,7 @@ $wallpaperList = @(foreach ($w in $Wallpapers) {
 
 $runCount = $Repetitions * $wallpaperList.Count * 2
 $estimate = 3 * ($IdleSeconds + $SettleSeconds) + 25 + $runCount * ($WarmupSeconds + $MeasureSeconds + $SettleSeconds + 3)
+if ($WarmLumenwall) { $estimate += $wallpaperList.Count * (6 + $SettleSeconds) }
 Log "bench-vs-we: $($wallpaperList.Count) wallpapers x 2 engines x $Repetitions repetition(s), warm-up $WarmupSeconds s, measurement $MeasureSeconds s, fps $script:TargetFps; estimated $([Math]::Ceiling($estimate / 60)) min; output $OutDir"
 
 # Machine and versions.
@@ -747,6 +769,11 @@ foreach ($f in $LwConfigFiles) { if (Test-Path -LiteralPath $f) { $state["lw_$(S
 $weWasRunning = @(Get-EngineProcesses 'wallpaper64.exe').Count -gt 0
 $userLw = @(Get-EngineProcesses 'lumenwall.exe')
 $userDaemon = $userLw.Count -gt 0
+if (-not $UserLumenwallExe) {
+    $running = @($userLw | ForEach-Object { (Get-Process -Id $_.Pid -ErrorAction SilentlyContinue).Path } | Where-Object { $_ })
+    $UserLumenwallExe = if ($running.Count) { $running[0] } else { $LumenwallExe }
+}
+Log "the user's daemon to relaunch at the end: $UserLumenwallExe"
 Log ("state: WE {0}, Lumenwall daemon {1}, hashes {2}" -f $(if ($weWasRunning) { 'running' } else { 'not running' }), $(if ($userDaemon) { "running (pid $($userLw.Pid -join ','))" } else { 'not running' }), (($state.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value.Substring(0, 8))" }) -join ' '))
 
 try {
@@ -772,6 +799,15 @@ try {
     $script:PrimeWallpaper = @($wallpaperList | Where-Object Type -EQ 'scene')[0]
     if (-not $script:PrimeWallpaper) { $script:PrimeWallpaper = $wallpaperList[0] }
     Start-LumenwallDaemon $script:PrimeWallpaper.Dir
+    if ($WarmLumenwall) {
+        foreach ($wp in $wallpaperList) {
+            $refused = Open-Wallpaper 'lumenwall' $wp
+            Log "cache warm-up on Lumenwall: $($wp.Id)$(if ($refused) { " refused: $refused" })"
+            Start-Sleep -Seconds 5
+            Close-Wallpaper 'lumenwall'
+            Start-Sleep -Seconds $SettleSeconds
+        }
+    }
     Start-Sleep -Seconds 5
     Measure-Idle 'idle-resident'
 
@@ -819,7 +855,7 @@ finally {
     if ($KeepWallpaperEngine -and -not $weRunning -and $weWasRunning) { Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$WeExe`"" }
     if (($userDaemon -or $RelaunchLumenwall) -and @(Get-EngineProcesses 'lumenwall.exe').Count -eq 0) {
         # Through Explorer, with no arguments and none of this script's environment.
-        Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$LumenwallExe`""
+        Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$UserLumenwallExe`""
         $up = Wait-Until { @(Get-EngineProcesses 'lumenwall.exe').Count -gt 0 } 20
         Log "the user's Lumenwall daemon relaunched: $up (pid $((Get-EngineProcesses 'lumenwall.exe').Pid -join ','))"
         $restored.lumenwall_daemon = $up
