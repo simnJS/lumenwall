@@ -30,6 +30,11 @@ const DEFAULT_FILTER: &str = if cfg!(debug_assertions) {
 };
 const ENV_VARS: [&str; 2] = ["LUMENWALL_LOG", "RUST_LOG"];
 const DEFAULT_MAX_FILES: usize = 7;
+/// Lines queued for the log file's writer thread. tracing-appender's default (128 000)
+/// allocates and writes the whole queue at start: 3.9 MiB of private memory in a daemon that
+/// otherwise keeps ≈ 2.4 MiB at rest (Windows, measured). Not lossy: past this many waiting
+/// lines, a burst waits for the writer instead of dropping lines.
+const QUEUED_LINES: usize = 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct LogOptions {
@@ -133,7 +138,10 @@ fn file_writer(
         });
     match appender {
         Ok(appender) => {
-            let (writer, guard) = tracing_appender::non_blocking(appender);
+            let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+                .buffered_lines_limit(QUEUED_LINES)
+                .lossy(false)
+                .finish(appender);
             Some((writer, guard, dir))
         }
         Err(e) => {
@@ -221,6 +229,38 @@ mod tests {
             "{name}"
         );
         assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), "hello\n");
+    }
+
+    /// A burst far above the queue (a heavy scene loading at debug level) loses no line: the
+    /// writer waits instead.
+    #[test]
+    fn a_burst_longer_than_the_queue_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LogConfig {
+            file: Some(true),
+            directory: Some(dir.path().join("logs")),
+            ..LogConfig::default()
+        };
+        let (writer, guard, path) = file_writer(&config).unwrap();
+        let lines = QUEUED_LINES * 10;
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                let mut w = writer.clone();
+                std::thread::spawn(move || {
+                    for i in 0..lines / 4 {
+                        io::Write::write_all(&mut w, format!("{t} {i}\n").as_bytes()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        drop(writer);
+        drop(guard);
+        let file = std::fs::read_dir(&path).unwrap().next().unwrap().unwrap();
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert_eq!(text.lines().count(), lines);
     }
 
     #[test]

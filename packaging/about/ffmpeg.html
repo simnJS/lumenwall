@@ -1,26 +1,35 @@
 <!-- Inserted into THIRD-PARTY-NOTICES.html by packaging/release/package.py when the
-     Windows archive ships FFmpeg (values from packaging/release/windows-runtime.toml). -->
+     Windows archive ships FFmpeg (values from packaging/release/windows-runtime.toml and
+     from the BUILD-INFO.txt of the build, packaging/ffmpeg/build.sh). -->
 <section class="license" id="ffmpeg">
   <h3>FFmpeg ${version} (video wallpapers)</h3>
   <p>This software uses code of <a href="https://ffmpeg.org">FFmpeg</a> licensed under the
   GNU Lesser General Public License version 3 or later (LGPL-3.0-or-later), and its source
   can be downloaded <a href="${source}">here</a>.</p>
   <p>Shipped next to <code>lumenwall.exe</code>: ${dlls}. They are FFmpeg ${version}, built
-  by BtbN's FFmpeg-Builds (<code>lgpl-shared</code> variant: LGPL only, no GPL or non-free
-  component) and shipped unmodified. Lumenwall is a separate work under the MIT or
-  Apache-2.0 license; it loads these libraries by name at run time and never links FFmpeg
-  statically, so you may replace them with another build of FFmpeg ${major} that keeps the
-  same file names.</p>
+  by Lumenwall from FFmpeg's unmodified release source with only the demuxers, decoders and
+  hardware decoders that video wallpapers use: LGPL only, no GPL or non-free component, no
+  external library. Lumenwall is a separate work under the MIT or Apache-2.0 license; it
+  loads these libraries by name at run time and never links FFmpeg statically, so you may
+  replace them with another build of FFmpeg ${major} that keeps the same file names.</p>
   <ul>
-    <li>Licence texts: <a href="${licence_file}">LGPL-3.0</a> (the build's
-    <code>LICENSE.txt</code>) and <a href="${gpl_file}">GPL-3.0</a>, whose terms the LGPL-3.0
-    incorporates.</li>
-    <li>Corresponding source: FFmpeg at <a href="${source}">${source}</a>, configured and
-    built by the scripts at <a href="${build_scripts}">${build_scripts}</a>, which also pin
-    the source and version of every library compiled into these DLLs (among them dav1d,
-    libaom, libvpx, OpenH264, libass, HarfBuzz, FreeType, under their own licences).</li>
-    <li>Binaries: <a href="${archive}">${archive}</a> (SHA-256
-    <code>${sha256}</code>).</li>
+    <li>Licence texts: <a href="${lgpl_file}">LGPL-3.0</a> and <a href="${gpl_file}">GPL-3.0</a>,
+    whose terms the LGPL-3.0 incorporates.</li>
+    <li>Corresponding source: FFmpeg's release tarball <a href="${source}">${source}</a>
+    (SHA-256 <code>${sha256}</code>), used unmodified, and the script that builds it,
+    <a href="${build_script}">${build_script}</a>. The script downloads the tarball and the
+    two header packages named below, checks their SHA-256, and runs FFmpeg's
+    <code>configure</code> with these options: <code>${configuration}</code>.
+    Sources, options and toolchain of this build: <a href="${build_info}">${build_info}</a>.</li>
+    <li>Also compiled into these DLLs, under their own licences:
+    <a href="https://github.com/FFmpeg/nv-codec-headers">nv-codec-headers</a> ${nvcodec}
+    (MIT; CUDA and NVDEC decoding; <a href="${nvcodec_file}">notices</a>),
+    <a href="https://github.com/KhronosGroup/Vulkan-Headers">Vulkan-Headers</a> ${vulkan}
+    (Apache-2.0, some files also MIT; Vulkan Video decoding; <a href="${vulkan_file}">licence</a>),
+    the <a href="https://www.mingw-w64.org">MinGW-w64</a> runtime ${mingw} (start-up code and
+    C functions linked statically; <a href="${mingw_file}">licences</a>), and GCC's libgcc
+    (GPL-3.0 with the GCC Runtime Library Exception, which sets no condition on these
+    DLLs).</li>
   </ul>
   <p>FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.</p>
 </section>

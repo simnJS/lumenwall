@@ -11,8 +11,20 @@
 //! layer or pause policy demands it. Without any wallpaper the engine closes its surfaces and
 //! GPU device and sleeps until a plan brings one back. After a long pause it releases the GPU
 //! and keeps only the surfaces (see [`release`]).
+//!
+//! On Windows the daemon runs this loop ([`Local`]) in an engine process of its own
+//! ([`remote`], [`host`]): a process that has opened a Vulkan device keeps the GPU driver
+//! loaded for good (measured with NVIDIA: `nvoglv64.dll` and 6 driver threads stay, ≥ 30 MiB
+//! private after the device and instance are destroyed), so the resident daemon never opens
+//! one, and the engine process ends when the last wallpaper goes. [`Engine`] picks the mode.
 
+mod host;
+mod logfwd;
 mod release;
+mod remote;
+mod wire;
+
+pub use host::run_engine_host;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -142,6 +154,10 @@ struct SceneSlot {
     serial: u64,
     /// The scene's own time, started on its first frame (`crate::clock`).
     clock: crate::clock::SceneClock,
+    /// Its scripts handle media events (`crate::script::media::wants_media`).
+    wants_media: bool,
+    /// They were given the current media state.
+    media_ready: bool,
 }
 
 /// The renderer of one target.
@@ -191,8 +207,11 @@ struct Running {
     rendered: u64,
     /// Since when no output needed the GPU ([`release::gpu_unused`]).
     idle_since: Option<Instant>,
-    /// Start of a GPU restore, until its first frame is presented.
-    restored_at: Option<Instant>,
+    /// Start of a GPU restore or of a plan that brought wallpapers, until the first frame is
+    /// presented (logged: IPC apply → first present).
+    first_frame_due: Option<(Instant, &'static str)>,
+    /// When to empty the working set, [`TRIM_DELAY`] after the first frame of a load.
+    trim_due: Option<Instant>,
 }
 
 /// An output the platform reported, kept across layout changes.
@@ -209,8 +228,134 @@ enum Staged {
     New(Box<Wallpaper>, Option<Renderer>),
 }
 
-/// The wallpaper engine: load, start, run.
+/// The wallpaper engine: load, start, run. In this process ([`Local`]), or on Windows in an
+/// engine process the daemon starts when a wallpaper appears and ends when the last one goes
+/// (see the module documentation).
 pub struct Engine {
+    waker: EngineWaker,
+    monitor: EngineMonitor,
+    /// Until [`Engine::load`] picks the mode.
+    resolver: Option<WallpaperResolver>,
+    inner: Option<Inner>,
+}
+
+enum Inner {
+    Local(Box<Local>),
+    Remote(Box<remote::Remote>),
+}
+
+impl Engine {
+    pub fn new(resolver: WallpaperResolver) -> Self {
+        Self {
+            waker: EngineWaker::default(),
+            monitor: EngineMonitor::default(),
+            resolver: Some(resolver),
+            inner: None,
+        }
+    }
+
+    pub fn waker(&self) -> EngineWaker {
+        self.waker.clone()
+    }
+
+    /// Status and counters for the application (IPC), readable from any thread.
+    pub fn monitor(&self) -> EngineMonitor {
+        self.monitor.clone()
+    }
+
+    fn inner(&mut self, plan: &EnginePlan) -> &mut Inner {
+        if self.inner.is_none() {
+            let process = use_engine_process(
+                host::available(),
+                cfg!(windows),
+                std::env::var("LUMENWALL_ENGINE_PROCESS").ok().as_deref(),
+                plan,
+            );
+            let inner = if process {
+                Inner::Remote(Box::new(remote::Remote::new(
+                    self.waker.clone(),
+                    self.monitor.clone(),
+                )))
+            } else {
+                let resolver = self.resolver.take().unwrap_or_default();
+                Inner::Local(Box::new(Local::new(
+                    resolver,
+                    self.waker.clone(),
+                    self.monitor.clone(),
+                )))
+            };
+            self.inner = Some(inner);
+        }
+        self.inner.as_mut().expect("set above")
+    }
+
+    /// Reads every wallpaper of the plan (no window, no GPU, no audio). With an engine process
+    /// the process reads them when it starts.
+    pub fn load(&mut self, plan: &EnginePlan) -> Result<(), String> {
+        match self.inner(plan) {
+            Inner::Local(l) => l.load(plan),
+            Inner::Remote(r) => r.load(plan),
+        }
+    }
+
+    /// `--list-properties` (always in this process).
+    pub fn write_properties(&self, out: &mut dyn std::io::Write) -> Result<(), String> {
+        match &self.inner {
+            Some(Inner::Local(l)) => l.write_properties(out),
+            _ => Err("no wallpaper loaded in this process".into()),
+        }
+    }
+
+    /// `--dump-structure` (always in this process).
+    pub fn write_structure(&self, out: &mut dyn std::io::Write) -> Result<(), String> {
+        match &self.inner {
+            Some(Inner::Local(l)) => l.write_structure(out),
+            _ => Err("no wallpaper loaded in this process".into()),
+        }
+    }
+
+    /// Opens the surfaces, the GPU device, the audio, and builds the scenes. Without any
+    /// wallpaper nothing is opened: the engine waits for a plan ([`EngineControl::Reload`]).
+    pub fn start(&mut self) -> Result<(), String> {
+        match &mut self.inner {
+            Some(Inner::Local(l)) => l.start(),
+            Some(Inner::Remote(r)) => r.start(),
+            None => Err("start before load".into()),
+        }
+    }
+
+    /// Main loop: blocks on OS events (or, without any wallpaper, on the waker); `control` is
+    /// polled when woken.
+    pub fn run(
+        &mut self,
+        control: &mut dyn FnMut() -> Option<EngineControl>,
+    ) -> Result<Stopped, String> {
+        match &mut self.inner {
+            Some(Inner::Local(l)) => l.run(control),
+            Some(Inner::Remote(r)) => r.run(control),
+            None => Err("run before load".into()),
+        }
+    }
+}
+
+/// Whether the engine runs in a process of its own: on Windows, when the executable can host it
+/// ([`run_engine_host`] is wired in its `main`), unless `LUMENWALL_ENGINE_PROCESS=0`, and never
+/// for the one-shot commands that print what this process loaded. Pure, for testing.
+fn use_engine_process(
+    available: bool,
+    windows: bool,
+    switch: Option<&str>,
+    plan: &EnginePlan,
+) -> bool {
+    available
+        && windows
+        && switch.map(str::trim) != Some("0")
+        && !plan.list_properties
+        && !plan.dump_structure
+}
+
+/// The engine loop in this process.
+pub(crate) struct Local {
     plan: EnginePlan,
     resolver: WallpaperResolver,
     assets: PathBuf,
@@ -226,33 +371,37 @@ pub struct Engine {
     user_paused: bool,
     /// Backend that opened (X11 after a layer-shell failure on GNOME).
     backend: BackendChoice,
+    /// The system's media sessions, followed while a scene's scripts handle media events. With
+    /// an engine process, it lives there: the daemon follows none.
+    media: crate::script::media::MediaFeed,
 }
 
-impl Engine {
-    pub fn new(resolver: WallpaperResolver) -> Self {
+impl Local {
+    pub(crate) fn new(
+        resolver: WallpaperResolver,
+        waker: EngineWaker,
+        monitor: EngineMonitor,
+    ) -> Self {
         Self {
             plan: EnginePlan::default(),
             resolver,
             assets: PathBuf::new(),
             wallpapers: Vec::new(),
             states: Vec::new(),
-            waker: EngineWaker::default(),
+            waker,
             running: None,
             dormant: None,
-            monitor: EngineMonitor::default(),
+            monitor,
             known: Vec::new(),
             user_paused: false,
             backend: BackendChoice::Auto,
+            media: Default::default(),
         }
     }
 
-    pub fn waker(&self) -> EngineWaker {
-        self.waker.clone()
-    }
-
-    /// Status and counters for the application (IPC), readable from any thread.
-    pub fn monitor(&self) -> EngineMonitor {
-        self.monitor.clone()
+    /// The user pause of a restarted engine process, before [`Local::start`].
+    pub(crate) fn preset_user_pause(&mut self, paused: bool) {
+        self.user_paused = paused;
     }
 
     /// Reads every wallpaper of the plan (no window, no GPU, no audio).
@@ -384,9 +533,16 @@ impl Engine {
     }
 
     fn open_running(&mut self) -> Result<Running, String> {
+        let t0 = Instant::now();
         let config = Self::platform_config(&self.plan);
+        // Dropped unjoined on an error below: the thread then closes what it opened by itself.
+        let gpu_early = self.open_gpu_early();
         let mut surfaces = self.open_platform(&config)?;
-        tracing::info!("platform backend: {:?}", surfaces.backend());
+        tracing::info!(
+            "platform backend: {:?} ({:.1} ms)",
+            surfaces.backend(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
         self.waker.attach(surfaces.waker());
         for k in &mut self.known {
             k.live = false;
@@ -420,7 +576,25 @@ impl Engine {
                 _ => None,
             })
             .ok_or("no output")?;
-        let (first_surface, ctx) = match self.open_gpu(surfaces.as_ref(), first, None) {
+        let adopted = match gpu_early.map(std::thread::JoinHandle::join) {
+            Some(Ok(Ok(ctx))) => Self::adopt_gpu(ctx, surfaces.as_ref(), first)
+                .inspect_err(|e| tracing::debug!("GPU opened ahead not used: {e}"))
+                .ok(),
+            Some(Ok(Err(e))) => {
+                tracing::debug!("GPU not opened ahead: {e}");
+                None
+            }
+            Some(Err(_)) => {
+                tracing::warn!("the thread opening the GPU ahead panicked");
+                None
+            }
+            None => None,
+        };
+        let opened = match adopted {
+            Some(b) => Ok(b),
+            None => self.open_gpu(surfaces.as_ref(), first, None),
+        };
+        let (first_surface, ctx) = match opened {
             Ok(b) => b,
             Err(e) => {
                 self.waker.detach();
@@ -446,12 +620,18 @@ impl Engine {
         } else {
             None
         };
+        let t_compositor = Instant::now();
+        let compositor = Compositor::new(&ctx);
+        tracing::debug!(
+            "compositor {:.1} ms",
+            t_compositor.elapsed().as_secs_f64() * 1000.0
+        );
         let mut running = Running {
             outputs: Vec::new(),
             scenes: (0..self.wallpapers.len()).map(|_| None).collect(),
             videos: (0..self.wallpapers.len()).map(|_| None).collect(),
             webs: (0..self.wallpapers.len()).map(|_| None).collect(),
-            compositor: Compositor::new(&ctx),
+            compositor,
             timer,
             timer_tried: stats_enabled,
             ctx,
@@ -469,7 +649,8 @@ impl Engine {
             screenshot: self.plan.screenshot.clone(),
             rendered: 0,
             idle_since: None,
-            restored_at: None,
+            first_frame_due: Some((t0, "the engine opened its outputs")),
+            trim_due: None,
         };
         let mut first_surface = Some((first, first_surface));
         for ev in early {
@@ -489,13 +670,8 @@ impl Engine {
     /// adapter must present it. When the Vulkan loader is restricted to the remembered driver
     /// and that finds no adapter or another one, the instance is created again with every
     /// driver (`vulkan_driver`).
-    fn open_gpu(
-        &self,
-        surfaces: &dyn WallpaperSurface,
-        first: OutputId,
-        instance: Option<GpuInstance>,
-    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
-        let options = ContextOptions {
+    fn context_options(&self) -> ContextOptions {
+        ContextOptions {
             pipeline_cache_dir: cache_dir().map(|d| d.join("pipelines")),
             // Timestamp queries are allowed so that statistics can time the GPU on demand;
             // nothing is measured until someone asks.
@@ -507,10 +683,67 @@ impl Engine {
                     .iter()
                     .any(|w| w.kind() == lumenwall_scene::ProjectKind::Video),
             ..ContextOptions::default()
-        };
-        let open = |instance: Option<GpuInstance>| {
+        }
+    }
+
+    /// Windows: starts creating the instance and the device (first backend of
+    /// [`gpu_backends`]) on a thread while the platform opens; the adapter is checked against
+    /// the first output's surface once it exists ([`Local::adopt_gpu`]). Measured in the engine
+    /// process: instance 87–101 ms with a cold driver, device 66–73 ms, platform 40–55 ms
+    /// (window) and wallpaper load 2–15 ms, which used to run one after the other.
+    fn open_gpu_early(&self) -> Option<std::thread::JoinHandle<Result<GpuContext, String>>> {
+        if !cfg!(windows) {
+            return None;
+        }
+        let options = self.context_options();
+        let backends = *gpu_backends().first()?;
+        std::thread::Builder::new()
+            .name("lumenwall-gpu-open".into())
+            .spawn(move || {
+                let t0 = Instant::now();
+                let ctx = GpuInstance::new(Some(backends))
+                    .into_context(&options, &[])
+                    .map_err(|e| e.to_string());
+                tracing::debug!(
+                    "GPU opened ahead of the surfaces ({backends:?}, Vulkan drivers: {}): {:.1} ms",
+                    vulkan_driver::describe(),
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+                ctx
+            })
+            .ok()
+    }
+
+    /// The context opened by [`Local::open_gpu_early`], when its adapter is the remembered one
+    /// and presents to `first`.
+    fn adopt_gpu(
+        ctx: GpuContext,
+        surfaces: &dyn WallpaperSurface,
+        first: OutputId,
+    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
+        if vulkan_driver::wrong_adapter(&ctx) {
+            // The remembered GPU is gone: the normal opening tries every driver.
+            vulkan_driver::lift();
+            return Err("the remembered GPU is not there".into());
+        }
+        let surface = create_surface_for(&ctx, surfaces, first)?;
+        if !ctx.adapter().is_surface_supported(&surface) {
+            return Err("its adapter cannot present to the first output".into());
+        }
+        vulkan_driver::remember(&ctx);
+        Ok((surface, ctx))
+    }
+
+    fn open_gpu(
+        &self,
+        surfaces: &dyn WallpaperSurface,
+        first: OutputId,
+        instance: Option<GpuInstance>,
+    ) -> Result<(wgpu::Surface<'static>, GpuContext), String> {
+        let options = self.context_options();
+        let open = |instance: Option<GpuInstance>, backends: wgpu::Backends| {
             let t0 = Instant::now();
-            let instance = instance.unwrap_or_else(|| GpuInstance::new(None));
+            let instance = instance.unwrap_or_else(|| GpuInstance::new(Some(backends)));
             let t1 = Instant::now();
             let first_surface = create_wgpu_surface(&instance, surfaces, first)?;
             let t2 = Instant::now();
@@ -519,7 +752,7 @@ impl Engine {
                 .map_err(|e| e.to_string())?;
             let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
             tracing::debug!(
-                "GPU opened (Vulkan drivers: {}): instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
+                "GPU opened ({backends:?}, Vulkan drivers: {}): instance {:.1} ms, surface {:.1} ms, adapter + device {:.1} ms",
                 vulkan_driver::describe(),
                 ms(t0, t1),
                 ms(t1, t2),
@@ -527,26 +760,45 @@ impl Engine {
             );
             Ok::<_, String>((first_surface, ctx))
         };
-        let opened = match open(instance) {
-            Ok((_, ctx)) if vulkan_driver::wrong_adapter(&ctx) => {
-                Err("the remembered GPU is not there".to_owned())
+        let order = gpu_backends();
+        let mut instance = instance;
+        let mut last_error = String::from("no GPU backend");
+        for (i, &backends) in order.iter().enumerate() {
+            let opened = match open(instance.take(), backends) {
+                Ok((_, ctx)) if vulkan_driver::wrong_adapter(&ctx) => {
+                    Err("the remembered GPU is not there".to_owned())
+                }
+                other => other,
+            };
+            let opened = match opened {
+                Err(e) if backends.contains(wgpu::Backends::VULKAN) && vulkan_driver::lift() => {
+                    tracing::info!("remembered Vulkan driver: {e}; trying every driver");
+                    open(None, backends)
+                }
+                other => other,
+            };
+            match opened {
+                Ok((first_surface, ctx)) => {
+                    vulkan_driver::remember(&ctx);
+                    return Ok((first_surface, ctx));
+                }
+                Err(e) if i + 1 < order.len() => {
+                    tracing::warn!(
+                        "no {backends:?} adapter for the outputs ({e}); trying the next backend"
+                    );
+                    last_error = e;
+                }
+                Err(e) => last_error = e,
             }
-            other => other,
-        };
-        let (first_surface, ctx) = match opened {
-            Err(e) if vulkan_driver::lift() => {
-                tracing::info!("remembered Vulkan driver: {e}; trying every driver");
-                open(None)?
-            }
-            other => other?,
-        };
-        vulkan_driver::remember(&ctx);
-        Ok((first_surface, ctx))
+        }
+        Err(last_error)
     }
 
     /// Ends scripts and releases the surfaces and the GPU device.
     fn close_running(&mut self, mut running: Running) {
         log_summary(&running.stats);
+        // No scene left to follow the media for: the OS subscription goes now.
+        self.media = Default::default();
         for (slot, wp) in running.scenes.iter_mut().zip(&mut self.wallpapers) {
             if let Some(slot) = slot {
                 slot.runtime.shutdown_scripts(&mut wp.project);
@@ -607,10 +859,14 @@ impl Engine {
                 self.waker.idle_wait();
                 continue;
             };
-            let deadline = match (video_deadline(r), self.release_deadline(r)) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            if r.trim_due.is_some_and(|d| Instant::now() >= d) {
+                r.trim_due = None;
+                trim_resident();
+            }
+            let deadline = [video_deadline(r), self.release_deadline(r), r.trim_due]
+                .into_iter()
+                .flatten()
+                .min();
             let wait = deadline.map_or(Wait::Block, Wait::Until);
             if let Err(e) = r.surfaces.wait(wait) {
                 break Err(e.to_string());
@@ -632,6 +888,7 @@ impl Engine {
             }
             request_due_videos(r);
             pump_webs(r);
+            self.pump_media(r);
         };
         if let Some(r) = running.take() {
             self.close_running(r);
@@ -681,6 +938,48 @@ impl Engine {
             }
         }
         None
+    }
+
+    /// Media for the scenes whose scripts handle it: the system's media sessions are followed
+    /// while one does, and a change reaches their scripts at their next frame, requested now
+    /// (the scripts may only have event handlers, like those of 3372348904). A scene that just
+    /// started gets the current state.
+    fn pump_media(&mut self, r: &mut Running) {
+        let wanted = r.scenes.iter().flatten().any(|s| s.wants_media);
+        let waker = self.waker.clone();
+        self.media
+            .sync(wanted, move || -> lumenwall_audio::media::MediaWaker {
+                Arc::new(move || waker.wake())
+            });
+        if !wanted {
+            return;
+        }
+        let update = self.media.poll();
+        let mut current = None;
+        for (t, slot) in r.scenes.iter_mut().enumerate() {
+            let Some(s) = slot.as_mut().filter(|s| s.wants_media) else {
+                continue;
+            };
+            let media = if s.media_ready {
+                update.clone()
+            } else {
+                if current.is_none() {
+                    current = self.media.current();
+                }
+                s.media_ready = current.is_some();
+                current.clone()
+            };
+            let Some(media) = media else {
+                continue;
+            };
+            if let Some(enabled) = media.status {
+                s.runtime.media_status(enabled);
+            }
+            s.runtime.media_changed(media.snapshot);
+            for o in r.outputs.iter_mut().filter(|o| o.target == t && !o.paused) {
+                request(r.surfaces.as_mut(), o);
+            }
+        }
     }
 
     fn set_fps(&mut self, r: Option<&mut Running>, fps: u32) {
@@ -1038,6 +1337,11 @@ impl Engine {
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
+        if added > 0
+            && let Some(r) = running.as_mut()
+        {
+            r.first_frame_due = Some((t0, "the new plan arrived"));
+        }
         if released > 0 {
             trim_heap();
         }
@@ -1243,6 +1547,7 @@ impl Engine {
                 self.publish(Some(r), Change::Outputs);
             }
             Event::Paused { output, reasons } => {
+                let all_before = !r.outputs.is_empty() && r.outputs.iter().all(|o| o.paused);
                 if let Some(o) = r.outputs.iter_mut().find(|o| o.id == output) {
                     if !o.paused {
                         tracing::info!("output {output} paused: {reasons:?}");
@@ -1253,6 +1558,10 @@ impl Engine {
                 if r.outputs.iter().all(|o| o.paused) {
                     r.audio.pause();
                     r.audio.update(0.0, true);
+                    if !all_before {
+                        // Nothing renders now (a game, a locked session): the RAM goes back.
+                        trim_resident();
+                    }
                 }
                 sync_video_pause(r);
                 self.publish(Some(r), Change::State);
@@ -1332,16 +1641,54 @@ impl Engine {
             }
         };
         let size = info.physical_size;
-        let surface = OutputSurface::new(&r.ctx, surface, size).map_err(|e| e.to_string())?;
-        if r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none() {
-            match build_renderer(
-                r,
-                &mut self.wallpapers[target],
-                &self.plan.targets[target],
-                &self.plan,
-                &self.waker,
-                size,
-            ) {
+        let t0 = Instant::now();
+        let needs_renderer =
+            r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none();
+        let mut build = |r: &Running| {
+            needs_renderer.then(|| {
+                build_renderer(
+                    r,
+                    &mut self.wallpapers[target],
+                    &self.plan.targets[target],
+                    &self.plan,
+                    &self.waker,
+                    size,
+                )
+            })
+        };
+        let new_surface = |ctx: &GpuContext| {
+            let t = Instant::now();
+            (
+                OutputSurface::new(ctx, surface, size).map_err(|e| e.to_string()),
+                t.elapsed(),
+            )
+        };
+        // Windows: the swap chain is created while the renderer is built. On NVIDIA/Vulkan the
+        // first one of a process takes 189–216 ms (measured in the engine process), as long as
+        // a light scene's build. wgpu devices are thread-safe; nothing else touches the surface.
+        // Elsewhere one after the other, as measured there.
+        let (chain, swap_chain, built) = if cfg!(windows) {
+            std::thread::scope(|scope| {
+                let ctx = &r.ctx;
+                let chain = scope.spawn(move || new_surface(ctx));
+                let built = build(r);
+                let (chain, swap_chain) = chain.join().unwrap_or_else(|_| {
+                    (
+                        Err("the thread creating the swap chain panicked".into()),
+                        Duration::ZERO,
+                    )
+                });
+                (chain, swap_chain, built)
+            })
+        } else {
+            let (chain, swap_chain) = new_surface(&r.ctx);
+            let built = if chain.is_ok() { build(r) } else { None };
+            (chain, swap_chain, built)
+        };
+        // A renderer built for an output that cannot present is dropped: it shows nothing.
+        let surface = chain?;
+        if let Some(built) = built {
+            match built {
                 Ok(Renderer::Video(mut v)) => {
                     v.attach_sound(&mut r.audio, &self.plan);
                     r.videos[target] = Some(*v);
@@ -1377,6 +1724,12 @@ impl Engine {
             size.1,
             info.scale,
             self.wallpapers[target].project.title
+        );
+        tracing::debug!(
+            "output {}: ready in {:.1} ms (swap chain {:.1} ms, alongside the renderer)",
+            info.name,
+            t0.elapsed().as_secs_f64() * 1000.0,
+            swap_chain.as_secs_f64() * 1000.0,
         );
         let reasons = r.surfaces.pause_reasons(id);
         if !reasons.is_empty() {
@@ -1435,12 +1788,13 @@ impl Engine {
         let rendered = r.rendered;
         self.render_output(r, id);
         if r.rendered != rendered
-            && let Some(t) = r.restored_at.take()
+            && let Some((t, since)) = r.first_frame_due.take()
         {
             tracing::info!(
-                "first frame {:.0} ms after the GPU restore began",
+                "first frame {:.0} ms after {since}",
                 t.elapsed().as_secs_f64() * 1000.0
             );
+            r.trim_due = Some(Instant::now() + TRIM_DELAY);
         }
     }
 
@@ -1673,7 +2027,7 @@ fn needs_reopen(r: &Running, want: &Config, plan: &EnginePlan, known: &[Known]) 
 
 /// Builds the scene or opens the video of a target (no sound: the caller attaches it).
 fn build_renderer(
-    r: &mut Running,
+    r: &Running,
     wp: &mut Wallpaper,
     tplan: &TargetPlan,
     plan: &EnginePlan,
@@ -1750,6 +2104,8 @@ fn build_renderer(
         updated_at: u64::MAX,
         serial: 0,
         clock: crate::clock::SceneClock::new(),
+        wants_media: crate::script::media::wants_media(&wp.project),
+        media_ready: false,
     })))
 }
 
@@ -2082,6 +2438,31 @@ fn request(s: &mut dyn WallpaperSurface, o: &mut Output) {
     }
 }
 
+/// The GPU backends the engine tries, in order: the single switch of the Windows backend.
+///
+/// One backend per instance: an instance holding Vulkan and DX12 enumerates both, and the DX12
+/// enumeration creates a device on every adapter (measured on Windows 11, RTX 4080 SUPER + AMD
+/// iGPU: 167–349 ms more per GPU opening, d3d12, D3D12Core and both vendors' D3D12 drivers
+/// loaded). Vulkan first; DX12 only when Vulkan has no adapter for the outputs.
+/// `LUMENWALL_GPU_BACKEND=vulkan` or `dx12` forces one (comparisons, driver bugs).
+fn gpu_backends() -> Vec<wgpu::Backends> {
+    backend_order(
+        cfg!(windows),
+        std::env::var("LUMENWALL_GPU_BACKEND").ok().as_deref(),
+    )
+}
+
+/// [`gpu_backends`] for a platform and a `LUMENWALL_GPU_BACKEND` value. Pure, for testing.
+fn backend_order(windows: bool, choice: Option<&str>) -> Vec<wgpu::Backends> {
+    let choice = choice.map(str::trim).map(str::to_ascii_lowercase);
+    match choice.as_deref() {
+        Some("dx12") if windows => vec![wgpu::Backends::DX12],
+        Some("vulkan") => vec![wgpu::Backends::VULKAN],
+        _ if windows => vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12],
+        _ => vec![wgpu::Backends::VULKAN],
+    }
+}
+
 fn create_wgpu_surface(
     instance: &GpuInstance,
     surfaces: &dyn WallpaperSurface,
@@ -2123,6 +2504,22 @@ fn daytime() -> f32 {
     minutes as f32 / 1440.0
 }
 
+/// Time between the first frame of a load (start, new wallpaper, GPU restore) and the working
+/// set trim: about 30 frames at 30 fps, after which the frames only fault back what they use.
+const TRIM_DELAY: Duration = Duration::from_secs(1);
+
+/// Empties the working set (Windows; nothing elsewhere): what loading touched goes back to the
+/// system (driver and shader-compiler pages, decoded files, the mapped `.pkg`). Measured by
+/// Cleo (Perf B), headless, release: 8–11 ms; the next frame costs 2–5 ms more, then nothing;
+/// steady state 3018340632 WS 112.8 → 19.3 MiB, 3463520581 131.6 → 49.0 MiB (WE: 64–69).
+/// Private bytes do not change. Called after a load, when every output pauses and after the GPU
+/// release, never per frame.
+pub(crate) fn trim_resident() {
+    if let Some(t) = lumenwall_platform::process::trim_working_set() {
+        tracing::debug!("working set emptied in {:.1} ms", t.as_secs_f64() * 1000.0);
+    }
+}
+
 /// Gives the heap pages freed by an unloaded wallpaper or a released GPU back to the system.
 /// glibc keeps them in its arenas otherwise (measured: scene → video → scene left 305 MiB
 /// RSS, 227 MiB after the trim, which takes ≈ 5 ms). Called on those events only, never per
@@ -2144,6 +2541,10 @@ pub(crate) fn trim_heap() {
             mib(before),
             mib(rss_bytes())
         );
+    }
+    // Windows: the heaps keep freed blocks committed (private bytes) otherwise.
+    if let Some(t) = lumenwall_platform::process::trim_heaps() {
+        tracing::debug!("heaps trimmed in {:.1} ms", t.as_secs_f64() * 1000.0);
     }
 }
 
@@ -2290,6 +2691,42 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_process_is_used_only_where_it_can_be() {
+        let plan = EnginePlan::default();
+        assert!(use_engine_process(true, true, None, &plan));
+        // Not wired in `main`, not Windows, or switched off.
+        assert!(!use_engine_process(false, true, None, &plan));
+        assert!(!use_engine_process(true, false, None, &plan));
+        assert!(!use_engine_process(true, true, Some(" 0"), &plan));
+        assert!(use_engine_process(true, true, Some("1"), &plan));
+        // One-shot commands print what this process loaded.
+        for plan in [
+            EnginePlan {
+                list_properties: true,
+                ..EnginePlan::default()
+            },
+            EnginePlan {
+                dump_structure: true,
+                ..EnginePlan::default()
+            },
+        ] {
+            assert!(!use_engine_process(true, true, None, &plan));
+        }
+    }
+
+    #[test]
+    fn one_backend_per_instance_vulkan_first() {
+        use wgpu::Backends as B;
+        assert_eq!(backend_order(true, None), vec![B::VULKAN, B::DX12]);
+        assert_eq!(backend_order(true, Some(" DX12 ")), vec![B::DX12]);
+        assert_eq!(backend_order(true, Some("vulkan")), vec![B::VULKAN]);
+        assert_eq!(backend_order(true, Some("metal")), vec![B::VULKAN, B::DX12]);
+        // Linux: Vulkan only, whatever the variable says.
+        assert_eq!(backend_order(false, None), vec![B::VULKAN]);
+        assert_eq!(backend_order(false, Some("dx12")), vec![B::VULKAN]);
+    }
+
+    #[test]
     fn daytime_is_a_fraction_of_a_day() {
         let d = daytime();
         assert!((0.0..1.0).contains(&d));
@@ -2330,10 +2767,10 @@ mod tests {
             targets: vec![target("default", &[])],
             ..EnginePlan::default()
         };
-        assert_eq!(Engine::platform_config(&plan).outputs, OutputSelection::All);
+        assert_eq!(Local::platform_config(&plan).outputs, OutputSelection::All);
         plan.targets = vec![target("DP-1", &["DP-1"]), target("DP-2", &["DP-2"])];
         assert_eq!(
-            Engine::platform_config(&plan).outputs,
+            Local::platform_config(&plan).outputs,
             OutputSelection::Named(vec!["DP-1".into(), "DP-2".into()])
         );
     }
