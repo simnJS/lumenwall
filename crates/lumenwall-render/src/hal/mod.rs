@@ -66,7 +66,7 @@ pub(crate) mod faults {
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use ash::vk;
 use wgpu::hal::{self, CommandEncoder as _, Device as _, api::Vulkan, vulkan as hv};
@@ -336,6 +336,9 @@ pub(crate) struct DirectGraph {
     adopted: HashSet<wgpu::Texture>,
     /// wgpu-hal and Vulkan objects this graph created and has not destroyed.
     objects: i64,
+    /// A frame was recorded since the last [`Self::idle`] (otherwise nothing of this graph can
+    /// be in flight: the load-time rebuild needs no GPU wait).
+    recorded: AtomicBool,
 }
 
 /// Runs `f` with the wgpu-hal device of `device`.
@@ -443,6 +446,7 @@ impl DirectGraph {
             keep: HashSet::new(),
             adopted: HashSet::new(),
             objects: 1,
+            recorded: AtomicBool::new(false),
         })
     }
 
@@ -860,10 +864,12 @@ impl DirectGraph {
     /// only earlier frames used. Call before anything recorded frames use may be destroyed
     /// (rebuilds after resizes); the program must be rebuilt afterwards.
     pub(crate) fn idle(&mut self, owned: &dyn Fn(&wgpu::Texture) -> bool) {
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        if self.recorded.swap(false, Ordering::Relaxed) {
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+        }
         let groups = std::mem::take(&mut self.dead_groups);
         let framebuffers: Vec<vk::Framebuffer> =
             self.framebuffers.drain().map(|(_, f)| f).collect();
@@ -1262,6 +1268,7 @@ impl DirectGraph {
         state: &dyn FrameState,
         queries: Option<vk::QueryPool>,
     ) -> wgpu::CommandBuffer {
+        self.recorded.store(true, Ordering::Relaxed);
         let mut enc =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         // SAFETY: the closure records into the encoder's open command buffer and never ends it,
