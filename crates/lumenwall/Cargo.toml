@@ -21,6 +21,8 @@ lumenwall-formats.workspace = true
 lumenwall-scene.workspace = true
 lumenwall-engine.workspace = true
 lumenwall-ipc.workspace = true
+# Power source (on battery or mains) for the "pause on battery" setting.
+lumenwall-audio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

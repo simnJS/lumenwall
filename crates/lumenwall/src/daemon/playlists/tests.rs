@@ -297,6 +297,7 @@ impl Rig {
             playlists: catalog,
             control,
             monitor: Some(monitor.clone() as Arc<dyn Monitor>),
+            power: None,
             log_filter: None,
             log_config: LogConfig::default(),
         });

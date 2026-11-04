@@ -17,18 +17,25 @@
 //! Pacing: the browser's own scheduler at the wallpaper fps (`FramePacing::Internal`). It only
 //! paints when the page changed, so a static page produces no frame and no wake-up; a new frame
 //! wakes the engine through its waker and the outputs showing the page are redrawn.
+//!
+//! Media: while the page has a `wallpaperRegisterMedia*Listener`, the slot subscribes to the
+//! system's media sessions (`lumenwall_audio::media::MediaHub`) with the same waker; each change
+//! wakes the engine and [`WebSlot::pump`] sends the page the events that changed
+//! (`crate::script::media::WebMedia`). No listener, no subscription.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lumenwall_audio::media::{MediaHub, MediaSubscription};
 use lumenwall_render::compose::{ComposeSettings, Compositor};
 use lumenwall_render::targets::{RenderTarget, RenderTargetPool, RtId};
 use lumenwall_render::texture::SamplerKey;
 use lumenwall_render::{GpuContext, HeadlessOutput, UvRange};
 use lumenwall_web::audio::{AudioPacer, audio_frame};
 use lumenwall_web::ipc::FramePacing;
+use lumenwall_web::media::MediaListeners;
 use lumenwall_web::mouse::{MouseInput, MouseTracker, Viewport, web_position};
 use lumenwall_web::{
     AudioOutput, FrameTransport, HostCommand, LaunchParams, PixelFormat, PropertySet, SharedFrame,
@@ -37,6 +44,7 @@ use lumenwall_web::{
 
 use crate::headless::{HeadlessOptions, HeadlessReport};
 use crate::plan::{AudioPlan, EnginePlan};
+use crate::script::media::WebMedia;
 use crate::wallpaper::Wallpaper;
 
 /// Imports kept per page: the browser's texture pool is 2–4 buffers; a resize allocates a
@@ -111,6 +119,9 @@ pub(crate) struct WebSlot {
     pub last_time: f64,
     audio_listener: bool,
     pacer: AudioPacer,
+    /// The system's media sessions, followed while the page has a media listener.
+    media: Option<MediaSubscription>,
+    media_events: WebMedia,
     mouse: MouseTracker,
     mouse_out: Vec<MouseInput>,
     restarts: u32,
@@ -176,6 +187,8 @@ impl WebSlot {
             last_time: 0.0,
             audio_listener: false,
             pacer: AudioPacer::new(),
+            media: None,
+            media_events: WebMedia::default(),
             mouse: MouseTracker::new(),
             mouse_out: Vec::with_capacity(4),
             restarts: 0,
@@ -203,6 +216,8 @@ impl WebSlot {
         );
         self.host = Some(host);
         self.audio_listener = false;
+        // A new page registers its listeners again.
+        self.set_media_listeners(MediaListeners::default());
         self.mouse = MouseTracker::new();
         self.stats.started.get_or_insert_with(Instant::now);
         Ok(())
@@ -232,8 +247,7 @@ impl WebSlot {
                     self.audio_listener = on;
                     self.pacer.reset();
                 }
-                // No media source yet (MPRIS / Windows media session): nothing to forward.
-                WebEvent::MediaListeners(_) => {}
+                WebEvent::MediaListeners(listeners) => self.set_media_listeners(listeners),
                 WebEvent::Error(e) => tracing::warn!("web host: {e}"),
                 WebEvent::Exited => {
                     self.host = None;
@@ -249,11 +263,39 @@ impl WebSlot {
                         }
                     } else {
                         tracing::error!("web host of '{}' keeps exiting; stopped", self.title);
+                        self.set_media_listeners(MediaListeners::default());
                     }
                 }
             }
         }
+        self.forward_media();
         fresh
+    }
+
+    /// The page registered or removed media listeners: the system's media sessions are
+    /// followed while it has at least one (the media hub wakes the engine through `waker`).
+    fn set_media_listeners(&mut self, listeners: MediaListeners) {
+        if listeners.is_empty() {
+            if self.media.take().is_some() {
+                tracing::debug!("web page '{}': no media listener left", self.title);
+            }
+            // The next listener gets the whole state again.
+            self.media_events = WebMedia::default();
+        } else if self.media.is_none() {
+            tracing::debug!("web page '{}': media listener", self.title);
+            self.media = Some(MediaHub::system().subscribe(self.waker.clone()));
+        }
+    }
+
+    /// Sends the page what changed in the media being played (the host keeps the latest event
+    /// of each kind for listeners registered later).
+    fn forward_media(&mut self) {
+        let Some(state) = self.media.as_mut().and_then(MediaSubscription::poll) else {
+            return;
+        };
+        for event in self.media_events.events(&state) {
+            self.send(HostCommand::Media(event));
+        }
     }
 
     fn copy_frame(&mut self, ctx: &GpuContext, frame: SharedFrame) -> bool {

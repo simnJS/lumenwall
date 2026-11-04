@@ -7,6 +7,9 @@
 //! - [`capture`]: [`AudioCapture`] trait and the PipeWire / PulseAudio / WASAPI loopback backends.
 //! - [`automute`]: "another application is playing" detection, event-driven.
 //! - [`playback`] (feature `playback`): scene sound objects, mixer and output stream.
+//! - [`media`] (feature `media`): what the system plays (title, artwork, playback, timeline)
+//!   for scripts and web pages: Windows media sessions, MPRIS on Linux.
+//! - [`power`] (feature `power`): on battery or on mains, for "pause on battery".
 //!
 //! Nothing in this crate blocks the render thread: backends connect asynchronously on their
 //! own threads, sleep while idle and are closed when the wallpaper is paused.
@@ -14,8 +17,13 @@
 pub mod automute;
 pub mod capture;
 pub mod convert;
+pub mod media;
+pub mod power;
 pub mod resample;
 pub mod spectrum;
+
+#[cfg(all(target_os = "linux", any(feature = "power", feature = "media")))]
+mod dbus;
 
 #[cfg(feature = "playback")]
 pub mod playback;

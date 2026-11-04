@@ -131,6 +131,7 @@ fn launch_with(
             run: script,
         }),
         ipc,
+        power: None,
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let args = std::iter::once("lumenwall")

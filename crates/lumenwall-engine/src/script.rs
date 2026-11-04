@@ -27,6 +27,7 @@ use lumenwall_script::{
 use crate::scene::{FrameState, chain_visible, visibility_chain, world_transform};
 
 mod dynamic;
+pub(crate) mod media;
 pub(crate) use dynamic::{Dynamic, Structure, workshop_ids};
 
 /// Receives the text that scripts compute for text layers: the junction between scripting and
@@ -1403,17 +1404,17 @@ mod tests {
     }
 
     /// An image object with `extra` JSON members.
-    fn image(id: i32, name: &str, extra: &str) -> String {
+    pub(super) fn image(id: i32, name: &str, extra: &str) -> String {
         format!(
             r#"{{ "id": {id}, "name": "{name}", "image": "models/m.json", "origin": "100 100 0", "size": "200 100"{extra} }}"#
         )
     }
 
-    fn scripted(value: &str, source: &str) -> String {
+    pub(super) fn scripted(value: &str, source: &str) -> String {
         format!(r#"{{ "value": {value}, "script": {} }}"#, json_str(source))
     }
 
-    fn load(objects: &[String]) -> (Project, SceneBuild) {
+    pub(super) fn load(objects: &[String]) -> (Project, SceneBuild) {
         let scene = format!(
             r#"{{ {CAMERA}, "general": {{ "orthogonalprojection": {{ "width": 1920, "height": 1080 }} }}, "objects": [ {} ] }}"#,
             objects.join(", ")
@@ -1445,7 +1446,7 @@ mod tests {
         (p, b)
     }
 
-    fn scripts(p: &mut Project, b: &SceneBuild) -> Box<SceneScripts> {
+    pub(super) fn scripts(p: &mut Project, b: &SceneBuild) -> Box<SceneScripts> {
         SceneScripts::load(p, b, &[], Vec2::new(1920.0, 1080.0), None).expect("scripts")
     }
 
@@ -1505,7 +1506,7 @@ mod tests {
         }
     }
 
-    fn tick(s: &mut SceneScripts, p: &mut Project, b: &SceneBuild, t: f64) -> Changes {
+    pub(super) fn tick(s: &mut SceneScripts, p: &mut Project, b: &SceneBuild, t: f64) -> Changes {
         let a = Audio([0.0; 16], [0.0; 32], [0.0; 64]);
         s.tick(p, b, &frame(t, &a), Vec2::new(1920.0, 1080.0))
     }
@@ -1514,7 +1515,7 @@ mod tests {
         &p.scene.as_ref().unwrap().objects[i]
     }
 
-    fn img(p: &Project, i: usize) -> &lumenwall_scene::ImageObject {
+    pub(super) fn img(p: &Project, i: usize) -> &lumenwall_scene::ImageObject {
         object(p, i).as_image().unwrap()
     }
 

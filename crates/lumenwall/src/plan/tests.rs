@@ -712,6 +712,19 @@ fn gpu_release_delay_comes_from_the_file() {
 }
 
 #[test]
+fn pause_on_battery_comes_from_the_file_and_stays_in_the_daemon() {
+    // Off by default, like Wallpaper Engine's "on battery: keep running".
+    assert!(!plan(&["X"]).pause_on_battery);
+    let on = plan_cfg(&["X"], "pause-on-battery = true");
+    assert!(on.pause_on_battery);
+    let changes = diff(&plan(&["X"]), &on);
+    assert_eq!(changes, [PlanChange::BatteryPause]);
+    assert!(!changes[0].concerns_engine());
+    assert!(PlanChange::Fps.concerns_engine());
+    assert!(on.to_string().ends_with("pause on battery true"), "{on}");
+}
+
+#[test]
 fn diff_lists_global_changes() {
     let a = plan(&["X"]);
     let b = plan(&[

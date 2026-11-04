@@ -375,7 +375,7 @@ fn handshake_and_every_call() {
 
     let settings = Settings {
         fps_limit: 60,
-        pause_on_battery: false,
+        pause_on_battery: true,
         ..Settings::default()
     };
     client.set_settings(settings.clone()).unwrap();

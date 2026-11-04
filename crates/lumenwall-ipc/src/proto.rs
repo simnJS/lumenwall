@@ -499,6 +499,7 @@ pub struct Settings {
     /// Frame-rate cap, aligned to the display refresh rate by the daemon.
     pub fps_limit: u32,
     pub pause_on_fullscreen: bool,
+    /// Pause every output while the computer runs on battery (or a UPS); off by default.
     pub pause_on_battery: bool,
     pub pause_on_lock: bool,
     /// Mute wallpapers while another application plays sound.
@@ -520,7 +521,8 @@ impl Default for Settings {
         Self {
             fps_limit: 30,
             pause_on_fullscreen: true,
-            pause_on_battery: true,
+            // Wallpaper Engine's default too ("playbackonbattery": "run").
+            pause_on_battery: false,
             pause_on_lock: true,
             // Off by default: see the `lumenwall` README (automute).
             automute: false,

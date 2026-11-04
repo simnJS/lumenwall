@@ -30,10 +30,12 @@ use crate::plan::{
 };
 use crate::playlist::project_is_usable;
 use crate::services::{
-    Control, ControlSender, EngineSnapshot, Monitor, MonitorChange, PlaylistCatalog, StopReason,
-    TargetStatus, WallpaperResolver,
+    Control, ControlSender, EngineSnapshot, Monitor, MonitorChange, PlaylistCatalog, PowerSource,
+    StopReason, TargetStatus, WallpaperResolver,
 };
 
+#[cfg(test)]
+mod battery_tests;
 mod playlists;
 use crate::settings::{
     Scaling, WallpaperRef, WallpaperSource, volume_fraction, volume_from_fraction,
@@ -57,6 +59,8 @@ pub struct DaemonInit {
     pub playlists: Arc<dyn PlaylistCatalog>,
     pub control: ControlSender,
     pub monitor: Option<Arc<dyn Monitor>>,
+    /// Followed while "pause on battery" is on; `None`: that setting never pauses.
+    pub power: Option<Arc<dyn PowerSource>>,
     pub log_filter: Option<LogFilterHandle>,
     pub log_config: LogConfig,
 }
@@ -98,6 +102,12 @@ pub struct Daemon {
     core: Mutex<Core>,
     /// Client pause, kept here so that `get_state` answers at once.
     user_paused: Mutex<bool>,
+    /// Pause on battery: the setting, the power source (running only while the setting is on)
+    /// and what it last said.
+    battery: Battery,
+    /// The pause the engine was last asked for (client or battery). Held while sending it, so
+    /// that two changes reach the engine in the order they were decided.
+    engine_paused: Mutex<bool>,
     publisher: OnceLock<Publisher>,
     stats: Mutex<Sampler>,
     stats_wake: Condvar,
@@ -106,6 +116,26 @@ pub struct Daemon {
     /// Some target plays a playlist (engine events then concern the playlist thread).
     playlists_running: AtomicBool,
     me: Weak<Daemon>,
+}
+
+/// Pause on battery. The flags are atomics: the power source calls back from its own thread
+/// and the engine thread reads them for the state, neither takes the configuration lock.
+#[derive(Default)]
+struct Battery {
+    source: Option<Arc<dyn PowerSource>>,
+    /// The plan's `pause_on_battery`.
+    enabled: AtomicBool,
+    /// What the power source said last (false until it says, and while not followed).
+    on_battery: AtomicBool,
+    /// The running watch; dropping it stops the power source.
+    watch: Mutex<Option<Box<dyn Send>>>,
+}
+
+impl Battery {
+    /// The wallpapers are paused for battery.
+    fn pausing(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst) && self.on_battery.load(Ordering::SeqCst)
+    }
 }
 
 /// Wake-up flags of the playlist thread; the lock is only held to flip them.
@@ -180,6 +210,11 @@ impl Daemon {
                 playlists: positions,
             }),
             user_paused: Mutex::new(false),
+            battery: Battery {
+                source: init.power,
+                ..Battery::default()
+            },
+            engine_paused: Mutex::new(false),
             publisher: OnceLock::new(),
             stats: Mutex::new(Sampler::default()),
             stats_wake: Condvar::new(),
@@ -196,6 +231,8 @@ impl Daemon {
                 }
             })));
         }
+        // On battery at start: the engine gets the pause before its first frame.
+        daemon.sync_battery();
         daemon
     }
 
@@ -218,6 +255,77 @@ impl Daemon {
         lock(&self.stats).wanted = false;
         self.stats_wake.notify_all();
         self.playlist_wake.set(|f| f.stopped = true);
+        let watch = lock(&self.battery.watch).take();
+        drop(watch);
+    }
+
+    // ----- pauses -----
+
+    /// Whether the engine is held: client pause or pause on battery.
+    fn held(&self) -> bool {
+        *lock(&self.user_paused) || self.battery.pausing()
+    }
+
+    /// Follows the plan's "pause on battery": the power source runs only while it is on, and
+    /// the engine's pause is brought up to date. Call after the plan changed, without the
+    /// `core` lock.
+    fn sync_battery(&self) {
+        let enabled = lock(&self.core).plan.pause_on_battery;
+        self.battery.enabled.store(enabled, Ordering::SeqCst);
+        let running = lock(&self.battery.watch).is_some();
+        if enabled && !running {
+            if let Some(source) = &self.battery.source {
+                tracing::info!("pause on battery: following the power source");
+                let me = self.me.clone();
+                // The callback may run before `watch` returns (current state): no lock is held
+                // here that it takes.
+                let watch = source.watch(Arc::new(move |on_battery| {
+                    if let Some(d) = me.upgrade() {
+                        d.power_changed(on_battery);
+                    }
+                }));
+                *lock(&self.battery.watch) = Some(watch);
+            } else {
+                tracing::info!("pause on battery: no power source in this build");
+            }
+        } else if !enabled && running {
+            tracing::info!("pause on battery: off");
+            let watch = lock(&self.battery.watch).take();
+            drop(watch);
+            self.battery.on_battery.store(false, Ordering::SeqCst);
+        }
+        self.apply_pause();
+    }
+
+    /// The power source's callback (its own thread): only flags and a non-blocking send.
+    fn power_changed(&self, on_battery: bool) {
+        if !self.battery.enabled.load(Ordering::SeqCst) {
+            return;
+        }
+        let before = self.battery.on_battery.swap(on_battery, Ordering::SeqCst);
+        if before != on_battery {
+            tracing::info!(
+                "power source: {}",
+                if on_battery { "on battery" } else { "on mains" }
+            );
+        }
+        self.apply_pause();
+    }
+
+    /// Asks the engine to pause or resume when the client pause or the pause on battery
+    /// changed it; publishes the state then. `false` once the engine has stopped.
+    fn apply_pause(&self) -> bool {
+        let mut sent = lock(&self.engine_paused);
+        let held = self.held();
+        if *sent == held {
+            return true;
+        }
+        *sent = held;
+        let delivered = self.control.send(Control::Pause(held));
+        drop(sent);
+        self.poke_playlists();
+        self.publish_state();
+        delivered
     }
 
     /// Starts the thread that changes playlist items when they are due. It sleeps until the
@@ -253,11 +361,11 @@ impl Daemon {
         self.playlist_wake.set(|f| f.dirty = true);
     }
 
-    /// Whether the outputs of `key` are paused: user pause, or every output that shows it is
-    /// paused by the platform (fullscreen window, locked session, hidden). A target no output
-    /// reports (no engine status yet) counts as playing.
-    fn target_paused(snap: &EngineSnapshot, user_paused: bool, key: &TargetKey) -> bool {
-        if user_paused {
+    /// Whether the outputs of `key` are paused: held (user pause, pause on battery), or every
+    /// output that shows it is paused by the platform (fullscreen window, locked session,
+    /// hidden). A target no output reports (no engine status yet) counts as playing.
+    fn target_paused(snap: &EngineSnapshot, held: bool, key: &TargetKey) -> bool {
+        if held {
             return true;
         }
         let key = key.to_string();
@@ -278,8 +386,8 @@ impl Daemon {
     fn playlist_tick(&self, now: Instant) {
         let mut runners = lock(&self.ops);
         let snap = self.snapshot();
-        let user_paused = *lock(&self.user_paused);
-        runners.set_paused(|key| Self::target_paused(&snap, user_paused, key), now);
+        let held = self.held();
+        runners.set_paused(|key| Self::target_paused(&snap, held, key), now);
         let mut changed = false;
         for key in runners.due(now) {
             if let Some(r) = runners.get_mut(&key) {
@@ -410,6 +518,7 @@ impl Daemon {
     fn state(&self) -> State {
         let snap = self.snapshot();
         let user_paused = *lock(&self.user_paused);
+        let battery = self.battery.pausing();
         let (audio, positions) = {
             let core = lock(&self.core);
             (core.plan.audio.clone(), core.playlists.clone())
@@ -427,7 +536,7 @@ impl Daemon {
                     None => (WallpaperStatus::Empty, None),
                     Some(TargetStatus::Loading) => (WallpaperStatus::Loading, None),
                     Some(TargetStatus::Error(e)) => (WallpaperStatus::Error, Some(e.clone())),
-                    Some(TargetStatus::Running) if user_paused || o.paused.is_some() => {
+                    Some(TargetStatus::Running) if user_paused || battery || o.paused.is_some() => {
                         (WallpaperStatus::Paused, None)
                     }
                     Some(TargetStatus::Running) => (WallpaperStatus::Running, None),
@@ -443,9 +552,11 @@ impl Daemon {
             })
             .collect();
         State {
-            paused: user_paused || platform_pause.is_some(),
+            paused: user_paused || battery || platform_pause.is_some(),
             pause_reason: if user_paused {
                 Some(PauseReason::User)
+            } else if battery {
+                Some(PauseReason::Battery)
             } else {
                 platform_pause
             },
@@ -473,7 +584,7 @@ impl Daemon {
         Settings {
             fps_limit: plan.fps,
             pause_on_fullscreen: plan.fullscreen_pause.enabled,
-            pause_on_battery: false,
+            pause_on_battery: plan.pause_on_battery,
             pause_on_lock: true,
             automute: plan.audio.automute,
             muted: plan.audio.silent,
@@ -521,7 +632,10 @@ impl Daemon {
         };
         if !changes.is_empty() {
             tracing::info!("client change: {changes:?}");
-            self.reload_engine(&new_plan, changes, &draft.preview, true)?;
+            let engine = engine_changes(changes);
+            if !engine.is_empty() {
+                self.reload_engine(&new_plan, engine, &draft.preview, true)?;
+            }
         }
         let (path, bytes) = {
             let mut core = lock(&self.core);
@@ -538,6 +652,7 @@ impl Daemon {
             }
         };
         self.commit_playlists(&mut runners, Instant::now());
+        self.sync_battery();
         drop(runners);
         match path {
             Some(path) => {
@@ -782,9 +897,6 @@ impl Daemon {
             self.publish_settings();
             Err(RemoteError::new(ErrorCode::Unsupported, message))
         };
-        if new.pause_on_battery && !current.pause_on_battery {
-            return refuse("pausing on battery is not supported yet");
-        }
         if !new.pause_on_lock {
             return refuse("Lumenwall always pauses while the session is locked");
         }
@@ -800,6 +912,9 @@ impl Daemon {
             if new.pause_on_fullscreen != current.pause_on_fullscreen {
                 t.insert("fullscreen-pause", value(new.pause_on_fullscreen));
                 d.cli.settings.no_fullscreen_pause = false;
+            }
+            if new.pause_on_battery != current.pause_on_battery {
+                t.insert("pause-on-battery", value(new.pause_on_battery));
             }
             if new.automute != current.automute {
                 t.insert("automute", value(new.automute));
@@ -827,7 +942,13 @@ impl Daemon {
 
     fn set_paused(&self, paused: bool) -> Result<(), RemoteError> {
         *lock(&self.user_paused) = paused;
-        if !self.control.send(Control::Pause(paused)) {
+        // A resume while on battery keeps the engine held (the state says why).
+        let delivered = {
+            let mut sent = lock(&self.engine_paused);
+            *sent = self.held();
+            self.control.send(Control::Pause(*sent))
+        };
+        if !delivered {
             return Err(internal("the engine has stopped"));
         }
         self.poke_playlists();
@@ -973,8 +1094,12 @@ impl Daemon {
                 core.plan = Arc::new(new_plan);
                 let (plan, preview) = (core.plan.clone(), core.preview.clone());
                 drop(core);
-                let _ = self.reload_engine(&plan, changes, &preview, false);
+                let engine = engine_changes(changes);
+                if !engine.is_empty() {
+                    let _ = self.reload_engine(&plan, engine, &preview, false);
+                }
                 self.commit_playlists(&mut runners, Instant::now());
+                self.sync_battery();
                 drop(runners);
                 self.publish_settings();
                 self.publish_state();
@@ -1034,7 +1159,7 @@ impl Daemon {
         *base = (now, cpu);
         let elapsed = counters.elapsed.as_secs_f64().max(1e-3);
         let snap = self.snapshot();
-        let user_paused = *lock(&self.user_paused);
+        let held = self.held();
         let outputs: Vec<OutputStats> = snap
             .outputs
             .iter()
@@ -1053,7 +1178,7 @@ impl Daemon {
                     } else {
                         0.0
                     },
-                    rendering: o.target.is_some() && o.paused.is_none() && !user_paused,
+                    rendering: o.target.is_some() && o.paused.is_none() && !held,
                 }
             })
             .collect();
@@ -1332,6 +1457,15 @@ struct Entry {
     content: Content,
     scaling: Option<Scaling>,
     clamp: Option<String>,
+}
+
+/// The changes the engine applies; the others (pause on battery) are the daemon's, and an
+/// engine reload for them alone would wake a released GPU for nothing.
+fn engine_changes(changes: Vec<plan::PlanChange>) -> Vec<plan::PlanChange> {
+    changes
+        .into_iter()
+        .filter(plan::PlanChange::concerns_engine)
+        .collect()
 }
 
 fn known_outputs(snap: &EngineSnapshot) -> Vec<String> {

@@ -170,6 +170,9 @@ pub struct ExecutionPlan {
     pub fullscreen_pause: FullscreenPausePlan,
     /// Seconds every output stays paused before the GPU is released; 0 = never.
     pub gpu_release_delay: u32,
+    /// Pause every output while the computer runs on battery (the daemon follows the power
+    /// source; the engine only sees its pause).
+    pub pause_on_battery: bool,
     pub input: InputPlan,
     pub particles: bool,
     pub assets_dir: Option<PathBuf>,
@@ -237,13 +240,14 @@ impl fmt::Display for ExecutionPlan {
         }
         write!(
             f,
-            "fps {}, volume {}{}, automute {}, audio processing {}, fullscreen pause {}",
+            "fps {}, volume {}{}, automute {}, audio processing {}, fullscreen pause {}, pause on battery {}",
             self.fps,
             self.audio.volume,
             if self.audio.silent { " (silent)" } else { "" },
             self.audio.automute,
             self.audio.processing,
-            self.fullscreen_pause.enabled
+            self.fullscreen_pause.enabled,
+            self.pause_on_battery
         )
     }
 }
@@ -563,6 +567,7 @@ pub fn build_with(
             .gpu_release_delay
             .and_then(|d| validate_gpu_release_delay(d).ok())
             .unwrap_or(DEFAULT_GPU_RELEASE_DELAY),
+        pause_on_battery: file.pause_on_battery.unwrap_or(false),
         input: InputPlan {
             mouse: !s.disable_mouse && file.mouse.unwrap_or(true),
             parallax: !s.disable_parallax && file.parallax.unwrap_or(true),
@@ -595,11 +600,20 @@ pub enum PlanChange {
     Audio,
     FullscreenPause,
     GpuRelease,
+    /// Pause on battery switched on or off: the daemon's business, the engine is not reloaded.
+    BatteryPause,
     Input,
     Particles,
     AssetsDir,
     Properties,
     Screenshot,
+}
+
+impl PlanChange {
+    /// Whether the engine has to apply this change (a reload); the others are the daemon's.
+    pub fn concerns_engine(&self) -> bool {
+        !matches!(self, Self::BatteryPause)
+    }
 }
 
 /// Lists the changes from `old` to `new`; empty when the plans are equivalent.
@@ -642,6 +656,10 @@ pub fn diff(old: &ExecutionPlan, new: &ExecutionPlan) -> Vec<PlanChange> {
         (
             old.gpu_release_delay != new.gpu_release_delay,
             PlanChange::GpuRelease,
+        ),
+        (
+            old.pause_on_battery != new.pause_on_battery,
+            PlanChange::BatteryPause,
         ),
         (old.input != new.input, PlanChange::Input),
         (old.particles != new.particles, PlanChange::Particles),
