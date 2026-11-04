@@ -331,6 +331,27 @@ impl Dispatcher {
     }
 }
 
+/// The single plane of a shared-memory frame, checked against the frame size.
+fn memory_plane(info: &FrameInfo) -> io::Result<crate::ipc::PlaneInfo> {
+    let [plane] = info.planes[..] else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "memory frame without exactly one plane",
+        ));
+    };
+    let needed = u64::from(plane.stride) * u64::from(info.height);
+    if plane.offset != 0
+        || plane.size < needed
+        || u64::from(plane.stride) < u64::from(info.width) * 4
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "memory frame smaller than its rows",
+        ));
+    }
+    Ok(plane)
+}
+
 #[cfg(unix)]
 fn unix_texture(info: &FrameInfo, fds: Vec<std::os::fd::OwnedFd>) -> io::Result<SharedTexture> {
     use crate::ipc::frame::DmaBufPlane;
@@ -341,14 +362,7 @@ fn unix_texture(info: &FrameInfo, fds: Vec<std::os::fd::OwnedFd>) -> io::Result<
         ));
     }
     if info.memory {
-        let plane = info.planes[0];
-        let needed = u64::from(plane.stride) * u64::from(info.height);
-        if plane.offset != 0 || plane.size < needed {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "memory frame smaller than its rows",
-            ));
-        }
+        let plane = memory_plane(info)?;
         let fd = fds.into_iter().next().expect("one descriptor");
         return Ok(SharedTexture::Memory {
             fd,
@@ -387,6 +401,11 @@ fn windows_texture(
             "null shared handle",
         ));
     }
+    let plane = if info.memory {
+        Some(memory_plane(info)?)
+    } else {
+        None
+    };
     let mut local: HANDLE = std::ptr::null_mut();
     // SAFETY: the host keeps the source handle open until it receives FrameReleased; the
     // duplicate is owned by the returned OwnedHandle.
@@ -406,7 +425,14 @@ fn windows_texture(
     }
     // SAFETY: `local` is a fresh handle owned by this process.
     let handle = unsafe { OwnedHandle::from_raw_handle(local as _) };
-    Ok(SharedTexture::D3D11 { handle })
+    Ok(match plane {
+        Some(plane) => SharedTexture::Memory {
+            handle,
+            stride: plane.stride,
+            size: plane.size,
+        },
+        None => SharedTexture::D3D11 { handle },
+    })
 }
 
 /// Host-process side of the channel (used by the host executable).

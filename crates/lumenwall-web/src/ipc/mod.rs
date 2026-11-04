@@ -53,8 +53,8 @@ pub enum FrameTransport {
     /// GPU textures shared by handle (Linux DMA-BUF, Windows NT handle): zero copy.
     #[default]
     Gpu,
-    /// Software painting copied into one shared memory buffer (Linux `memfd`), uploaded by the
-    /// main process: the fallback when the GPU texture cannot be imported.
+    /// Software painting copied into one shared memory buffer (Linux `memfd`, Windows section),
+    /// uploaded by the main process: the fallback when the GPU texture cannot be imported.
     Memory,
 }
 

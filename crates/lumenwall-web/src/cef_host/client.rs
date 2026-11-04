@@ -155,7 +155,7 @@ wrap_render_handler! {
             if type_ != PaintElementType::from(sys::cef_paint_element_type_t::PET_VIEW) {
                 return;
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             if self.shared.params.transport == crate::ipc::FrameTransport::Memory {
                 if buffer.is_null() || width <= 0 || height <= 0 {
                     return;
@@ -259,9 +259,8 @@ fn forward_frame(shared: &Shared, info: &AcceleratedPaintInfo) {
 
 /// Software painting: copies the pixels into the shared memory buffer, sends it and waits for
 /// the main process to upload it (the next paint overwrites the same buffer).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn forward_memory_frame(shared: &Shared, pixels: &[u8], width: u32, height: u32) {
-    use std::os::fd::AsFd;
     let Ok(mut memory) = shared.memory.lock() else {
         return;
     };
@@ -296,10 +295,21 @@ fn forward_memory_frame(shared: &Shared, pixels: &[u8], width: u32, height: u32)
             stride: width * 4,
             size: pixels.len() as u64,
         }],
+        // Windows: the section handle, duplicated by the main process while we wait below.
+        #[cfg(windows)]
+        handle: buffer.handle_value(),
+        #[cfg(not(windows))]
         handle: 0,
         memory: true,
     };
-    if shared.send_frame(&HostEvent::Frame(frame), &[buffer.fd().as_fd()]) {
+    #[cfg(target_os = "linux")]
+    let sent = {
+        use std::os::fd::AsFd;
+        shared.send_frame(&HostEvent::Frame(frame), &[buffer.fd().as_fd()])
+    };
+    #[cfg(windows)]
+    let sent = shared.send_frame(&HostEvent::Frame(frame), &[]);
+    if sent {
         wait_release(shared, id);
     }
 }
