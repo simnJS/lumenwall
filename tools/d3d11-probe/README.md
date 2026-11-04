@@ -198,12 +198,58 @@ private 428–436, working set 64–69 MiB, CPU 0.8–4.2 %, GPU 3D 1.1–2.1 %,
 Vulkan 17.18 MiB, 436.7 dedicated, 480–483 private, 120 working set, CPU 6.9–7.8 %, GPU 3D
 1.8–2.6 %, device 237–249 ms.
 
-**Conclusion.** Direct3D 11 brings the shared GPU memory from 15–17 MiB to about 3 MiB. With one
-shared constant buffer and shared vertex buffers it sits at 2.74–3.10 MiB over six runs (mean
-about 2.9): **under Wallpaper Engine's 3 MiB on average, not robustly "strictly under"** — one run
-in three is above 3.0, and the figures move by ±0.15 MiB with the system's other activity. Any
-D3D11 renderer should be designed with few buffer objects (per-frame arenas with offsets), and the
-margin is small enough that the person should decide knowing it is "equal to WE, within the
-measurement noise", not a clear win on that metric. On every other metric it is clearly lower
-than Vulkan: dedicated −35 %, working set −50 %, CPU about −60 %, device creation and upload about
-−15 % and −45 %, with equal GPU 3D time within the noise of the game running beside it.
+### Arena vertex buffer and `IDXGIDevice3::Trim`
+
+`bisect.ps1`, three runs of each variant interleaved, scene 3463520581, 16 s windows. "At 30
+frames" and "end of window" are the process's shared memory (MiB).
+
+| Variant (on top of `cb=big`) | Run 1 | Run 2 | Run 3 | Peak after loading |
+|---|---|---|---|---|
+| `vb=arena` (one immutable vertex buffer for all draws, offsets in `IASetVertexBuffers`) | 2.91 | 2.88 | 3.62 (at 30 frames: 2.76) | 13–16 |
+| `vb=shared,trim` (`Trim()` once, right after loading) | 1.35 | 1.87 | 1.37 | 0.8–0.9 |
+| `vb=arena,trim30` (`Trim()` after loading and again at frame 30) | 1.97 | 1.16 | 1.84 | 0.8 |
+
+- **One arena vertex buffer does not help** beyond sharing per program (2.9, same as `vb=shared`
+  without Trim); the one 3.62 reading is a late bump at the end of that window (2.76 at 30
+  frames), i.e. noise of the same order as before.
+- **`Trim()` is the lever**: 1.2–2.0 MiB at the end of the window (mean 1.6), against 2.9–3.2
+  without it, and it removes the loading peak too (0.8–0.9 MiB right after loading instead of
+  13–16): the driver was holding its staging memory for the textures until told otherwise. A
+  second `Trim()` at frame 30 brings nothing the first does not. GPU 3D (1.0–1.2 %) and late
+  frames (0) are unchanged; the CPU readings (1.2–4.4 %) are within the noise of the game running.
+- Not tested: whether `Trim()` after a *resize* or at wallpaper change keeps the memory low (the
+  first call may have been what released the load-time staging, later frames re-grow it a little:
+  0.8 → 1.2–1.9 MiB between loading and the end of the window).
+
+**Conclusion.** Direct3D 11 brings the shared GPU memory from 15–17 MiB to 1.2–2.0 MiB with the
+recommended design below, **clearly under Wallpaper Engine's 3 MiB**, where a plain port (one
+constant buffer and one vertex buffer per draw, no `Trim`) sits at 3.0–3.2 MiB (equal to WE within
+the noise) and `cb=big,vb=shared` alone at 2.7–3.1 MiB. On every other metric it is clearly lower
+than the Vulkan renderer: dedicated −32/−35 %, working set −35/−50 %, CPU about −60 % on the
+busy scene, device creation and texture upload shorter, GPU 3D equal within the noise of the game
+running beside the runs. 33 of 33 shaders of the two scenes compile to shader model 5.0.
+
+**Recommended design for a real Direct3D 11 renderer** (what the probe's best variant does, plus
+what is left to build):
+1. **Few buffer objects.** One dynamic constant buffer for all per-draw constants, rewritten once per
+   frame with `Map(WRITE_DISCARD)` and bound per draw with `VSSetConstantBuffers1` /
+   `PSSetConstantBuffers1` offsets (D3D11.1: 256-byte aligned regions); one frame block; vertex
+   data per program, not per draw (or from `SV_VertexID`). Every extra buffer object costs shared
+   memory the driver keeps while frames run (≈ 0.1 MiB per 50 objects).
+2. **`IDXGIDevice3::Trim()` once after loading** (textures, targets, pipelines created and the
+   GPU idle). It is the difference between ≈ 3 and ≈ 1.5 MiB and between a 13–16 MiB and a 1 MiB
+   peak while loading. Call it again after any large load (wallpaper change).
+3. **Flip-model swap chain** with `Present(0, 0)`, two buffers (0.72 MiB with the device), paced
+   by the engine at its own frame rate.
+4. **Shaders:** `lumenwall-shader` → naga → HLSL SM 5.0 with the sampler-heap declarations
+   rewritten to `SamplerState name : register(sN)` (see "Shaders" above; the product would need
+   the same rewrite or a naga change), compiled with `D3DCompile` at first run (≈ 7 ms per
+   program, 78–170 ms per scene) and cached on disk as bytecode (0.7–3 ms per scene afterwards).
+5. **Keep from the current renderer:** one dedicated copy of each texture (immutable, initial data
+   at creation: 63 MiB in 24–29 ms), render-target aliasing (not in the probe: dedicated would drop
+   from 285 towards the engine's 248 MiB), the chain planner and "chains first, scene draws
+   together" ordering.
+6. **Open questions the probe does not answer:** pixel parity of the HLSL path (never compared with
+   the Vulkan output), video / web wallpapers (DMA-BUF-equivalent imports are D3D11 shared
+   textures already), per-monitor swap chains (the probe has one), behaviour of `Trim()` after
+   device resets, and the maintenance cost of a second backend.

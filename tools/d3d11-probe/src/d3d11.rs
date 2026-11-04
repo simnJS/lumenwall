@@ -62,7 +62,9 @@ struct Program {
 struct DrawState {
     program: usize,
     target: usize,
-    vb: ID3D11Buffer,
+    vb: Option<ID3D11Buffer>,
+    /// Byte offset in the arena (`vb=arena`).
+    vb_off: u32,
     cb: Option<ID3D11Buffer>,
     /// `cb=big`: first constant (16-byte unit) and byte offset of this draw in the big buffer.
     big_first: u32,
@@ -91,6 +93,9 @@ pub struct D3d11 {
     big_data: Vec<u8>,
     big_cursor: std::cell::Cell<usize>,
     vb_cache: std::cell::RefCell<std::collections::HashMap<(usize, u32, u32), ID3D11Buffer>>,
+    arena: Option<ID3D11Buffer>,
+    arena_data: std::cell::RefCell<Vec<u8>>,
+    frames: u64,
     frame_data: Vec<u8>,
     sampler: Option<ID3D11SamplerState>,
 }
@@ -181,6 +186,9 @@ impl Backend for D3d11 {
                     big_data: Vec::new(),
                     big_cursor: std::cell::Cell::new(0),
                     vb_cache: Default::default(),
+                    arena: None,
+                    arena_data: Default::default(),
+                    frames: 0,
                     frame_data: Vec::new(),
                     sampler: None,
                 },
@@ -475,8 +483,33 @@ impl Backend for D3d11 {
                 self.big_data = vec![0; total];
                 self.big = Some(self.dynamic_cb(total as u32)?);
             }
+            if self.variant.arena_vb {
+                let data = self.arena_data.borrow();
+                let init = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: data.as_ptr().cast(),
+                    SysMemPitch: 0,
+                    SysMemSlicePitch: 0,
+                };
+                let mut b = None;
+                self.device.CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: data.len() as u32,
+                        Usage: D3D11_USAGE_IMMUTABLE,
+                        BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                        StructureByteStride: 0,
+                    },
+                    Some(&init),
+                    Some(&mut b),
+                )?;
+                self.arena = b;
+            }
             times.pipelines_ms += t.elapsed().as_secs_f64() * 1000.0;
             self.wait_idle();
+            if self.variant.trim_load {
+                self.trim();
+            }
             mark("draws");
         }
         Ok(times)
@@ -553,7 +586,15 @@ impl Backend for D3d11 {
                     }
                     _ => {}
                 }
-                Self::draw(ctx, ctx1.as_ref(), p, d, frame_cb, self.big.as_ref());
+                Self::draw(
+                    ctx,
+                    ctx1.as_ref(),
+                    p,
+                    d,
+                    frame_cb,
+                    self.big.as_ref(),
+                    self.arena.as_ref(),
+                );
             }
             // The scene target to the swap chain.
             ctx.PSSetShaderResources(0, Some(&[const { None }; 8]));
@@ -561,9 +602,21 @@ impl Backend for D3d11 {
             ctx.RSSetViewports(Some(&[vp(OUTPUT.0, OUTPUT.1)]));
             if let Some(d) = &mut self.present {
                 let p = &self.programs[d.program];
-                Self::draw(ctx, ctx1.as_ref(), p, d, frame_cb, self.big.as_ref());
+                Self::draw(
+                    ctx,
+                    ctx1.as_ref(),
+                    p,
+                    d,
+                    frame_cb,
+                    self.big.as_ref(),
+                    self.arena.as_ref(),
+                );
             }
             self.swap.Present(0, DXGI_PRESENT(0)).ok()?;
+            self.frames += 1;
+            if self.variant.trim_30 && self.frames == 30 {
+                self.trim();
+            }
         }
         Ok(())
     }
@@ -608,11 +661,13 @@ impl D3d11 {
         d: &DrawState,
         frame_cb: &ID3D11Buffer,
         big: Option<&ID3D11Buffer>,
+        arena: Option<&ID3D11Buffer>,
     ) {
         // SAFETY: the objects belong to the device of `ctx`.
         unsafe {
             ctx.IASetInputLayout(&p.layout);
-            ctx.IASetVertexBuffers(0, 1, Some(&Some(d.vb.clone())), Some(&p.stride), Some(&0));
+            let vb = d.vb.as_ref().or(arena).cloned();
+            ctx.IASetVertexBuffers(0, 1, Some(&vb), Some(&p.stride), Some(&d.vb_off));
             ctx.VSSetShader(&p.vs, None);
             ctx.PSSetShader(&p.ps, None);
             match (&d.cb, big, ctx1) {
@@ -673,7 +728,15 @@ impl D3d11 {
             vb = self.vb_cache.borrow().get(&vkey).cloned();
         }
         // SAFETY: valid descriptors; `vdata` outlives the call.
-        if vb.is_none() {
+        let mut vb_off = 0u32;
+        if self.variant.arena_vb {
+            let mut a = self.arena_data.borrow_mut();
+            let pad = (16 - a.len() % 16) % 16;
+            let len = a.len();
+            a.resize(len + pad, 0);
+            vb_off = a.len() as u32;
+            a.extend_from_slice(&vdata);
+        } else if vb.is_none() {
             unsafe {
                 self.device.CreateBuffer(
                     &D3D11_BUFFER_DESC {
@@ -743,7 +806,8 @@ impl D3d11 {
         Ok(DrawState {
             program,
             target,
-            vb: vb.ok_or_else(|| anyhow!("vertex buffer"))?,
+            vb,
+            vb_off,
             cb,
             big_first,
             big_off,
@@ -807,6 +871,11 @@ struct Variant {
     cb: CbMode,
     /// One immutable vertex buffer per (program, coverage) instead of one per draw.
     shared_vb: bool,
+    /// One immutable vertex buffer for every draw (offsets in `IASetVertexBuffers`).
+    arena_vb: bool,
+    /// `IDXGIDevice3::Trim` after loading, and again at frame 30 (`trim30`).
+    trim_load: bool,
+    trim_30: bool,
 }
 
 impl Variant {
@@ -822,6 +891,19 @@ impl Variant {
                 CbMode::Dynamic
             },
             shared_vb: has("vb=shared"),
+            arena_vb: has("vb=arena"),
+            trim_load: has("trim") || has("trim30"),
+            trim_30: has("trim30"),
+        }
+    }
+}
+
+impl D3d11 {
+    /// `IDXGIDevice3::Trim`: tells the driver it may release memory it caches for the app.
+    fn trim(&self) {
+        if let Ok(dxgi) = self.device.cast::<IDXGIDevice3>() {
+            // SAFETY: no arguments.
+            unsafe { dxgi.Trim() };
         }
     }
 }
