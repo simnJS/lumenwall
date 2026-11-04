@@ -1644,19 +1644,8 @@ impl Local {
         let t0 = Instant::now();
         let needs_renderer =
             r.videos[target].is_none() && r.scenes[target].is_none() && r.webs[target].is_none();
-        // The swap chain is created while the renderer is built: on NVIDIA/Vulkan/Windows the
-        // first one of a process takes 189–197 ms (measured in the engine process), as long as a
-        // light scene's build. wgpu devices are thread-safe; nothing else touches the surface.
-        let (chain, swap_chain, built) = std::thread::scope(|scope| {
-            let ctx = &r.ctx;
-            let chain = scope.spawn(move || {
-                let t = Instant::now();
-                (
-                    OutputSurface::new(ctx, surface, size).map_err(|e| e.to_string()),
-                    t.elapsed(),
-                )
-            });
-            let built = needs_renderer.then(|| {
+        let mut build = |r: &Running| {
+            needs_renderer.then(|| {
                 build_renderer(
                     r,
                     &mut self.wallpapers[target],
@@ -1665,15 +1654,37 @@ impl Local {
                     &self.waker,
                     size,
                 )
-            });
-            let (chain, swap_chain) = chain.join().unwrap_or_else(|_| {
-                (
-                    Err("the thread creating the swap chain panicked".into()),
-                    Duration::ZERO,
-                )
-            });
+            })
+        };
+        let new_surface = |ctx: &GpuContext| {
+            let t = Instant::now();
+            (
+                OutputSurface::new(ctx, surface, size).map_err(|e| e.to_string()),
+                t.elapsed(),
+            )
+        };
+        // Windows: the swap chain is created while the renderer is built. On NVIDIA/Vulkan the
+        // first one of a process takes 189–216 ms (measured in the engine process), as long as
+        // a light scene's build. wgpu devices are thread-safe; nothing else touches the surface.
+        // Elsewhere one after the other, as measured there.
+        let (chain, swap_chain, built) = if cfg!(windows) {
+            std::thread::scope(|scope| {
+                let ctx = &r.ctx;
+                let chain = scope.spawn(move || new_surface(ctx));
+                let built = build(r);
+                let (chain, swap_chain) = chain.join().unwrap_or_else(|_| {
+                    (
+                        Err("the thread creating the swap chain panicked".into()),
+                        Duration::ZERO,
+                    )
+                });
+                (chain, swap_chain, built)
+            })
+        } else {
+            let (chain, swap_chain) = new_surface(&r.ctx);
+            let built = if chain.is_ok() { build(r) } else { None };
             (chain, swap_chain, built)
-        });
+        };
         // A renderer built for an output that cannot present is dropped: it shows nothing.
         let surface = chain?;
         if let Some(built) = built {
