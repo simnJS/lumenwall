@@ -1,0 +1,12 @@
+"Run","Kind","Engine","Wallpaper","Start","End","FirstGpuMs","CommandMs","LwStatus","LwFps","LwOutputs","LwCpuMsPerFrame","LwGpuPct","Error"
+"idle-none-start","idle","","","2026-11-04T15:35:34.959","2026-11-04T15:35:49.963",,,"","","","","",
+"idle-resident","idle","","","2026-11-04T15:35:59.212","2026-11-04T15:36:14.202",,,"","","","","",
+"1-01-3463520581-we","run","we","3463520581","2026-11-04T15:36:24.629","2026-11-04T15:36:54.656","474","425","","","","","",
+"1-02-3463520581-lumenwall","run","lumenwall","3463520581","2026-11-04T15:37:08.078","2026-11-04T15:37:38.086","857","802","DISPLAY1=running","29.988659","DISPLAY1=30 fps","1.3046767","8.905538",
+"1-03-3018340632-lumenwall","run","lumenwall","3018340632","2026-11-04T15:37:52.499","2026-11-04T15:38:22.514","594","548","DISPLAY1=running","29.990124","DISPLAY1=30 fps","0.5507633","6.3751607",
+"1-04-3018340632-we","run","we","3018340632","2026-11-04T15:38:36.822","2026-11-04T15:39:06.893","227","182","","","","","",
+"1-05-3044696375-we","run","we","3044696375","2026-11-04T15:39:21.573","2026-11-04T15:39:52.580","5807","3352","","","","","",
+"1-06-3044696375-lumenwall","run","lumenwall","3044696375","2026-11-04T15:39:57.681","2026-11-04T15:39:57.681",,"26","","","","","","exit 1: the running daemon refused C:\Program Files (x86)\Steam\steamapps\workshop\content\431960\3044696375: daemon error: UnsupportedWallpaper: 'JavaScript Clock & Motivation' is a web wallpaper: web wallpapers run on Linux only for now (no Direct3D frame import yet)"
+"1-07-3655057993-lumenwall","run","lumenwall","3655057993","2026-11-04T15:40:00.774","2026-11-04T15:40:00.774",,"23","","","","","","exit 1: the running daemon refused C:\Program Files (x86)\Steam\steamapps\workshop\content\431960\3655057993: daemon error: UnsupportedWallpaper: 'Boykisser │ Winter theme [4K]' is a video wallpaper: this build has no video support (lumenwall-video without FFmpeg)"
+"1-08-3655057993-we","run","we","3655057993","2026-11-04T15:40:13.980","2026-11-04T15:40:43.970","300","248","","","","","",
+"idle-none-end","idle","","","2026-11-04T15:40:50.841","2026-11-04T15:41:05.836",,,"","","","","",
