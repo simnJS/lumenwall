@@ -906,6 +906,7 @@ impl<'c> SceneBuilder<'c> {
             feedback: false,
             accumulates: false,
             last_encode: Duration::ZERO,
+            last_direct: DirectTimes::default(),
             shaders: Vec::new(),
             pipelines: HashMap::new(),
             scene_size: self.scene_size,
@@ -1406,6 +1407,16 @@ impl FrameState for FrameView<'_> {
     }
 }
 
+/// CPU time of a frame recorded directly in Vulkan, beyond the uploads (debug counters).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirectTimes {
+    /// Recording the frame into its Vulkan command buffer (encoder creation and `finish`
+    /// included).
+    pub record: Duration,
+    /// The submission [`RenderScene::encode`] makes (zero with [`RenderScene::encode_frame`]).
+    pub submit: Duration,
+}
+
 /// Command buffers of a frame recorded directly in Vulkan
 /// ([`RenderScene::encode_frame`]): the caller's commands up to the scene with the frame's
 /// uploads, then the scene. Empty on the wgpu path (everything went into the caller's encoder).
@@ -1546,6 +1557,8 @@ pub struct RenderScene {
     feedback: bool,
     accumulates: bool,
     last_encode: Duration,
+    /// CPU split of the last frame recorded directly in Vulkan.
+    last_direct: DirectTimes,
     /// Compiled shaders and pipelines, reused by passes added after load.
     shaders: Vec<PassShader>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
@@ -3028,9 +3041,18 @@ impl RenderScene {
     /// [`Self::encode_frame`] to submit everything at once instead.
     pub fn encode(&mut self, ctx: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
         let commands = self.encode_frame(ctx, encoder);
+        self.last_direct.submit = Duration::ZERO;
         if !commands.is_empty() {
+            let t = Instant::now();
             ctx.queue().submit(commands);
+            self.last_direct.submit = t.elapsed();
         }
+    }
+
+    /// CPU split of the last frame recorded directly in Vulkan (zero on the wgpu path).
+    #[must_use]
+    pub fn last_direct_times(&self) -> DirectTimes {
+        self.last_direct
     }
 
     /// [`Self::encode`] without its submission. On the wgpu path the frame goes into `encoder`
@@ -3092,6 +3114,7 @@ impl RenderScene {
                         label: Some("lumenwall.frame"),
                     });
                 let before = std::mem::replace(encoder, next).finish();
+                let t_record = Instant::now();
                 let frame = d.record(
                     ctx.device(),
                     &FrameView {
@@ -3100,6 +3123,7 @@ impl RenderScene {
                     },
                     None,
                 );
+                self.last_direct.record = t_record.elapsed();
                 FrameCommands {
                     buffers: [Some(before), Some(frame)],
                 }

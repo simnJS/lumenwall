@@ -249,6 +249,8 @@ pub fn render_headless(
     // CPU time of the scene update and of the graph encode (the rest: composition, submit).
     let mut split = (Duration::ZERO, Duration::ZERO);
     let mut finish_submit = (Duration::ZERO, Duration::ZERO);
+    // Direct Vulkan recording: (record, submit) inside the encode time.
+    let mut direct = (Duration::ZERO, Duration::ZERO);
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
     let paced_from = Instant::now();
@@ -316,6 +318,9 @@ pub fn render_headless(
         let t_update = start.elapsed();
         changed_frames += u32::from(rt.scene.needs_redraw());
         rt.scene.encode(&ctx, &mut enc);
+        let d = rt.scene.last_direct_times();
+        direct.0 += d.record;
+        direct.1 += d.submit;
         let t_encode = start.elapsed();
         uv = composer.update(&ctx, out.size(), rt.logical);
         compositor.encode(
@@ -409,6 +414,15 @@ pub fn render_headless(
         finish_submit.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
         finish_submit.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
     );
+    if rt.scene.records_direct() {
+        // Inside "encode": the Vulkan recording and the submission of the uploads and the frame.
+        tracing::debug!(
+            "direct Vulkan recording per frame: record {:.3} ms, submit {:.3} ms ({} render passes)",
+            direct.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+            direct.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+            rt.scene.counts().render_passes,
+        );
+    }
     if let Some((s, tick)) = rt.script_stats() {
         tracing::info!(
             "scripts: {} loaded, {} active, {} per-frame update(s), {} timer(s), {:.1} µs per frame, {:.0} KiB JS heap; {changed_frames}/{} frame(s) needed a redraw",
