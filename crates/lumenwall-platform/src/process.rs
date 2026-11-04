@@ -3,6 +3,7 @@
 //! - [`Tie`]: a child process (and every process it starts) is killed when this process exits,
 //!   however it exits (Windows job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: the job
 //!   handle is closed by the system when the process dies, crash included).
+//! - [`trim_heaps`]: the heaps give their free memory back to the system (private bytes).
 //! - [`trim_working_set`]: gives the resident pages of this process back to the system (they stay
 //!   committed and fault back on access).
 //!
@@ -64,6 +65,57 @@ pub fn trim_working_set() -> Option<Duration> {
             )
         }
         .as_bool();
+        ok.then(|| t0.elapsed())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Gives the free memory the heaps of this process keep back to the system (Windows,
+/// `HeapOptimizeResources` on every heap: the low-fragmentation heap's caches and free blocks
+/// are decommitted, which private bytes count). The Windows counterpart of glibc's
+/// `malloc_trim`. Returns how long it took; `None` elsewhere or on failure.
+pub fn trim_heaps() -> Option<Duration> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Memory::{HeapOptimizeResources, HeapSetInformation};
+        /// `HEAP_OPTIMIZE_RESOURCES_INFORMATION` (version 1, no flags).
+        #[repr(C)]
+        struct Optimize {
+            version: u32,
+            flags: u32,
+        }
+        let info = Optimize {
+            version: 1,
+            flags: 0,
+        };
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Memory::{GetProcessHeaps, HEAP_NONE, HeapCompact};
+        let t0 = std::time::Instant::now();
+        // SAFETY: no handle (= every heap of the process) and a valid structure of the
+        // declared size for the call.
+        let ok = unsafe {
+            HeapSetInformation(
+                None,
+                HeapOptimizeResources,
+                Some((&info as *const Optimize).cast()),
+                size_of::<Optimize>(),
+            )
+        }
+        .is_ok();
+        // Coalescing the free blocks lets the heap decommit the large ones.
+        let mut heaps = [HANDLE::default(); 32];
+        // SAFETY: the buffer holds as many handles as its length says.
+        let n = unsafe { GetProcessHeaps(&mut heaps) } as usize;
+        for &heap in &heaps[..n.min(heaps.len())] {
+            // SAFETY: a heap of this process, alive for the call (heaps are not destroyed
+            // concurrently here: only the process heap and the CRT's exist).
+            unsafe {
+                HeapCompact(heap, HEAP_NONE);
+            }
+        }
         ok.then(|| t0.elapsed())
     }
     #[cfg(not(windows))]
@@ -150,5 +202,11 @@ mod tests {
     fn trimming_never_fails_the_caller() {
         // Windows: Some(duration); elsewhere None. Either way nothing else happens.
         let _ = trim_working_set();
+        // Freed blocks are given back; live ones stay usable.
+        let keep = vec![7u8; 1 << 20];
+        drop((0..256).map(|i| vec![i as u8; 4096]).collect::<Vec<_>>());
+        let t = trim_heaps();
+        assert_eq!(t.is_some(), cfg!(windows));
+        assert!(keep.iter().all(|&b| b == 7));
     }
 }

@@ -2531,6 +2531,10 @@ pub(crate) fn trim_heap() {
             mib(rss_bytes())
         );
     }
+    // Windows: the heaps keep freed blocks committed (private bytes) otherwise.
+    if let Some(t) = lumenwall_platform::process::trim_heaps() {
+        tracing::debug!("heaps trimmed in {:.1} ms", t.as_secs_f64() * 1000.0);
+    }
 }
 
 fn rss_bytes() -> Option<u64> {

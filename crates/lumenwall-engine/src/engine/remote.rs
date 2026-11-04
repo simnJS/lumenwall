@@ -220,6 +220,8 @@ impl Remote {
             self.publish_idle(Change::State);
             if had {
                 tracing::info!("no wallpaper left: engine process ended");
+                // What the reports, plans and pipes of that process used goes back too.
+                super::trim_heap();
                 if let Some(t) = lumenwall_platform::process::trim_working_set() {
                     tracing::debug!("working set emptied in {:.1} ms", t.as_secs_f64() * 1e3);
                 }
