@@ -229,6 +229,14 @@ fn load_texture(
     let storage = images
         .first()
         .map_or((1, 1), |img| (img.width(), img.height()));
+    tracing::trace!(
+        "texture '{name}': {}x{} {format:?}, {} mip level(s), {} image(s), flags {:#x}",
+        storage.0,
+        storage.1,
+        images.first().map_or(0, |i| i.mips.len()),
+        images.len(),
+        flags.0
+    );
     let animation = prepared
         .animation
         .clone()

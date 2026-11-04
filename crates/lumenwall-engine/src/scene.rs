@@ -23,7 +23,7 @@ use lumenwall_render::math::{
     Alignment as RAlign, HAlign, NodeTransform, OrthoCamera, Parallax, ParallaxSmoothing, Pointer,
     VAlign, parallax_translation, scene_logical_size, trunc_u32,
 };
-use lumenwall_render::targets::{ScopeId, composite_names, scaled_size};
+use lumenwall_render::targets::{ScopeId, composite_names, scaled_actual, scaled_size};
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
     BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
@@ -62,7 +62,7 @@ pub struct SceneOptions {
     pub debug: DebugPlan,
     /// Largest output the scene is shown on and its scaling mode: `_rt_FullFrameBuffer` is
     /// rendered at the size the scene is displayed at, never above the scene's own size
-    /// ([`render_size`]). `None`: the scene's own size.
+    /// ([`render_scale`]). `None`: the scene's own size.
     pub display: Option<((u32, u32), ScalingMode)>,
 }
 
@@ -80,7 +80,7 @@ impl Default for SceneOptions {
 }
 
 /// `LUMENWALL_SCENE_SIZE_TARGET=1`: render `_rt_FullFrameBuffer` at the scene's own size whatever
-/// the output (before/after comparisons of [`render_size`]).
+/// the output (before/after comparisons of [`render_scale`]).
 #[must_use]
 pub fn scene_size_target_forced() -> bool {
     std::env::var_os("LUMENWALL_SCENE_SIZE_TARGET").is_some_and(|v| v != "0")
@@ -92,32 +92,33 @@ fn target_aliasing_disabled() -> bool {
     std::env::var_os("LUMENWALL_NO_TARGET_ALIASING").is_some_and(|v| v != "0")
 }
 
-/// Size of `_rt_FullFrameBuffer` for a scene of logical size `logical` shown on `display`:
-/// the scene's own size scaled to the pixels it covers on the output (the larger of the two
-/// axis ratios, so neither axis is rendered below its displayed resolution), never above 1.
-/// The camera keeps the scene's coordinate space: only the target, its viewport and the
-/// composition change. Deviation from the reference, which renders at the scene size whatever
+/// Displayed pixels per scene pixel of a scene of logical size `logical` shown on `display`
+/// (the larger of the two axis ratios, so neither axis is rendered below its displayed
+/// resolution), at most 1. Every render target of the scene is rendered at that scale of the
+/// size it stands for (`_rt_FullFrameBuffer`, image composites, effect `fbos`, bloom) and
+/// reports its nominal size to the shaders (`RenderTarget::resolution`): texel offsets keep
+/// their distance in texture coordinates, so blurs and kernels cover the same part of the
+/// image and only the sampling density follows the output. The camera keeps the scene's
+/// coordinate space. Deviation from the reference, which renders at the scene size whatever
 /// the output (docs/PERFORMANCE.md).
 #[must_use]
-pub fn render_size(logical: (u32, u32), display: Option<((u32, u32), ScalingMode)>) -> (u32, u32) {
+pub fn render_scale(logical: (u32, u32), display: Option<((u32, u32), ScalingMode)>) -> f32 {
     let Some(((ow, oh), mode)) = display else {
-        return logical;
+        return 1.0;
     };
-    let (lw, lh) = (logical.0.max(1) as f32, logical.1.max(1) as f32);
-    if ow == 0 || oh == 0 {
-        return logical;
+    if ow == 0 || oh == 0 || logical.0 == 0 || logical.1 == 0 {
+        return 1.0;
     }
+    let (lw, lh) = (logical.0 as f32, logical.1 as f32);
     let uv = lumenwall_render::compose::uv_range(mode, ow, oh, logical.0, logical.1);
     let du = (uv.u1 - uv.u0).abs().max(f32::MIN_POSITIVE);
     let dv = (uv.v1 - uv.v0).abs().max(f32::MIN_POSITIVE);
     let scale = (ow as f32 / (du * lw)).max(oh as f32 / (dv * lh));
-    if !scale.is_finite() || scale >= 1.0 {
-        return logical;
+    if scale.is_finite() && scale > 0.0 {
+        scale.min(1.0)
+    } else {
+        1.0
     }
-    (
-        ((lw * scale).ceil() as u32).clamp(1, logical.0.max(1)),
-        ((lh * scale).ceil() as u32).clamp(1, logical.1.max(1)),
-    )
 }
 
 /// Load statistics.
@@ -541,8 +542,9 @@ pub fn build_scene(
         nearest: false,
         mipmaps: false,
     };
-    // The scene target at the size the scene is displayed at (`render_size`).
-    let rendered = render_size(logical, opts.display);
+    // Every target at the size the scene is displayed at (`render_scale`).
+    let scale = render_scale(logical, opts.display);
+    let rendered = scaled_actual(logical, scale);
     if rendered != logical {
         tracing::debug!(
             "scene {}x{} rendered at {}x{} (displayed size)",
@@ -552,7 +554,9 @@ pub fn build_scene(
             rendered.1
         );
     }
-    let st = b.targets.create_scene_targets(ctx, rendered, full_sampler);
+    let st = b
+        .targets
+        .create_scene_targets_at(ctx, logical, rendered, full_sampler);
     let root = b.targets.scene_scope();
     let mut textures = TextureCache::default();
     let mut stats = SceneStats::default();
@@ -727,8 +731,10 @@ pub fn build_scene(
 
     // Late scene targets (spec 04 §4.3, after the objects).
     let bloom = build.bloom.map(|bl| {
-        let targets = b.targets.create_bloom_targets(ctx, logical);
-        let composites = b.targets.create_bloom_composites(ctx, logical);
+        let targets = b.targets.create_bloom_targets_scaled(ctx, logical, scale);
+        let composites = b
+            .targets
+            .create_bloom_composites_scaled(ctx, logical, scale);
         (bl, targets, composites)
     });
 
@@ -1134,6 +1140,17 @@ fn log_target_memory(targets: &lumenwall_render::targets::RenderTargetPool, text
     let mut sums = [0u64; 5];
     let (mut largest, mut count, mut shared) = (Vec::new(), 0usize, 0usize);
     for t in targets.iter() {
+        tracing::trace!(
+            "render target {} {}x{}{}",
+            t.label(),
+            t.size().0,
+            t.size().1,
+            if t.shares().is_some() {
+                " (shared)"
+            } else {
+                ""
+            }
+        );
         if t.shares().is_some() {
             // Its memory is another target's (render-graph aliasing).
             shared += 1;
@@ -1396,9 +1413,11 @@ fn prepare_image(
                 return Err("image without texture and without size".into());
             }
             let sz = (trunc_u32(s.x).max(1), trunc_u32(s.y).max(1));
-            let rt = b.targets.create_anonymous(
+            // Never written: transparent black at any size, so 1×1 standing for `sz`.
+            let rt = b.targets.create_anonymous_at(
                 ctx,
                 "lumenwall.blank",
+                (1, 1),
                 sz,
                 SamplerKey::for_render_target(TexFlags(0)),
             );
@@ -1447,10 +1466,21 @@ fn prepare_image(
         .collect();
     let [use_a, use_b] = composite_use(project, i64::from(id), &declared, final_to_scene);
     let size_of = |used: bool| if used { composite_size } else { (1, 1) };
-    let composites = b.targets.create_composites_sized(
+    // The image's targets at its displayed resolution: the scene's render scale, back towards 1
+    // for an image the scene enlarges (its world scale at load).
+    let world_scale = project.world_transform(idx, build).scale;
+    let magnify = world_scale.x.abs().max(world_scale.y.abs()).max(1.0);
+    let image_scale = if std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS").is_some() {
+        1.0
+    } else {
+        (render_scale(scene_logical_size(scene_size.x, scene_size.y), opts.display) * magnify)
+            .min(1.0)
+    };
+    let composites = b.targets.create_composites_scaled(
         ctx,
         i64::from(id),
         (size_of(use_a), size_of(use_b)),
+        image_scale,
         rt_sampler,
     );
     let image_scope = b.targets.new_scope(root);
@@ -1471,11 +1501,12 @@ fn prepare_image(
                         for fbo in &scene.effect(*eid).fbos {
                             let name = project.strings.resolve(fbo.name);
                             let scale = if fbo.scale > 0.0 { fbo.scale } else { 1.0 };
-                            b.targets.create(
+                            b.targets.create_scaled(
                                 ctx,
                                 sc,
                                 name,
                                 scaled_size((s.x, s.y), scale),
+                                image_scale,
                                 rt_sampler,
                             );
                         }
@@ -1658,7 +1689,7 @@ fn prepare_image(
         project,
         id,
         composites,
-        composite_size,
+        (composite_size, image_scale),
         &prepared,
         final_to_scene,
     );
@@ -1731,7 +1762,7 @@ fn size_composites(
     project: &Project,
     id: i32,
     composites: lumenwall_render::targets::PingPong,
-    size: (u32, u32),
+    (size, scale): ((u32, u32), f32),
     passes: &[PreparedPass],
     final_to_scene: bool,
 ) {
@@ -1748,9 +1779,9 @@ fn size_composites(
         };
     let ctx = b.context();
     for (rt, used) in [(composites.a, used[0]), (composites.b, used[1])] {
-        if (used || bound(rt)) && b.targets.get(rt).size() != size {
+        if (used || bound(rt)) && b.targets.get(rt).nominal_size() != size {
             tracing::debug!("object {id}: composite {rt:?} used after all, allocated now");
-            b.targets.resize(ctx, rt, size);
+            b.targets.resize_scaled(ctx, rt, size, scale);
         }
     }
 }
@@ -2336,5 +2367,38 @@ mod tests {
         assert_eq!((a.v, a.h), (VAlign::Center, HAlign::Center));
         let a = align(lumenwall_scene::Alignment::parse("bottomright"));
         assert_eq!((a.v, a.h), (VAlign::Bottom, HAlign::Right));
+    }
+
+    #[test]
+    fn scenes_render_at_their_displayed_size() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let on = |o: (u32, u32), m: ScalingMode| Some((o, m));
+        // No output known: the scene's own size.
+        assert_eq!(render_scale((3840, 2160), None), 1.0);
+        // 4K scene on a 1440p monitor (3463520581 on the test PC).
+        let s = render_scale((3840, 2160), on((2560, 1440), ScalingMode::Default));
+        assert!(close(s, 2.0 / 3.0), "{s}");
+        assert_eq!(scaled_actual((3840, 2160), s), (2560, 1440));
+        // 21:9 scene fitted on the width of a 16:9 monitor (3018340632): 2560 / 3440.
+        let s = render_scale((3440, 1440), on((2560, 1440), ScalingMode::Default));
+        assert!(close(s, 2560.0 / 3440.0), "{s}");
+        assert_eq!(scaled_actual((3440, 1440), s), (2560, 1072));
+        // Filled instead: the height is shown 1:1, nothing to save.
+        assert_eq!(
+            render_scale((3440, 1440), on((2560, 1440), ScalingMode::Fill)),
+            1.0
+        );
+        // Stretch: the sharper axis decides.
+        let s = render_scale((3840, 2160), on((1920, 1440), ScalingMode::Stretch));
+        assert!(close(s, 1440.0 / 2160.0), "{s}");
+        // Never above the scene's size.
+        assert_eq!(
+            render_scale((1920, 1080), on((2560, 1440), ScalingMode::Default)),
+            1.0
+        );
+        assert_eq!(
+            render_scale((1920, 1080), on((0, 0), ScalingMode::Fit)),
+            1.0
+        );
     }
 }

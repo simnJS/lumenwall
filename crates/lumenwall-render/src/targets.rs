@@ -32,12 +32,17 @@ pub struct RenderTarget {
     gpu: Option<(wgpu::Texture, wgpu::TextureView)>,
     width: u32,
     height: u32,
+    /// Size the shaders see (`g_TextureNResolution`): the size the target stands for when it is
+    /// rendered smaller, at the displayed resolution ([`RenderTargetPool::create_scaled`]).
+    nominal: (u32, u32),
     sampler: SamplerKey,
     label: String,
     /// `None` while not allocated, or when the texture belongs to another target.
     _memory: Option<MemoryToken>,
     /// The target whose texture this one shares.
     shares: Option<RtId>,
+    /// Rendered below its nominal size: its actual size may grow to share a texture.
+    flexible: bool,
 }
 
 impl RenderTarget {
@@ -55,6 +60,12 @@ impl RenderTarget {
     #[must_use]
     pub fn view(&self) -> &wgpu::TextureView {
         &self.gpu().1
+    }
+
+    /// Rendered below its nominal size, so its actual size may grow to share a texture.
+    #[must_use]
+    pub fn is_flexible(&self) -> bool {
+        self.flexible
     }
 
     /// The target whose GPU memory this one shares (render-graph aliasing), if any.
@@ -78,12 +89,33 @@ impl RenderTarget {
         &self.label
     }
 
-    /// `g_TextureNResolution` of a render target: `(w, h, w, h)`.
+    /// Size the shaders see: [`Self::size`] unless the target is rendered below the size it
+    /// stands for ([`RenderTargetPool::create_scaled`]).
+    #[must_use]
+    pub fn nominal_size(&self) -> (u32, u32) {
+        self.nominal
+    }
+
+    /// `g_TextureNResolution` of a render target: `(w, h, w, h)` of its nominal size. A target
+    /// rendered at the displayed resolution reports the size it stands for, so that texel
+    /// offsets computed from it (blurs, sharpening, pixel grids) cover the same distance in
+    /// texture coordinates as at full size: only the sampling density changes.
     #[must_use]
     pub fn resolution(&self) -> [f32; 4] {
-        let (w, h) = (self.width as f32, self.height as f32);
+        let (w, h) = (self.nominal.0 as f32, self.nominal.1 as f32);
         [w, h, w, h]
     }
+}
+
+/// Size of a target rendered at `scale` (≤ 1) of `nominal`: each axis rounded up, at least 1
+/// and at most the nominal size.
+#[must_use]
+pub fn scaled_actual(nominal: (u32, u32), scale: f32) -> (u32, u32) {
+    if !(scale > 0.0 && scale < 1.0) {
+        return (nominal.0.max(1), nominal.1.max(1));
+    }
+    let f = |n: u32| ((n as f32 * scale).ceil() as u32).clamp(1, n.max(1));
+    (f(nominal.0), f(nominal.1))
 }
 
 fn owner_size(targets: &[RenderTarget], id: RtId) -> (u32, u32) {
@@ -113,17 +145,39 @@ pub struct AliasPlan {
     /// [`Access::Overwrite`]: the draw must clear first, since the texture holds another
     /// target's pixels (those the draw does not cover would otherwise leak).
     pub clear_first: HashSet<RtId>,
+    /// New size of flexible targets that share a larger texture (every member of a group
+    /// takes the group's size).
+    pub sizes: HashMap<RtId, (u32, u32)>,
+}
+
+/// Size of a transient target for [`plan_aliasing`]: its pixels, and whether it may be
+/// rendered larger (a target rendered below its nominal size, whose shaders see the nominal
+/// size anyway: rendering it a little larger changes nothing but the sampling density).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AliasSize {
+    pub size: (u32, u32),
+    pub flexible: bool,
+}
+
+/// How much larger (in pixels) a flexible target may be rendered to share a texture.
+pub const ALIAS_AREA_SLACK: f64 = 1.5;
+
+fn area(s: (u32, u32)) -> f64 {
+    f64::from(s.0) * f64::from(s.1)
 }
 
 /// Render-graph aliasing (pure): `accesses` lists, in frame order, `(operation index, target,
 /// access)` (reads of an operation before its write); `size_of` gives the size of a transient
 /// target and `None` for the others. A transient target whose first access in the frame is a
 /// clear or an overwrite never shows anything from a previous frame: its content lives from
-/// that access to its last one. Targets of the same size whose lifetimes do not overlap share
-/// one texture (greedy interval colouring in order of first access).
+/// that access to its last one. Targets whose lifetimes do not overlap share one texture
+/// (greedy interval colouring in order of first access) when they have the same size, or,
+/// for flexible targets, when the group's texture (the largest width and height of its
+/// members) is at most `slack` times the pixels of each member.
 pub fn plan_aliasing(
     accesses: &[(usize, RtId, Access)],
-    size_of: impl Fn(RtId) -> Option<(u32, u32)>,
+    size_of: impl Fn(RtId) -> Option<AliasSize>,
+    slack: f64,
 ) -> AliasPlan {
     // First access, its kind, last access.
     let mut life: HashMap<RtId, (usize, Access, usize)> = HashMap::new();
@@ -140,28 +194,71 @@ pub fn plan_aliasing(
             }
         }
     }
+    struct Group {
+        owner: RtId,
+        size: (u32, u32),
+        flexible: bool,
+        /// Pixels of the smallest member.
+        smallest: f64,
+        last: usize,
+        members: Vec<RtId>,
+    }
     let mut plan = AliasPlan::default();
-    // Physical textures: owner, size, last operation using it, members.
-    let mut groups: Vec<(RtId, (u32, u32), usize, Vec<RtId>)> = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
     for t in order {
         let (first, kind, last) = life[&t];
         if kind == Access::Read {
             continue;
         }
-        let Some(size) = size_of(t) else { continue };
-        match groups.iter_mut().find(|g| g.1 == size && g.2 < first) {
-            Some(g) => {
-                plan.shares.insert(t, g.0);
-                g.2 = last;
-                g.3.push(t);
+        let Some(s) = size_of(t) else { continue };
+        // The group that wastes the fewest pixels.
+        let fit = |g: &Group| -> Option<f64> {
+            if g.last >= first {
+                return None;
             }
-            None => groups.push((t, size, last, vec![t])),
+            if g.size == s.size {
+                return Some(0.0);
+            }
+            if !(g.flexible && s.flexible) {
+                return None;
+            }
+            let merged = (g.size.0.max(s.size.0), g.size.1.max(s.size.1));
+            let smallest = g.smallest.min(area(s.size));
+            (area(merged) <= slack * smallest).then(|| area(merged) - area(g.size))
+        };
+        let best = groups
+            .iter()
+            .enumerate()
+            .filter_map(|(i, g)| fit(g).map(|w| (i, w)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+        match best {
+            Some(i) => {
+                let g = &mut groups[i];
+                plan.shares.insert(t, g.owner);
+                g.size = (g.size.0.max(s.size.0), g.size.1.max(s.size.1));
+                g.flexible &= s.flexible;
+                g.smallest = g.smallest.min(area(s.size));
+                g.last = last;
+                g.members.push(t);
+            }
+            None => groups.push(Group {
+                owner: t,
+                size: s.size,
+                flexible: s.flexible,
+                smallest: area(s.size),
+                last,
+                members: vec![t],
+            }),
         }
     }
-    for (_, _, _, members) in groups.iter().filter(|g| g.3.len() > 1) {
-        for t in members {
+    for g in groups.iter().filter(|g| g.members.len() > 1) {
+        for t in &g.members {
             if life[t].1 == Access::Overwrite {
                 plan.clear_first.insert(*t);
+            }
+            if size_of(*t).is_some_and(|s| s.size != g.size) {
+                plan.sizes.insert(*t, g.size);
             }
         }
     }
@@ -286,7 +383,20 @@ impl RenderTargetPool {
     /// Gives every target its GPU memory: `shares` maps a target to the one whose texture it
     /// uses (that one must not share itself). The pool is no longer deferred afterwards: later
     /// targets are allocated when created.
-    pub fn materialize(&mut self, ctx: &GpuContext, shares: &HashMap<RtId, RtId>) {
+    pub fn materialize(
+        &mut self,
+        ctx: &GpuContext,
+        shares: &HashMap<RtId, RtId>,
+        sizes: &HashMap<RtId, (u32, u32)>,
+    ) {
+        for (&id, &(w, h)) in sizes {
+            if let Some(t) = self.targets.get_mut(id.0 as usize)
+                && t.gpu.is_none()
+                && t.flexible
+            {
+                (t.width, t.height) = (w.max(1), h.max(1));
+            }
+        }
         for i in 0..self.targets.len() {
             let id = RtId(i as u32);
             if self.targets[i].gpu.is_some() || shares.contains_key(&id) {
@@ -375,18 +485,20 @@ impl RenderTargetPool {
         &self,
         ctx: &GpuContext,
         label: &str,
-        width: u32,
-        height: u32,
+        (width, height): (u32, u32),
+        nominal: (u32, u32),
         sampler: SamplerKey,
     ) -> RenderTarget {
         let mut t = RenderTarget {
             gpu: None,
             width: width.max(1),
             height: height.max(1),
+            nominal: (nominal.0.max(1), nominal.1.max(1)),
             sampler,
             label: label.to_owned(),
             _memory: None,
             shares: None,
+            flexible: false,
         };
         if !self.deferred {
             Self::allocate_gpu(ctx, &mut t);
@@ -417,7 +529,42 @@ impl RenderTargetPool {
         size: (u32, u32),
         sampler: SamplerKey,
     ) -> RtId {
-        let t = self.allocate(ctx, label, size.0, size.1, sampler);
+        let t = self.allocate(ctx, label, size, size, sampler);
+        self.targets.push(t);
+        RtId(self.targets.len() as u32 - 1)
+    }
+
+    /// [`Self::create`] for a target rendered at `scale` (≤ 1) of `nominal`, the size it stands
+    /// for: allocated at [`scaled_actual`], reporting `nominal` to the shaders
+    /// ([`RenderTarget::resolution`]).
+    pub fn create_scaled(
+        &mut self,
+        ctx: &GpuContext,
+        scope: ScopeId,
+        name: &str,
+        nominal: (u32, u32),
+        scale: f32,
+        sampler: SamplerKey,
+    ) -> RtId {
+        let mut t = self.allocate(ctx, name, scaled_actual(nominal, scale), nominal, sampler);
+        t.flexible = t.gpu.is_none() && scale < 1.0 && t.size() != t.nominal;
+        self.targets.push(t);
+        let id = RtId(self.targets.len() as u32 - 1);
+        self.alias(scope, name, id);
+        id
+    }
+
+    /// An unnamed target of `actual` pixels standing for `nominal` (`lumenwall.blank`: a
+    /// never-written layer source is 1×1 whatever the size it reports).
+    pub fn create_anonymous_at(
+        &mut self,
+        ctx: &GpuContext,
+        label: &str,
+        actual: (u32, u32),
+        nominal: (u32, u32),
+        sampler: SamplerKey,
+    ) -> RtId {
+        let t = self.allocate(ctx, label, actual, nominal, sampler);
         self.targets.push(t);
         RtId(self.targets.len() as u32 - 1)
     }
@@ -472,12 +619,26 @@ impl RenderTargetPool {
         let Some(t) = self.targets.get(id.0 as usize) else {
             return;
         };
-        if t.size() == (size.0.max(1), size.1.max(1)) {
+        let size = (size.0.max(1), size.1.max(1));
+        if t.size() == size && t.nominal == size {
             return;
         }
         let (label, sampler) = (t.label.clone(), t.sampler);
         // A resized target never shares memory any more (its size is its own).
-        self.targets[id.0 as usize] = self.allocate(ctx, &label, size.0, size.1, sampler);
+        self.targets[id.0 as usize] = self.allocate(ctx, &label, size, size, sampler);
+    }
+
+    /// [`Self::resize`] for a target rendered at `scale` of `nominal` ([`Self::create_scaled`]).
+    pub fn resize_scaled(&mut self, ctx: &GpuContext, id: RtId, nominal: (u32, u32), scale: f32) {
+        let Some(t) = self.targets.get(id.0 as usize) else {
+            return;
+        };
+        let actual = scaled_actual(nominal, scale);
+        if t.size() == actual && t.nominal == nominal {
+            return;
+        }
+        let (label, sampler) = (t.label.clone(), t.sampler);
+        self.targets[id.0 as usize] = self.allocate(ctx, &label, actual, nominal, sampler);
     }
 
     #[must_use]
@@ -539,8 +700,22 @@ impl RenderTargetPool {
         size: (u32, u32),
         full_sampler: SamplerKey,
     ) -> SceneTargets {
+        self.create_scene_targets_at(ctx, size, size, full_sampler)
+    }
+
+    /// [`Self::create_scene_targets`] with `_rt_FullFrameBuffer` rendered at `actual` pixels while
+    /// standing for `nominal` (the scene at its displayed size, [`RenderTarget::resolution`]).
+    pub fn create_scene_targets_at(
+        &mut self,
+        ctx: &GpuContext,
+        nominal: (u32, u32),
+        actual: (u32, u32),
+        full_sampler: SamplerKey,
+    ) -> SceneTargets {
         let root = self.scene_scope();
-        let full = self.create(ctx, root, "_rt_FullFrameBuffer", size, full_sampler);
+        let full =
+            self.create_anonymous_at(ctx, "_rt_FullFrameBuffer", actual, nominal, full_sampler);
+        self.alias(root, "_rt_FullFrameBuffer", full);
         self.alias(root, "_rt_MipMappedFrameBuffer", full);
         let shadow_atlas = self.create(
             ctx,
@@ -556,13 +731,24 @@ impl RenderTargetPool {
     /// Create `_rt_4FrameBuffer`, `_rt_8FrameBuffer`, `_rt_Bloom` (call after
     /// creating objects, so that objects cannot resolve them).
     pub fn create_bloom_targets(&mut self, ctx: &GpuContext, size: (u32, u32)) -> BloomTargets {
+        self.create_bloom_targets_scaled(ctx, size, 1.0)
+    }
+
+    /// [`Self::create_bloom_targets`] rendered at `scale` of their nominal sizes.
+    pub fn create_bloom_targets_scaled(
+        &mut self,
+        ctx: &GpuContext,
+        size: (u32, u32),
+        scale: f32,
+    ) -> BloomTargets {
         let root = self.scene_scope();
         let q = divided_size(size, 4);
         let e = divided_size(size, 8);
+        let c = SamplerKey::CLAMP_LINEAR;
         BloomTargets {
-            quarter: self.create(ctx, root, "_rt_4FrameBuffer", q, SamplerKey::CLAMP_LINEAR),
-            eighth: self.create(ctx, root, "_rt_8FrameBuffer", e, SamplerKey::CLAMP_LINEAR),
-            bloom: self.create(ctx, root, "_rt_Bloom", e, SamplerKey::CLAMP_LINEAR),
+            quarter: self.create_scaled(ctx, root, "_rt_4FrameBuffer", q, scale, c),
+            eighth: self.create_scaled(ctx, root, "_rt_8FrameBuffer", e, scale, c),
+            bloom: self.create_scaled(ctx, root, "_rt_Bloom", e, scale, c),
         }
     }
 
@@ -570,10 +756,20 @@ impl RenderTargetPool {
     /// never writes B, and no object can resolve the name (bloom is created
     /// after every object), so B is allocated 1×1.
     pub fn create_bloom_composites(&mut self, ctx: &GpuContext, size: (u32, u32)) -> PingPong {
+        self.create_bloom_composites_scaled(ctx, size, 1.0)
+    }
+
+    /// [`Self::create_bloom_composites`] with A rendered at `scale` of `size`.
+    pub fn create_bloom_composites_scaled(
+        &mut self,
+        ctx: &GpuContext,
+        size: (u32, u32),
+        scale: f32,
+    ) -> PingPong {
         let (na, nb) = composite_names(crate::bloom::BLOOM_IMAGE_ID);
         let root = self.scene_scope();
         PingPong {
-            a: self.create(ctx, root, &na, size, SamplerKey::CLAMP_LINEAR),
+            a: self.create_scaled(ctx, root, &na, size, scale, SamplerKey::CLAMP_LINEAR),
             b: self.create(ctx, root, &nb, (1, 1), SamplerKey::CLAMP_LINEAR),
         }
     }
@@ -598,11 +794,23 @@ impl RenderTargetPool {
         (size_a, size_b): ((u32, u32), (u32, u32)),
         sampler: SamplerKey,
     ) -> PingPong {
+        self.create_composites_scaled(ctx, id, (size_a, size_b), 1.0, sampler)
+    }
+
+    /// [`Self::create_composites_sized`] rendered at `scale` of their nominal sizes.
+    pub fn create_composites_scaled(
+        &mut self,
+        ctx: &GpuContext,
+        id: i64,
+        (size_a, size_b): ((u32, u32), (u32, u32)),
+        scale: f32,
+        sampler: SamplerKey,
+    ) -> PingPong {
         let (na, nb) = composite_names(id);
         let root = self.scene_scope();
         PingPong {
-            a: self.create(ctx, root, &na, size_a, sampler),
-            b: self.create(ctx, root, &nb, size_b, sampler),
+            a: self.create_scaled(ctx, root, &na, size_a, scale, sampler),
+            b: self.create_scaled(ctx, root, &nb, size_b, scale, sampler),
         }
     }
 }
@@ -634,6 +842,93 @@ mod tests {
         };
         assert_eq!(pp.other(RtId(3)), RtId(4));
         assert_eq!(pp.other(RtId(4)), RtId(3));
+    }
+
+    fn fixed(w: u32, h: u32) -> Option<AliasSize> {
+        Some(AliasSize {
+            size: (w, h),
+            flexible: false,
+        })
+    }
+
+    #[test]
+    fn aliasing_shares_targets_whose_lifetimes_do_not_overlap() {
+        use Access::{Clear, Overwrite, Read};
+        let (a, b, c, d, e) = (RtId(0), RtId(1), RtId(2), RtId(3), RtId(4));
+        // a: ops 0..2, b: ops 3..4 (same size, after a: shares a), c: overlaps b (own),
+        // d: read before written (feedback: own memory), e: other size (own).
+        let acc = [
+            (0, a, Overwrite),
+            (1, a, Read),
+            (2, a, Read),
+            (3, b, Clear),
+            (3, c, Overwrite),
+            (4, b, Read),
+            (4, c, Read),
+            (5, d, Read),
+            (6, d, Overwrite),
+            (7, e, Overwrite),
+        ];
+        let size = |t: RtId| if t == e { fixed(8, 8) } else { fixed(4, 4) };
+        let plan = plan_aliasing(&acc, size, 1.0);
+        assert_eq!(plan.shares.get(&b), Some(&a));
+        assert_eq!(plan.shares.get(&c), None, "c lives while b does");
+        assert_eq!(plan.shares.get(&d), None, "d keeps last frame's pixels");
+        assert_eq!(plan.shares.get(&e), None);
+        // a is overwritten first and its texture is shared: cleared first. b starts with a
+        // clear of its own.
+        assert!(plan.clear_first.contains(&a) && !plan.clear_first.contains(&b));
+        assert!(plan.sizes.is_empty());
+        // Not transient at all: nothing shared.
+        assert_eq!(plan_aliasing(&acc, |_| None, 1.0), AliasPlan::default());
+    }
+
+    #[test]
+    fn flexible_targets_share_a_slightly_larger_texture() {
+        use Access::{Overwrite, Read};
+        let (a, b, c) = (RtId(0), RtId(1), RtId(2));
+        let acc = [
+            (0, a, Overwrite),
+            (1, a, Read),
+            (2, b, Overwrite),
+            (3, b, Read),
+            (4, c, Overwrite),
+            (5, c, Read),
+        ];
+        let flex = |w, h| {
+            Some(AliasSize {
+                size: (w, h),
+                flexible: true,
+            })
+        };
+        // b is 10 % wider than a: one 110x100 texture; c is 4× a: too large to merge.
+        let size = |t: RtId| match t.0 {
+            0 => flex(100, 100),
+            1 => flex(110, 95),
+            _ => flex(200, 200),
+        };
+        let plan = plan_aliasing(&acc, size, ALIAS_AREA_SLACK);
+        assert_eq!(plan.shares.get(&b), Some(&a));
+        assert_eq!(plan.shares.get(&c), None);
+        assert_eq!(plan.sizes.get(&a), Some(&(110, 100)));
+        assert_eq!(plan.sizes.get(&b), Some(&(110, 100)));
+        // Without slack, or when one of them is not flexible, only equal sizes share.
+        assert!(plan_aliasing(&acc, size, 1.0).shares.is_empty());
+        let rigid = |t: RtId| if t == b { fixed(110, 95) } else { size(t) };
+        assert!(
+            plan_aliasing(&acc, rigid, ALIAS_AREA_SLACK)
+                .shares
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scaled_targets_report_their_nominal_size() {
+        assert_eq!(scaled_actual((3840, 2160), 2.0 / 3.0), (2560, 1440));
+        assert_eq!(scaled_actual((3440, 1440), 1.0), (3440, 1440));
+        assert_eq!(scaled_actual((1, 1), 0.3), (1, 1));
+        assert_eq!(scaled_actual((101, 33), 0.5), (51, 17));
+        assert_eq!(scaled_actual((0, 5), 0.5), (1, 3));
     }
 
     #[test]

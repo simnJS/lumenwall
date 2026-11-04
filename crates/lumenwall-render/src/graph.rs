@@ -19,7 +19,10 @@ use crate::dynbuf::{
 use crate::error::{RenderError, Result};
 use crate::math::{SKIN_VERTEX_SIZE, SkinVertex, VERTEX_SIZE, Vertex};
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
-use crate::targets::{Access, AliasPlan, RT_FORMAT, RenderTargetPool, RtId, plan_aliasing};
+use crate::targets::{
+    ALIAS_AREA_SLACK, Access, AliasPlan, AliasSize, RT_FORMAT, RenderTargetPool, RtId,
+    plan_aliasing,
+};
 use crate::texture::{
     GpuTexture, SamplerKey, TextureUpload, VolumeUpload, default_texture, default_volume,
     upload_texture, upload_volume,
@@ -240,6 +243,9 @@ struct VertexStream {
     max_floats: usize,
     max_indices: u32,
     index_count: u32,
+    /// Vertices written since the last encode, uploaded with the frame (`pending` floats).
+    cpu: Vec<f32>,
+    pending: usize,
     _memory: crate::context::MemoryToken,
 }
 
@@ -504,6 +510,8 @@ impl<'c> SceneBuilder<'c> {
             max_floats,
             max_indices: indices.len() as u32,
             index_count: 0,
+            cpu: vec![0.0; max_floats],
+            pending: 0,
             _memory: self.ctx.memory().track(vsize + isize),
         });
         StreamId(self.streams.len() as u32 - 1)
@@ -733,7 +741,7 @@ impl<'c> SceneBuilder<'c> {
         let device = ctx.device();
         // GPU memory of the render targets, transient ones sharing textures.
         let alias = self.alias_plan();
-        self.targets.materialize(ctx, &alias.shares);
+        self.targets.materialize(ctx, &alias.shares, &alias.sizes);
 
         // Frame-global copies into pass blocks.
         let mut patches = Vec::new();
@@ -754,6 +762,15 @@ impl<'c> SceneBuilder<'c> {
         }
         // Texel size is static: apply its copies once now.
         let dynbuf = self.dynbuf.build(ctx);
+        // One staging chunk holds a whole frame's uploads: every uniform and every stream.
+        let upload_chunk = (dynbuf.byte_len()
+            + self
+                .streams
+                .iter()
+                .map(|s| s.max_floats as u64 * 4)
+                .sum::<u64>())
+        .next_multiple_of(4096)
+        .max(16 * 1024);
 
         let index_buffer = (!self.indices.is_empty()).then(|| {
             let bytes: &[u8] = bytemuck::cast_slice(&self.indices);
@@ -843,6 +860,7 @@ impl<'c> SceneBuilder<'c> {
             scene_size: self.scene_size,
             bundles_stale: false,
             bundle_runs: Vec::new(),
+            uploads: wgpu::util::StagingBelt::new(device.clone(), upload_chunk),
             aliased: !alias.shares.is_empty(),
             unshare_pending: false,
         };
@@ -914,10 +932,43 @@ impl<'c> SceneBuilder<'c> {
                 }
             }
         }
-        plan_aliasing(&accesses, |t| {
-            (self.targets.is_transient(t) && !self.depth_targets.contains(&t))
-                .then(|| self.targets.get(t).size())
-        })
+        // `LUMENWALL_ALIAS_SLACK` (measurements): pixel slack allowed when sharing.
+        let slack = std::env::var("LUMENWALL_ALIAS_SLACK")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|s| *s >= 1.0)
+            .unwrap_or(ALIAS_AREA_SLACK);
+        let plan = plan_aliasing(
+            &accesses,
+            |t| {
+                (self.targets.is_transient(t) && !self.depth_targets.contains(&t)).then(|| {
+                    let rt = self.targets.get(t);
+                    AliasSize {
+                        size: rt.size(),
+                        flexible: rt.is_flexible(),
+                    }
+                })
+            },
+            slack,
+        );
+        if tracing::enabled!(target: "lumenwall_render::alias", tracing::Level::TRACE) {
+            let mut seen = std::collections::HashSet::new();
+            for &(i, t, a) in &accesses {
+                if !seen.insert(t) || !self.targets.is_transient(t) {
+                    continue;
+                }
+                let last = accesses.iter().rev().find(|x| x.1 == t).map_or(i, |x| x.0);
+                let rt = self.targets.get(t);
+                tracing::trace!(
+                    target: "lumenwall_render::alias",
+                    "{} {:?} ops {i}..={last} first {a:?} shares {:?}",
+                    rt.label(),
+                    rt.size(),
+                    plan.shares.get(&t).map(|o| self.targets.get(*o).label())
+                );
+            }
+        }
+        plan
     }
 
     /// Compiles the passes added to a scene being extended and gives the scene its resources
@@ -1113,6 +1164,17 @@ enum Item {
     Pass(usize),
 }
 
+/// GPU time of one render pass or copy of a frame ([`RenderScene::profile_frame`]).
+#[derive(Clone, Debug)]
+pub struct SegmentTime {
+    pub target: String,
+    pub size: (u32, u32),
+    /// Draws in the render pass (0 for a copy).
+    pub passes: usize,
+    pub first_pass: String,
+    pub ms: f64,
+}
+
 enum Segment {
     Copy {
         src: RtId,
@@ -1218,6 +1280,8 @@ pub struct RenderScene {
     /// Passes recorded in each of `bundles`: a rebuild reuses the bundle of an unchanged
     /// run. Emptied when bind groups or the dynamic buffer change.
     bundle_runs: Vec<Vec<usize>>,
+    /// Recycled staging memory of the per-frame uploads (uniforms, vertex streams).
+    uploads: wgpu::util::StagingBelt,
     /// Some transient targets share a texture (planned on the frame order of the build).
     aliased: bool,
     /// The frame order changed: shared targets get their own textures before the next frame.
@@ -2121,7 +2185,7 @@ impl RenderScene {
     /// `write_buffer`, no allocation; an empty stream draws nothing.
     pub fn write_stream(
         &mut self,
-        ctx: &GpuContext,
+        _ctx: &GpuContext,
         id: StreamId,
         vertices: &[f32],
         index_count: u32,
@@ -2134,9 +2198,10 @@ impl RenderScene {
         if count == 0 && s.index_count == 0 {
             return;
         }
+        // Kept and uploaded with the frame (`encode`): no staging buffer per call.
         if floats > 0 && count > 0 {
-            ctx.queue()
-                .write_buffer(&s.vertices, 0, bytemuck::cast_slice(&vertices[..floats]));
+            s.cpu[..floats].copy_from_slice(&vertices[..floats]);
+            s.pending = floats;
         }
         s.index_count = count;
         self.dirty = true;
@@ -2217,16 +2282,47 @@ impl RenderScene {
     pub fn encode(&mut self, ctx: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
         let t0 = Instant::now();
         self.refresh(ctx);
-        let changed = self.dynbuf.flush(ctx.queue()) || self.dirty;
+        // The previous frame was submitted: its staging chunks come back once the GPU is done.
+        self.uploads.recall();
+        let mut changed = self.dynbuf.flush_into(encoder, &mut self.uploads);
+        for s in &mut self.streams {
+            if s.pending == 0 {
+                continue;
+            }
+            if let Some(size) = wgpu::BufferSize::new(s.pending as u64 * 4) {
+                self.uploads
+                    .write_buffer(encoder, &s.vertices, 0, size)
+                    .copy_from_slice(bytemuck::cast_slice(&s.cpu[..s.pending]));
+            }
+            s.pending = 0;
+            changed = true;
+        }
+        self.uploads.finish();
+        let changed = changed || self.dirty;
         self.dirty = false;
         if changed {
             self.settle_left = self.settle_frames;
         } else {
             self.settle_left = self.settle_left.saturating_sub(1);
         }
-        for seg in &self.segments {
+        self.record_segments(encoder, None);
+        self.last_encode = t0.elapsed();
+    }
+
+    /// Records the frame's segments; with `queries`, timestamps around each one (indices `2i`
+    /// and `2i + 1`, [`Self::profile_frame`]).
+    fn record_segments(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queries: Option<&wgpu::QuerySet>,
+    ) {
+        for (si, seg) in self.segments.iter().enumerate() {
+            let (begin, end) = (2 * si as u32, 2 * si as u32 + 1);
             match seg {
                 Segment::Copy { src, dst } => {
+                    if let Some(q) = queries {
+                        encoder.write_timestamp(q, begin);
+                    }
                     let (s, d) = (self.targets.get(*src), self.targets.get(*dst));
                     let (sw, sh) = s.size();
                     let (dw, dh) = d.size();
@@ -2239,6 +2335,9 @@ impl RenderScene {
                             depth_or_array_layers: 1,
                         },
                     );
+                    if let Some(q) = queries {
+                        encoder.write_timestamp(q, end);
+                    }
                 }
                 Segment::Render {
                     target,
@@ -2272,7 +2371,11 @@ impl RenderScene {
                             },
                         })],
                         depth_stencil_attachment,
-                        timestamp_writes: None,
+                        timestamp_writes: queries.map(|q| wgpu::RenderPassTimestampWrites {
+                            query_set: q,
+                            beginning_of_pass_write_index: Some(begin),
+                            end_of_pass_write_index: Some(end),
+                        }),
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
@@ -2287,7 +2390,84 @@ impl RenderScene {
                 }
             }
         }
-        self.last_encode = t0.elapsed();
+    }
+
+    /// Debug profile of one frame (tools, never the live loop): renders the frame alone with
+    /// a timestamp around each render pass and copy, waits for the GPU and returns, in frame
+    /// order, `(target label, target size, passes, first pass label, milliseconds)`. `None`
+    /// when the device has no timestamp queries.
+    pub fn profile_frame(&mut self, ctx: &GpuContext) -> Option<Vec<SegmentTime>> {
+        if !ctx.caps().timestamps || self.segments.is_empty() {
+            return None;
+        }
+        self.refresh(ctx);
+        let device = ctx.device();
+        let count = 2 * self.segments.len() as u32;
+        let set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("lumenwall.profile"),
+            ty: wgpu::QueryType::Timestamp,
+            count,
+        });
+        let size = u64::from(count) * 8;
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lumenwall.profile.resolve"),
+            size,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lumenwall.profile.read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lumenwall.profile"),
+        });
+        self.dynbuf.flush(ctx.queue());
+        self.record_segments(&mut enc, Some(&set));
+        enc.resolve_query_set(&set, 0..count, &resolve, 0);
+        enc.copy_buffer_to_buffer(&resolve, 0, &read, 0, size);
+        ctx.queue().submit(std::iter::once(enc.finish()));
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        ctx.wait_idle();
+        let period = f64::from(ctx.queue().get_timestamp_period()) / 1e6;
+        let ticks: Vec<u64> = {
+            let data = read.slice(..).get_mapped_range().ok()?;
+            bytemuck::cast_slice::<u8, u64>(&data).to_vec()
+        };
+        read.unmap();
+        let mut out = Vec::with_capacity(self.segments.len());
+        for (si, seg) in self.segments.iter().enumerate() {
+            let ms = ticks[2 * si + 1].saturating_sub(ticks[2 * si]) as f64 * period;
+            let (target, passes, first) = match seg {
+                Segment::Copy { dst, .. } => (*dst, 0, "copy".to_owned()),
+                Segment::Render { target, items, .. } => {
+                    let ids: Vec<usize> = items
+                        .iter()
+                        .flat_map(|i| match i {
+                            Item::Pass(p) => vec![*p],
+                            Item::Bundle(b) => {
+                                self.bundle_runs.get(*b).cloned().unwrap_or_default()
+                            }
+                        })
+                        .collect();
+                    let first = ids
+                        .first()
+                        .map_or_else(String::new, |&p| self.passes[p].label.clone());
+                    (*target, ids.len(), first)
+                }
+            };
+            let rt = self.targets.get(target);
+            out.push(SegmentTime {
+                target: rt.label().to_owned(),
+                size: rt.size(),
+                passes,
+                first_pass: first,
+                ms,
+            });
+        }
+        Some(out)
     }
 
     /// Encode and submit in one command buffer (convenience).

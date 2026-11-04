@@ -631,6 +631,32 @@ impl DynamicBuffer {
         changed
     }
 
+    /// Records the upload of the dirty range into `encoder` through `belt` (a recycled staging
+    /// buffer: no buffer is created per frame, unlike `Queue::write_buffer`). Returns whether
+    /// anything changed.
+    pub fn flush_into(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        belt: &mut wgpu::util::StagingBelt,
+    ) -> bool {
+        let Some((start, end)) = self.shadow.dirty.take() else {
+            return false;
+        };
+        let start = start & !3;
+        let end = end.next_multiple_of(4).min(self.shadow.bytes.len() as u32);
+        if let Some(size) = wgpu::BufferSize::new(u64::from(end - start)) {
+            belt.write_buffer(encoder, &self.buffer, u64::from(start), size)
+                .copy_from_slice(&self.shadow.bytes[start as usize..end as usize]);
+        }
+        true
+    }
+
+    /// Bytes of the GPU buffer (upload chunk sizing).
+    #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        self.shadow.bytes.len() as u64
+    }
+
     /// Upload the dirty range: at most one `write_buffer` per frame.
     pub fn flush(&mut self, queue: &wgpu::Queue) -> bool {
         let Some((start, end)) = self.shadow.dirty.take() else {

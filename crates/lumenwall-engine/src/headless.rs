@@ -117,6 +117,61 @@ fn synthetic_spectrum(time: f64, a16: &mut [f32; 16], a32: &mut [f32; 32], a64: 
     }
 }
 
+/// `LUMENWALL_PROFILE_PASSES=1`: GPU time of each render pass of the last frame, the 30 most
+/// expensive first, grouped totals by target kind.
+fn log_pass_profile(ctx: &GpuContext, scene: &mut lumenwall_render::RenderScene) {
+    // Warm-up then 5 profiled frames, median per segment.
+    let _ = scene.profile_frame(ctx);
+    let runs: Vec<_> = (0..5).filter_map(|_| scene.profile_frame(ctx)).collect();
+    let Some(first) = runs.first() else {
+        tracing::info!("pass profile: no timestamp queries on this device");
+        return;
+    };
+    let mut rows: Vec<(f64, &lumenwall_render::graph::SegmentTime)> = first
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let mut v: Vec<f64> = runs.iter().map(|r| r[i].ms).collect();
+            v.sort_by(f64::total_cmp);
+            (v[v.len() / 2], s)
+        })
+        .collect();
+    let total: f64 = rows.iter().map(|r| r.0).sum();
+    let mut by_kind: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
+    for (ms, s) in &rows {
+        let kind = match s.target.as_str() {
+            "_rt_FullFrameBuffer" => "scene",
+            t if t.starts_with("_rt_imageLayerComposite_") => "composites",
+            "lumenwall.scratch" => "hazard copies",
+            _ if s.passes == 0 => "copies",
+            _ => "other targets",
+        };
+        let e = by_kind.entry(kind).or_default();
+        e.0 += ms;
+        e.1 += 1;
+    }
+    tracing::info!(
+        "pass profile: {} render passes and copies, {total:.3} ms (median of 5); {}",
+        rows.len(),
+        by_kind
+            .iter()
+            .map(|(k, (ms, n))| format!("{k} {ms:.3} ms in {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (ms, s) in rows.iter().take(30) {
+        tracing::info!(
+            "  {ms:.3} ms  {} {}x{}, {} draw(s), first: {}",
+            s.target,
+            s.size.0,
+            s.size.1,
+            s.passes,
+            s.first_pass
+        );
+    }
+}
+
 /// Renders `frames` frames of the wallpaper at `wallpaper` and writes the requested PNGs.
 pub fn render_headless(
     wallpaper: &Path,
@@ -185,6 +240,8 @@ pub fn render_headless(
     let mut gpu_samples = 0u32;
     // Frames that differ from the previous one (the live engine skips the others).
     let mut changed_frames = 0u32;
+    // CPU time of the scene update and of the graph encode (the rest: composition, submit).
+    let mut split = (Duration::ZERO, Duration::ZERO);
     let dt = 1.0 / opts.fps.max(1.0);
     let last = opts.frames.saturating_sub(1);
     for i in 0..opts.frames {
@@ -241,8 +298,10 @@ pub fn render_headless(
         if let Some(t) = &mut timer {
             t.begin(&mut enc);
         }
+        let t_update = start.elapsed();
         changed_frames += u32::from(rt.scene.needs_redraw());
         rt.scene.encode(&ctx, &mut enc);
+        let t_encode = start.elapsed();
         uv = composer.update(&ctx, out.size(), rt.logical);
         compositor.encode(
             &mut enc,
@@ -259,6 +318,8 @@ pub fn render_headless(
             t.after_submit();
         }
         cpu += start.elapsed();
+        split.0 += t_update;
+        split.1 += t_encode - t_update;
         let save = if opts.save.is_empty() {
             i == last
         } else {
@@ -277,6 +338,39 @@ pub fn render_headless(
             }
         }
     }
+    if std::env::var_os("LUMENWALL_PROFILE_PASSES").is_some_and(|v| v != "0") {
+        log_pass_profile(&ctx, &mut rt.scene);
+    }
+    if let Some(r) = ctx.device().generate_allocator_report() {
+        // Memory blocks of the device allocator: what is reserved beyond the live allocations
+        // is VRAM (and private bytes) paid for nothing.
+        let mut sizes: Vec<(u64, u64)> = r
+            .blocks
+            .iter()
+            .map(|b| {
+                let used: u64 = r.allocations[b.allocations.clone()]
+                    .iter()
+                    .map(|a| a.size)
+                    .sum();
+                (b.size, used)
+            })
+            .collect();
+        sizes.sort_by_key(|(size, used)| std::cmp::Reverse(size - used));
+        let mib = |b: u64| b as f64 / 1048576.0;
+        tracing::debug!(
+            "allocator: {} blocks, {:.1} MiB reserved, {:.1} MiB allocated in {} allocations; emptiest blocks (size/used MiB): {}",
+            r.blocks.len(),
+            mib(r.total_reserved_bytes),
+            mib(r.total_allocated_bytes),
+            r.allocations.len(),
+            sizes
+                .iter()
+                .take(8)
+                .map(|(s, u)| format!("{:.1}/{:.1}", mib(*s), mib(*u)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     report.frames = opts.frames;
     report.cpu_frame = cpu / opts.frames.max(1);
     report.gpu_frame = (gpu_samples > 0).then(|| gpu_total / gpu_samples);
@@ -284,9 +378,13 @@ pub fn render_headless(
     report.live_particles = rt.live_particles();
     report.stats = rt.stats;
     tracing::debug!(
-        "{changed_frames}/{} frame(s) needed a redraw (animated: {})",
+        "{changed_frames}/{} frame(s) needed a redraw (animated: {}); CPU per frame: update {:.3} ms, encode {:.3} ms, rest {:.3} ms",
         opts.frames,
-        rt.animated
+        rt.animated,
+        split.0.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+        split.1.as_secs_f64() * 1000.0 / f64::from(opts.frames.max(1)),
+        (cpu.saturating_sub(split.0 + split.1)).as_secs_f64() * 1000.0
+            / f64::from(opts.frames.max(1)),
     );
     if let Some((s, tick)) = rt.script_stats() {
         tracing::info!(
