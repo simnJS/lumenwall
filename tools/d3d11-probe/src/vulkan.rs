@@ -100,9 +100,13 @@ impl Backend for Vulkan {
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let hwnd = NonZeroIsize::new(window.hwnd.0 as isize).ok_or_else(|| anyhow!("null hwnd"))?;
+        let mut handle = Win32WindowHandle::new(hwnd);
+        // SAFETY: the module handle of the running executable.
+        let hinstance = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? };
+        handle.hinstance = NonZeroIsize::new(hinstance.0 as isize);
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(RawDisplayHandle::Windows(WindowsDisplayHandle::new())),
-            raw_window_handle: RawWindowHandle::Win32(Win32WindowHandle::new(hwnd)),
+            raw_window_handle: RawWindowHandle::Win32(handle),
         };
         // SAFETY: the window outlives the surface (both live in `run`).
         let surface = unsafe { instance.create_surface_unsafe(target)? };

@@ -271,7 +271,8 @@ fn array_sum(
         unsafe { PdhGetFormattedCounterArrayW(c.handle, format, &mut size, &mut count, None) };
     if status != 0x8000_07D2 {
         // No instance yet (the counters appear with the first GPU use).
-        return if status == 0 {
+        // 0xC0000BBA: a rate counter needs two samples; 0x800007D5: no data yet.
+        return if status == 0 || status == 0xC000_0BBA || status == 0x8000_07D5 {
             Ok(0.0)
         } else {
             Err(anyhow!("PdhGetFormattedCounterArray: {status:#x}"))
@@ -280,12 +281,14 @@ fn array_sum(
     let mut buf = vec![0u64; (size as usize).div_ceil(8)];
     let items = buf.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
     // SAFETY: `buf` holds `size` bytes, 8-aligned, as the call asked.
-    check(
-        unsafe {
-            PdhGetFormattedCounterArrayW(c.handle, format, &mut size, &mut count, Some(items))
-        },
-        "PdhGetFormattedCounterArray",
-    )?;
+    let status = unsafe {
+        PdhGetFormattedCounterArrayW(c.handle, format, &mut size, &mut count, Some(items))
+    };
+    if status == 0xC000_0BBA {
+        // A rate counter needs two samples.
+        return Ok(0.0);
+    }
+    check(status, "PdhGetFormattedCounterArray")?;
     let mut sum = 0.0;
     for i in 0..count as usize {
         // SAFETY: `count` items were written at `items`; names point into `buf`.

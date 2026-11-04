@@ -105,4 +105,50 @@ draws in 22 render passes.
 
 ## GPU measurements
 
-_Pending: the PC is in use, no GPU device has been created yet._
+Scene 3463520581, the workload above, RTX 4080 SUPER (driver 621.01), 2560×1440 window below the
+monitors, 30 fps, 5 s warm-up then a 20 s window, Idle priority, `run-matrix.ps1` (runs
+interleaved, the backend that goes first alternates). Memory counters are the process's
+`GPU Process Memory` instances at the end of the window; CPU % is the process's CPU time over the
+window; GPU 3D % is the process's `GPU Engine ... engtype_3D` utilization over the window.
+**A game was running on the PC during the runs** (the GPU is at game clocks, other processes
+compete): CPU % and GPU 3D % are noisy (see the spread) and only memory and creation times are
+reliable. Wallpaper Engine for this scene (docs/benchmarks): GPU 3D 3.23 %, dedicated 323 MiB,
+shared 3 MiB.
+
+| Backend | Run | Shared | Dedicated | Private | Working set | CPU | GPU 3D | Device + swap chain | Textures | Shader objects | Pipelines / states | Shared after device |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| D3D11 | 1 | 3.21 MiB | 284.5 MiB | 429.0 MiB | 68.2 MiB | 0.86 % | 2.83 % | 188.5 ms | 26.0 ms | 0.7 ms | 3.2 ms | 0.72 MiB |
+| D3D11 | 2 | 3.16 MiB | 284.5 MiB | 438.1 MiB | 64.2 MiB | 3.28 % | 1.37 % | 211.3 ms | 29.4 ms | 0.8 ms | 4.0 ms | 0.72 MiB |
+| D3D11 | 3 | 3.17 MiB | 284.5 MiB | 431.7 MiB | 63.1 MiB | 4.53 % | 1.16 % | 204.9 ms | 24.2 ms | 0.7 ms | 3.6 ms | 0.72 MiB |
+| Vulkan | 1 | 17.18 MiB | 436.7 MiB | 501.5 MiB | 154.0 MiB | 5.63 % | 3.15 % | 477.0 ms | 41.7 ms | 8.9 ms | 103.6 ms | 13.65 MiB |
+| Vulkan | 2 | 17.18 MiB | 436.7 MiB | 481.5 MiB | 119.7 MiB | 8.44 % | 1.80 % | 241.2 ms | 46.8 ms | 2.5 ms | 4.8 ms | 13.65 MiB |
+| Vulkan | 3 | 17.18 MiB | 436.7 MiB | 480.1 MiB | 119.3 MiB | 7.65 % | 1.90 % | 277.8 ms | 57.9 ms | 2.5 ms | 7.2 ms | 13.65 MiB |
+
+Shader objects: the bytecode read from the on-disk cache and `CreateVertexShader` /
+`CreatePixelShader` (D3D11), naga modules handed to wgpu (Vulkan). Nothing was compiled during the
+GPU runs (the cache was filled by `d3d11-probe shaders`: cold `D3DCompile` is in the table above).
+Vulkan's 103.6 ms in run 1 is the first pipeline creation of the session (driver shader cache
+cold). `late_frames` (frames more than 5 ms late) was 0 for every run except Vulkan run 3 (1).
+
+**Answer.**
+- **Shared GPU memory: D3D11 does not quite reach "under 3 MiB", but it nearly does.** 3.16–3.21
+  MiB against 17.18 MiB for the same workload on Vulkan (−14 MiB, −81 %), and against Wallpaper
+  Engine's 3 MiB (a rounded figure). The bare device + flip swap chain costs 0.72 MiB (Nora's
+  0.7); the 2.4–2.5 MiB that come on top appear while the workload is loaded and drawn. Cause not
+  pinned down (candidates: the 153 dynamic constant buffers and their `WRITE_DISCARD` renaming,
+  the 156 vertex buffers, command-stream memory of the driver for 86 render passes); it is the
+  next thing to bisect before deciding, since the person's requirement is strictly below WE.
+- **Dedicated:** 284.5 against 436.7 MiB (−35 %). Both are above/below the engine's 248 MiB
+  because the probe does not alias targets; WE shows 323 MiB.
+- **Private bytes:** 433 against 488 MiB (−11 %). **Working set:** 65 against 131 MiB (−50 %).
+- **CPU:** 0.9–4.5 % against 5.6–8.4 % per run (noisy because of the game; D3D11 lower in each
+  pair of adjacent runs).
+- **GPU 3D:** D3D11 1.2–2.8 % against Vulkan 1.8–3.2 %: lower in the three pairs, inside the noise of
+  the game load. Not a conclusion by itself.
+- **Device + swap chain creation:** ~200 ms against 240–480 ms. **Texture upload (63 MiB):** 24–29
+  ms against 42–58 ms. **Pipelines / state objects:** 3–4 ms against 5–104 ms.
+- Shader feasibility is not a blocker: 33 of 33 programs of the two scenes compile to SM 5.0
+  (with the sampler rewrite above).
+
+Scene 3018340632 (21 programs): _pending, the GPU lock was held by another agent when the second
+scene was due._
