@@ -18,6 +18,7 @@ Data model for `project.json`, user properties, `scene.json`, objects, models, m
 - Scripts are stored as data (`Settings::scripts`, `Settings::scripted`) for `lumenwall-script`.
 - Particle content is not modelled: `ParticleSource::File(path)` or `Inline(RawValue)` plus `instanceoverride`. `Project::add_setting` / `add_setting_json` / the public `raw::RawSetting` let `lumenwall-particles` register bindable settings.
 - `AssetSource` (read a path → `Cow<[u8]>`, so an mmap source copies nothing) is implemented for `HashMap<String, Vec<u8>>`.
+- **Each file read once per load**: a reference still builds its own model, material or effect (§8–§10) and its own warnings, but the bytes of a path already read come from the loader's table (`tests/read_memo.rs`). 3463520581 applies `effects/waterwaves` to 64 layers: 335 → 103 reads, `LoadContext::load` 11.6–14.0 → 3.5–7.0 ms (Windows, release, headless harness, machine in use); 3018340632: 33 → 27 reads, 1.0–2.7 → 0.9–1.3 ms. Each VFS lookup checks the wallpaper folder on disk before `scene.pkg`, so even an archive entry costs 20–50 µs per read there.
 
 ## Coverage
 
