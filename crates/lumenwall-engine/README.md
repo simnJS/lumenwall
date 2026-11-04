@@ -578,8 +578,8 @@ desktop bench (`docs/benchmarks/lumenwall-vs-wallpaper-engine.md`): empty 3.1 Mi
 | GPU opening | instance (Vulkan + DX12) 38–126 ms, adapter + device 294–605 ms | instance + device 148–177 ms (cold driver, new process), on a thread while the platform opens |
 | First start, process start → renderer ready (3018340632) | 702–772 ms | 446–507 ms |
 | Command → first GPU activity, from empty | 808 ms (3463520581), 719 ms (3018340632), desktop bench of 376a97d (off the desktop every switch after `clear` failed: winit) | 279–344 ms (3463520581, one run at 570), 287–377 ms (3018340632) |
-| Command → first frame, from empty | — | 625–753 ms (3463520581), 558–987 ms (3018340632): engine process running 43–95 ms after the command, platform 44–77 ms alongside the GPU 148–177 ms, then the swap chain 197–254 ms alongside the scene build (169–412 ms here) |
-| Command → first frame, between two wallpapers (same engine process) | — | 504–572 ms (3463520581), 237–248 ms (3018340632, one run at 493); first GPU activity 45–113 ms |
+| Command → first frame, from empty | — | 511–645 ms (3463520581, one run at 1058), 504–548 ms (3018340632) with parts A and B merged (625–753 and 558–987 ms before them): engine process running 43–95 ms after the command, platform 44–77 ms alongside the GPU 148–177 ms, then the swap chain 197–254 ms alongside the scene build (169–412 ms here) |
+| Command → first frame, between two wallpapers (same engine process) | — | **202–241 ms** (3463520581), **231–269 ms** (3018340632) with parts A and B merged (scene builds 2–3× faster; 504–572 and 237–493 ms before them); first GPU activity 45–120 ms |
 
 From empty, the first frame waits for a new process, a cold Vulkan driver and NVIDIA's first
 swap chain of a device (≈ 0.2 s): about 0.45 s before any scene work, more than Wallpaper
