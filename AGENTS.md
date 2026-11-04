@@ -8,3 +8,4 @@ Read these before anything else, together with `CLEANROOM.md`, `docs/PERFORMANCE
 - **Builds:** use your own `CARGO_TARGET_DIR=target/agent-<name>` so parallel agents don't block each other on the build lock.
 - **Scope:** only edit the crate you were assigned; never the root `Cargo.toml` or other crates.
 - **Commits:** agents don't commit; the orchestrator does, with no AI co-author trailer.
+- **User's session:** never change the user's real desktop state (GSettings/dconf, GNOME extensions, `~/.config`, `~/.local`, autostart, the running daemon). A temporary `HOME` is not enough: also use a private D-Bus session (`dbus-run-session`) and an isolated GNOME Shell, so nothing can reach the real one. No audible tests.
