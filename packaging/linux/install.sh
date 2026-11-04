@@ -5,8 +5,9 @@
 #   curl -fsSL https://github.com/simnJS/lumenwall/releases/latest/download/install.sh | sh -s -- --uninstall
 #
 # Downloads the latest release archive, checks it against the release's SHA256SUMS
-# and, when minisign is installed, the release signature (key below, the same one
-# the app checks its updates with), then installs into ~/.local:
+# and, when minisign is installed, that list against SHA256SUMS.minisig, the
+# release's one signature (key below, the same one the app checks its updates
+# with), then installs into ~/.local:
 #
 #   ~/.local/bin/lumenwall, ~/.local/bin/lumenwall-ui
 #   ~/.local/share/applications/lumenwall-ui.desktop, ~/.local/share/icons/hicolor/...
@@ -293,24 +294,24 @@ ARCHIVE=$(sed -n "s/^[0-9a-f]\{64\}  \(lumenwall-[0-9][^ ]*-$TARGET\.tar\.gz\)\$
 VERSION=${ARCHIVE#lumenwall-}
 VERSION=${VERSION%-"$TARGET".tar.gz}
 base="$RELEASES_URL/download/v$VERSION"
-for f in SHA256SUMS.minisig "$ARCHIVE" "$ARCHIVE.minisig"; do
+for f in SHA256SUMS.minisig "$ARCHIVE"; do
     fetch "$base/$f" "$TMP/$f" || die "cannot download $base/$f"
 done
 
 # ------------------------------------------------------------------ verify
 
+# The release signs SHA256SUMS only: it binds the archive's name to its SHA-256,
+# so a valid list plus a matching hash is the file the release key listed.
 say "Checking Lumenwall $VERSION"
 if command -v minisign >/dev/null 2>&1; then
-    for f in SHA256SUMS "$ARCHIVE"; do
-        out=$(minisign -V -P "$KEY" -m "$TMP/$f" -x "$TMP/$f.minisig" 2>&1) ||
-            die "invalid signature for $f: nothing was installed"
-        # A valid signature of another file is refused too (same check as the app).
-        printf '%s\n' "$out" | awk -v want="file:$f" '
-            /^Trusted comment:/ { for (i = 3; i <= NF; i++) if ($i == want) ok = 1 }
-            END { exit !ok }' ||
-            die "the signature of $f was made for another file: nothing was installed"
-    done
-    step "signature: valid (Lumenwall release key)"
+    out=$(minisign -V -P "$KEY" -m "$TMP/SHA256SUMS" -x "$TMP/SHA256SUMS.minisig" 2>&1) ||
+        die "invalid signature for SHA256SUMS: nothing was installed"
+    # A valid signature of another file is refused too (same check as the app).
+    printf '%s\n' "$out" | awk -v want="file:SHA256SUMS" '
+        /^Trusted comment:/ { for (i = 3; i <= NF; i++) if ($i == want) ok = 1 }
+        END { exit !ok }' ||
+        die "the signature of SHA256SUMS was made for another file: nothing was installed"
+    step "signature of SHA256SUMS: valid (Lumenwall release key)"
 elif [ "$REQUIRE_SIG" -eq 1 ]; then
     die "minisign is not installed and --require-signature was given"
 else

@@ -9,10 +9,10 @@
 //! 2. [`check`]: one request to the GitHub Releases API, with `If-None-Match` so an
 //!    unchanged answer is an empty `304`. [`State::due`] limits automatic checks to one
 //!    every [`CHECK_INTERVAL`]; nothing here runs on a timer.
-//! 3. [`download`]: the archive for this platform, its minisign signature and the signed
-//!    `SHA256SUMS`, verified with the public key compiled into the binary
-//!    ([`RELEASE_PUBLIC_KEY`]). An archive that fails either check is deleted, never
-//!    extracted.
+//! 3. [`download`]: `SHA256SUMS` and its minisign signature, verified with the public
+//!    key compiled into the binary ([`RELEASE_PUBLIC_KEY`]), then the archive for this
+//!    platform, whose SHA-256 must equal its signed line. An archive that fails the
+//!    check is deleted, never extracted.
 //! 4. [`install`]: replaces the programs next to the running one atomically (written
 //!    beside them, then renamed), with rollback if any step fails.
 //! 5. [`restart_daemon`]: asks the running engine to stop over IPC, waits until it is

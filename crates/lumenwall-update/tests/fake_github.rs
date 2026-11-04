@@ -1,6 +1,7 @@
-//! End-to-end: the updater against a fake GitHub on 127.0.0.1 serving releases signed
-//! with the TEST key (`tests/keys`): up to date, new version installed, invalid
-//! signature, checksum mismatch, network down, rate limit, pre-releases, redirects.
+//! End-to-end: the updater against a fake GitHub on 127.0.0.1 serving releases whose
+//! `SHA256SUMS` is signed with the TEST key (`tests/keys`): up to date, new version
+//! installed, missing or invalid signature, checksum mismatch, network down, rate
+//! limit, pre-releases, redirects.
 
 mod support;
 
@@ -8,10 +9,13 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use lumenwall_update::{
-    BUNDLE_MARKER, Channel, Check, Error, Layout, SIGNATURE_SUFFIX, SUMS_NAME, Source, State,
-    Version, check, download, install,
+    BUNDLE_MARKER, Channel, Check, Error, Layout, SUMS_NAME, Source, State, Version, check,
+    download, install,
 };
-use support::{FakeGitHub, FakeRelease, program_bytes, sha256_hex, sign, stranger_key, target};
+use support::{
+    FakeGitHub, FakeRelease, program_bytes, sha256_hex, sign, stranger_key, sums_signature_name,
+    target,
+};
 
 const NOW: u64 = 1_800_000_000;
 
@@ -228,47 +232,108 @@ fn programs_outside_a_bundle_only_replace_what_is_there() {
     assert_eq!(installed.files.len(), 2);
     let mut names = leftovers(bin.path());
     names.sort();
-    assert_eq!(
-        names,
-        [
-            format!("lumenwall{exe}"),
-            format!("lumenwall-ui{exe}"),
-            format!("something-else{exe}")
-        ]
+    // Sorted the same way: with ".exe", "lumenwall-ui.exe" comes before "lumenwall.exe".
+    let mut want = [
+        format!("lumenwall{exe}"),
+        format!("lumenwall-ui{exe}"),
+        format!("something-else{exe}"),
+    ];
+    want.sort();
+    assert_eq!(names, want);
+}
+
+#[test]
+fn only_the_signed_list_and_the_archive_are_downloaded() {
+    let r = FakeRelease::signed("0.2.0");
+    let name = r.archive_name();
+    let mut published: Vec<&str> = r.assets.keys().map(String::as_str).collect();
+    published.sort_unstable();
+    let mut want = vec![
+        name.as_str(),
+        "Lumenwall-Setup.exe",
+        "SHA256SUMS",
+        "SHA256SUMS.minisig",
+        "install.sh",
+    ];
+    want.sort_unstable();
+    assert_eq!(published, want, "no signature per file");
+
+    let gh = FakeGitHub::start(vec![r]);
+    let release = available(&gh, "0.1.0", Channel::Stable);
+    let dir = tempfile::tempdir().unwrap();
+    fetch(&gh, &release, dir.path()).expect("verified with SHA256SUMS.minisig alone");
+    let downloads: Vec<String> = gh
+        .requests()
+        .into_iter()
+        .filter_map(|r| {
+            let path = r.split(' ').next()?;
+            path.strip_prefix("/simnJS/lumenwall/releases/download/v0.2.0/")
+                .map(str::to_owned)
+        })
+        .collect();
+    // The signature first, then the list, then the archive: nothing else.
+    assert_eq!(downloads, [sums_signature_name(), SUMS_NAME.into(), name]);
+}
+
+#[test]
+fn missing_sums_signature_is_refused() {
+    // Not offered at all.
+    let mut r = FakeRelease::signed("0.2.0");
+    r.assets.remove(&sums_signature_name());
+    let gh = FakeGitHub::start(vec![r]);
+    let mut state = State::default();
+    let found = check(
+        &gh.source(),
+        &v("0.1.0"),
+        target(),
+        Channel::Stable,
+        &mut state,
+        NOW,
+    );
+    assert_eq!(found, Ok(Check::UpToDate));
+
+    // Removed after the check (the release kept from it): the download stops before
+    // the archive.
+    let gh = FakeGitHub::start(vec![FakeRelease::signed("0.2.0")]);
+    let release = available(&gh, "0.1.0", Channel::Stable);
+    gh.behaviour.lock().unwrap().releases[0]
+        .assets
+        .remove(&sums_signature_name());
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(fetch(&gh, &release, dir.path()), Err(Error::Status(404)));
+    assert!(leftovers(dir.path()).is_empty());
+    let archive_path = format!("/{}", release.archive.name);
+    assert!(
+        !gh.requests().iter().any(|r| r.contains(&archive_path)),
+        "the archive is never fetched"
     );
 }
 
 #[test]
 fn invalid_signature_is_refused() {
-    let mut forged = FakeRelease::signed("0.2.0");
-    let name = forged.archive_name();
-    // Signed by a key the updater does not know.
-    let other = sign(&stranger_key(), &forged.assets[&name], &name);
-    forged
-        .assets
-        .insert(format!("{name}{SIGNATURE_SUFFIX}"), other);
-    let gh = FakeGitHub::start(vec![forged]);
-    let release = available(&gh, "0.1.0", Channel::Stable);
+    let sk = support::test_secret_key();
     let dir = tempfile::tempdir().unwrap();
+
+    // SHA256SUMS signed by a key the updater does not know.
+    let mut bad_sums = FakeRelease::signed("0.2.0");
+    let sums = bad_sums.assets[SUMS_NAME].clone();
+    bad_sums.set_sums(sums, &stranger_key());
+    let gh = FakeGitHub::start(vec![bad_sums]);
+    let release = available(&gh, "0.1.0", Channel::Stable);
     assert!(matches!(
         fetch(&gh, &release, dir.path()),
         Err(Error::Signature(_))
     ));
     assert!(leftovers(dir.path()).is_empty(), "nothing kept");
 
-    // Same key, but the archive was modified after signing (and SHA256SUMS too, so
-    // only the signature can tell).
+    // The archive was replaced and its line in SHA256SUMS rewritten to match, but the
+    // signature is the original one: the list no longer matches it.
     let mut tampered = FakeRelease::signed("0.2.0");
     let name = tampered.archive_name();
     let mut bytes = tampered.assets[&name].clone();
     let last = bytes.len() - 1;
     bytes[last] ^= 0x55;
     let sums = format!("{}  {name}\n", sha256_hex(&bytes)).into_bytes();
-    let sk = support::test_secret_key();
-    tampered.assets.insert(
-        format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"),
-        sign(&sk, &sums, SUMS_NAME),
-    );
     tampered.assets.insert(SUMS_NAME.into(), sums);
     tampered.assets.insert(name, bytes);
     let gh = FakeGitHub::start(vec![tampered]);
@@ -279,13 +344,11 @@ fn invalid_signature_is_refused() {
     ));
     assert!(leftovers(dir.path()).is_empty());
 
-    // A valid signature of another file (replayed under this name).
+    // A valid signature by the release key, made for another file (replayed as the
+    // list's signature).
     let mut replay = FakeRelease::signed("0.2.0");
-    let name = replay.archive_name();
-    let sig = sign(&sk, &replay.assets[&name], "lumenwall-0.1.0-old.tar.gz");
-    replay
-        .assets
-        .insert(format!("{name}{SIGNATURE_SUFFIX}"), sig);
+    let sig = sign(&sk, &replay.assets[SUMS_NAME], "lumenwall-0.1.0-old.tar.gz");
+    replay.assets.insert(sums_signature_name(), sig);
     let gh = FakeGitHub::start(vec![replay]);
     let release = available(&gh, "0.1.0", Channel::Stable);
     assert!(matches!(
@@ -293,19 +356,36 @@ fn invalid_signature_is_refused() {
         Err(Error::Signature(_))
     ));
 
-    // SHA256SUMS signed by another key.
-    let mut bad_sums = FakeRelease::signed("0.2.0");
-    let sums = bad_sums.assets[SUMS_NAME].clone();
-    bad_sums.assets.insert(
-        format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"),
-        sign(&stranger_key(), &sums, SUMS_NAME),
+    // An older release's list and signature, both genuine, served with a newer
+    // archive: the newer archive is not in that list.
+    let old = FakeRelease::signed("0.1.5");
+    let mut mixed = FakeRelease::signed("0.2.0");
+    mixed
+        .assets
+        .insert(SUMS_NAME.into(), old.assets[SUMS_NAME].clone());
+    mixed.assets.insert(
+        sums_signature_name(),
+        old.assets[&sums_signature_name()].clone(),
     );
-    let gh = FakeGitHub::start(vec![bad_sums]);
+    let gh = FakeGitHub::start(vec![mixed]);
+    let release = available(&gh, "0.1.0", Channel::Stable);
+    assert!(matches!(
+        fetch(&gh, &release, dir.path()),
+        Err(Error::Checksum(_))
+    ));
+
+    // Not a signature at all.
+    let mut garbage = FakeRelease::signed("0.2.0");
+    garbage
+        .assets
+        .insert(sums_signature_name(), b"not a minisign signature".to_vec());
+    let gh = FakeGitHub::start(vec![garbage]);
     let release = available(&gh, "0.1.0", Channel::Stable);
     assert!(matches!(
         fetch(&gh, &release, dir.path()),
         Err(Error::Signature(_))
     ));
+    assert!(leftovers(dir.path()).is_empty());
 }
 
 #[test]
@@ -314,11 +394,7 @@ fn checksum_mismatch_is_refused() {
     let mut r = FakeRelease::signed("0.2.0");
     let name = r.archive_name();
     let sums = format!("{}  {name}\n", "0".repeat(64)).into_bytes();
-    r.assets.insert(
-        format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"),
-        sign(&support::test_secret_key(), &sums, SUMS_NAME),
-    );
-    r.assets.insert(SUMS_NAME.into(), sums);
+    r.set_sums(sums, &support::test_secret_key());
     let gh = FakeGitHub::start(vec![r]);
     let release = available(&gh, "0.1.0", Channel::Stable);
     let dir = tempfile::tempdir().unwrap();
@@ -328,14 +404,21 @@ fn checksum_mismatch_is_refused() {
     ));
     assert!(leftovers(dir.path()).is_empty());
 
+    // The archive modified after signing, the signed list left as it was.
+    let mut r = FakeRelease::signed("0.2.0");
+    let name = r.archive_name();
+    r.assets.get_mut(&name).unwrap()[20] ^= 1;
+    let gh = FakeGitHub::start(vec![r]);
+    let release = available(&gh, "0.1.0", Channel::Stable);
+    assert!(matches!(
+        fetch(&gh, &release, dir.path()),
+        Err(Error::Checksum(_))
+    ));
+    assert!(leftovers(dir.path()).is_empty());
+
     // The archive missing from SHA256SUMS.
     let mut r = FakeRelease::signed("0.2.0");
-    let sums = b"".to_vec();
-    r.assets.insert(
-        format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"),
-        sign(&support::test_secret_key(), &sums, SUMS_NAME),
-    );
-    r.assets.insert(SUMS_NAME.into(), sums);
+    r.set_sums(Vec::new(), &support::test_secret_key());
     let gh = FakeGitHub::start(vec![r]);
     let release = available(&gh, "0.1.0", Channel::Stable);
     assert!(matches!(
@@ -497,15 +580,25 @@ fn release_files_on_disk_verify_like_downloads() {
     )
     .unwrap();
     let name = r.archive_name();
-    let ok = lumenwall_update::verify_local(&source, dir.path(), &v("0.2.0"), target()).unwrap();
+    let local = || lumenwall_update::verify_local(&source, dir.path(), &v("0.2.0"), target());
+    let ok = local().unwrap();
     assert_eq!(ok.sha256, sha256_hex(&r.assets[&name]));
+
+    // Archive modified: its hash is not the signed one.
     let mut bytes = r.assets[&name].clone();
     bytes[20] ^= 1;
     std::fs::write(dir.path().join(&name), bytes).unwrap();
-    assert!(matches!(
-        lumenwall_update::verify_local(&source, dir.path(), &v("0.2.0"), target()),
-        Err(Error::Signature(_))
-    ));
+    assert!(matches!(local(), Err(Error::Checksum(_))));
+    std::fs::write(dir.path().join(&name), &r.assets[&name]).unwrap();
+
+    // SHA256SUMS signed by another key.
+    let sig = dir.path().join(sums_signature_name());
+    std::fs::write(&sig, sign(&stranger_key(), &r.assets[SUMS_NAME], SUMS_NAME)).unwrap();
+    assert!(matches!(local(), Err(Error::Signature(_))));
+
+    // No SHA256SUMS.minisig.
+    std::fs::remove_file(&sig).unwrap();
+    assert!(matches!(local(), Err(Error::Io(_))));
 }
 
 #[test]

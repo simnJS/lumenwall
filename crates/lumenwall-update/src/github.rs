@@ -4,9 +4,9 @@
 //!   non-prerelease release).
 //! - Pre-releases: `GET /repos/<repo>/releases?per_page=20`, highest version wins.
 //!
-//! A release counts only if it has, for this platform, the archive, its `.minisig`,
-//! `SHA256SUMS` and `SHA256SUMS.minisig`; anything else is ignored here and refused at
-//! download time anyway.
+//! A release counts only if it has, for this platform, the archive, `SHA256SUMS` and
+//! `SHA256SUMS.minisig`; anything else is ignored here and refused at download time
+//! anyway.
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,6 @@ pub struct Release {
     pub published: Option<String>,
     pub prerelease: bool,
     pub archive: Asset,
-    pub signature: Asset,
     pub sums: Asset,
     pub sums_signature: Asset,
 }
@@ -213,7 +212,6 @@ fn release(v: &Value, source: &Source, target: &str) -> Option<Release> {
     let find = |name: &str| assets.iter().find(|a| a.name == name).cloned();
     let archive_name = crate::archive_name(&version, target);
     let archive = find(&archive_name)?;
-    let signature = find(&format!("{archive_name}{SIGNATURE_SUFFIX}"))?;
     let sums = find(SUMS_NAME)?;
     let sums_signature = find(&format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"))?;
     let page = v
@@ -255,7 +253,6 @@ fn release(v: &Value, source: &Source, target: &str) -> Option<Release> {
         published,
         prerelease: v.get("prerelease").and_then(Value::as_bool) == Some(true),
         archive,
-        signature,
         sums,
         sums_signature,
     })
@@ -307,8 +304,25 @@ mod tests {
             "body": "## What's Changed\n* Faster",
             "html_url": "https://github.com/simnJS/lumenwall/releases/tag/v0.2.0",
             "published_at": "2026-11-03T10:00:00Z",
-            "assets": [dl(a), dl(&format!("{a}.minisig")), dl("SHA256SUMS"), dl("SHA256SUMS.minisig")],
+            // What the release workflow publishes: no signature per file, one signed list.
+            "assets": [
+                dl("Lumenwall-Setup.exe"),
+                dl(a),
+                dl("lumenwall-0.2.0-amd64.deb"),
+                dl("install.sh"),
+                dl("SHA256SUMS"),
+                dl("SHA256SUMS.minisig"),
+            ],
         })
+    }
+
+    fn without(name: &str) -> Value {
+        let mut r = full();
+        r["assets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["name"] != name);
+        r
     }
 
     #[test]
@@ -318,6 +332,12 @@ mod tests {
         assert_eq!(r.version, Version::new(0, 2, 0));
         assert_eq!(r.published.as_deref(), Some("2026-11-03"));
         assert_eq!(r.archive.size, 10);
+        assert_eq!(
+            r.archive.name,
+            "lumenwall-0.2.0-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(r.sums.name, SUMS_NAME);
+        assert_eq!(r.sums_signature.name, "SHA256SUMS.minisig");
         assert!(r.page.ends_with("/tag/v0.2.0"));
         // No Windows build in it.
         assert!(release(&full(), &s, "x86_64-pc-windows-msvc").is_none());
@@ -329,13 +349,26 @@ mod tests {
         let mut draft = full();
         draft["draft"] = json!(true);
         assert!(release(&draft, &s, T).is_none());
-        let mut unsigned = full();
-        unsigned["assets"].as_array_mut().unwrap().remove(1);
-        assert!(release(&unsigned, &s, T).is_none());
+        assert!(release(&without("SHA256SUMS.minisig"), &s, T).is_none());
+        assert!(release(&without("SHA256SUMS"), &s, T).is_none());
+        assert!(
+            release(
+                &without("lumenwall-0.2.0-x86_64-unknown-linux-gnu.tar.gz"),
+                &s,
+                T
+            )
+            .is_none()
+        );
+        // The installer, the .deb and install.sh are not needed by the updater.
+        assert!(release(&without("Lumenwall-Setup.exe"), &s, T).is_some());
         let mut foreign = full();
-        foreign["assets"][0]["browser_download_url"] =
+        foreign["assets"][1]["browser_download_url"] =
             json!("https://evil.example/lumenwall-0.2.0-x86_64-unknown-linux-gnu.tar.gz");
         assert!(release(&foreign, &s, T).is_none());
+        let mut foreign_sig = full();
+        foreign_sig["assets"][5]["browser_download_url"] =
+            json!("https://evil.example/SHA256SUMS.minisig");
+        assert!(release(&foreign_sig, &s, T).is_none());
         let mut bad_tag = full();
         bad_tag["tag_name"] = json!("latest");
         assert!(release(&bad_tag, &s, T).is_none());

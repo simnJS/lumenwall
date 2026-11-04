@@ -13,7 +13,7 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-use lumenwall_update::{SIGNATURE_SUFFIX, SUMS_NAME};
+use lumenwall_update::SUMS_NAME;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -24,21 +24,19 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "9.9.9".into());
     let mut release = support::FakeRelease::signed_padded(&version, 24 << 20);
-    release.notes = NOTES.replace("{v}", &version);
+    // As published: the download section (hidden by the app), then GitHub's notes.
+    release.notes = include_str!("../../../packaging/release/release-notes.md")
+        .replace("@VERSION@", &version)
+        + &NOTES.replace("{v}", &version);
     let name = release.archive_name();
     if flag("--bad-signature") {
-        let sig = support::sign(&support::stranger_key(), &release.assets[&name], &name);
-        release
-            .assets
-            .insert(format!("{name}{SIGNATURE_SUFFIX}"), sig);
+        // SHA256SUMS signed by a key the app does not know.
+        let sums = release.assets[SUMS_NAME].clone();
+        release.set_sums(sums, &support::stranger_key());
     }
     if flag("--bad-checksum") {
         let sums = format!("{}  {name}\n", "0".repeat(64)).into_bytes();
-        let sig = support::sign(&support::test_secret_key(), &sums, SUMS_NAME);
-        release
-            .assets
-            .insert(format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"), sig);
-        release.assets.insert(SUMS_NAME.into(), sums);
+        release.set_sums(sums, &support::test_secret_key());
     }
     let gh = support::FakeGitHub::start(vec![release]);
     {

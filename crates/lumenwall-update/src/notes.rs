@@ -3,7 +3,14 @@
 //! Headings lose their `#`, list items become `•`, links keep their text, emphasis and
 //! code marks go, HTML comments (GitHub's generated-notes marker) are dropped, and the
 //! repository's pull-request and compare URLs shrink to `#12` and `v0.1.0…v0.2.0`.
-//! The text is shown as text, never interpreted.
+//! The release page's download section (between [`DOWNLOADS_START`] and
+//! [`DOWNLOADS_END`], `packaging/release/release-notes.md`) is skipped: the app is
+//! already installed. The text is shown as text, never interpreted.
+
+/// Opens the download section the release workflow puts before the generated notes.
+pub const DOWNLOADS_START: &str = "<!-- downloads -->";
+/// Closes it.
+pub const DOWNLOADS_END: &str = "<!-- /downloads -->";
 
 /// One line of release notes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +38,7 @@ impl std::fmt::Display for Line {
 
 /// The lines of `markdown`, at most `max_lines` of them (then a `…` line marks the cut).
 pub fn lines(markdown: &str, max_lines: usize) -> Vec<Line> {
-    let text = strip_comments(markdown);
+    let text = strip_comments(&without_downloads(markdown));
     let mut out: Vec<Line> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim_end();
@@ -77,6 +84,17 @@ pub fn plain_text(markdown: &str, max_lines: usize) -> String {
         .map(Line::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `s` without its download section (kept whole when the end marker is missing).
+fn without_downloads(s: &str) -> String {
+    if let Some(start) = s.find(DOWNLOADS_START)
+        && let Some(len) = s[start..].find(DOWNLOADS_END)
+    {
+        let end = start + len + DOWNLOADS_END.len();
+        return format!("{}{}", &s[..start], &s[end..]);
+    }
+    s.to_owned()
 }
 
 fn strip_comments(s: &str) -> String {
@@ -233,5 +251,20 @@ mod tests {
         );
         assert_eq!(plain_text("", 5), "");
         assert_eq!(plain_text("x <!-- never closed", 5), "x");
+    }
+
+    #[test]
+    fn skips_the_download_section() {
+        // What the release workflow publishes: the template, then GitHub's notes.
+        let template = include_str!("../../../packaging/release/release-notes.md")
+            .replace("@VERSION@", "0.2.0");
+        let md = format!(
+            "{template}<!-- Release notes generated using configuration in .github/release.yml at v0.2.0 -->\n\n## What's Changed\n* Faster in https://github.com/simnJS/lumenwall/pull/12\n"
+        );
+        assert!(md.contains("Lumenwall-Setup.exe"));
+        assert_eq!(plain_text(&md, 5), "What's Changed\n• Faster in #12");
+        // Without its end marker, nothing is hidden.
+        let open = "<!-- downloads -->\n## Download\nWindows";
+        assert_eq!(plain_text(open, 5), "Download\nWindows");
     }
 }

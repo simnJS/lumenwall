@@ -77,11 +77,11 @@ wallpapers.
 
 WINDOWS = """Install
 -------
-The installer (lumenwall-{version}-x86_64-windows-setup.exe on the release page)
-is the simplest way. From this folder, start lumenwall-ui.exe: at the first
-start it offers to copy itself to %LOCALAPPDATA%\\Programs\\Lumenwall and to add
-a Start menu shortcut and the start with Windows. Keep Lumenwall in a folder
-your account can write to (not Program Files), so the app can update itself.
+The installer (Lumenwall-Setup.exe on the release page) is the simplest way.
+From this folder, start lumenwall-ui.exe: at the first start it offers to copy
+itself to %LOCALAPPDATA%\\Programs\\Lumenwall and to add a Start menu shortcut
+and the start with Windows. Keep Lumenwall in a folder your account can write
+to (not Program Files), so the app can update itself.
 
 """
 

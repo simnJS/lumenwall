@@ -2,8 +2,9 @@
 //! `docs/RELEASING.md`):
 //!
 //! ```sh
-//! release_sign sign   --version 0.2.0 dist/   # SHA256SUMS, and a .minisig for every file
-//!                                             # (lumenwall-0.2.0-* and install.sh)
+//! release_sign sign   --version 0.2.0 dist/   # SHA256SUMS of every file (lumenwall-0.2.0-*,
+//!                                             # Lumenwall-Setup.exe, install.sh) and
+//!                                             # SHA256SUMS.minisig, the only signature
 //! release_sign verify --version 0.2.0 dist/   # each archive exactly as the app checks it
 //! ```
 //!
@@ -11,6 +12,8 @@
 //! file) and its password from `MINISIGN_PASSWORD` (empty for a key made with
 //! `minisign -G -W`). It refuses a key whose public half is not the
 //! `RELEASE_PUBLIC_KEY` compiled into this release: the app could not verify it.
+//! The signed list binds each file's name to its SHA-256, so it vouches for every
+//! file at once; a `.minisig` per file would add nothing and is refused.
 //!
 //! `verify` checks every archive with `RELEASE_PUBLIC_KEY` through the app's own code
 //! (`lumenwall_update::verify_local`), then installs this platform's archive into a
@@ -27,8 +30,8 @@ use lumenwall_update::{
 };
 
 const TARGETS: [&str; 2] = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"];
-/// Assets with the same name in every release (`releases/latest/download/install.sh`).
-const UNVERSIONED: [&str; 1] = ["install.sh"];
+/// Assets with the same name in every release (`releases/latest/download/<name>`).
+const UNVERSIONED: [&str; 2] = ["Lumenwall-Setup.exe", "install.sh"];
 
 struct Args {
     command: String,
@@ -138,40 +141,47 @@ fn sign(a: &Args) -> Result<(), String> {
         sums.push_str(&format!("{hex}  {f}\n"));
     }
     std::fs::write(a.dir.join(SUMS_NAME), &sums).map_err(|e| format!("{SUMS_NAME}: {e}"))?;
-    files.push(SUMS_NAME.to_owned());
-
-    let now = lumenwall_update::now();
     for f in &files {
-        let data = std::fs::read(a.dir.join(f)).map_err(|e| format!("{f}: {e}"))?;
-        // The app requires `file:<name>`: a signature cannot be reused for another file.
-        let trusted = format!("timestamp:{now}\tfile:{f}\tlumenwall {}", a.version);
-        let sig = minisign::sign(
-            None,
-            &sk,
-            data.as_slice(),
-            Some(&trusted),
-            Some("signature from the Lumenwall release key"),
-        )
-        .map_err(|e| format!("signing {f}: {e}"))?;
-        let out = a.dir.join(format!("{f}{SIGNATURE_SUFFIX}"));
-        std::fs::write(&out, sig.into_string()).map_err(|e| format!("{}: {e}", out.display()))?;
-        println!("signed {f}");
+        println!("listed {f}");
     }
+
+    // The app requires `file:SHA256SUMS`: a signature cannot be reused for another file.
+    let trusted = format!(
+        "timestamp:{}\tfile:{SUMS_NAME}\tlumenwall {}",
+        lumenwall_update::now(),
+        a.version
+    );
+    let sig = minisign::sign(
+        None,
+        &sk,
+        sums.as_bytes(),
+        Some(&trusted),
+        Some("signature from the Lumenwall release key"),
+    )
+    .map_err(|e| format!("signing {SUMS_NAME}: {e}"))?;
+    let out = a.dir.join(format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"));
+    std::fs::write(&out, sig.into_string()).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("signed {SUMS_NAME}");
     Ok(())
 }
 
-/// Release files to sign: everything except signatures and the checksum list.
+/// Release files to list in `SHA256SUMS`: everything except the list and its signature.
+/// Any other `.minisig` is refused: releases are signed through `SHA256SUMS` only.
 fn release_files(dir: &Path) -> Result<Vec<String>, String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let sums_sig = format!("{SUMS_NAME}{SIGNATURE_SUFFIX}");
     let mut out = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if e.file_type().is_ok_and(|t| t.is_file())
-            && !name.ends_with(SIGNATURE_SUFFIX)
-            && name != SUMS_NAME
-        {
-            out.push(name);
+        if !e.file_type().is_ok_and(|t| t.is_file()) || name == SUMS_NAME || name == sums_sig {
+            continue;
         }
+        if name.ends_with(SIGNATURE_SUFFIX) {
+            return Err(format!(
+                "{name}: releases have no signature per file, only {sums_sig}; remove it"
+            ));
+        }
+        out.push(name);
     }
     if out.is_empty() {
         return Err(format!("nothing to sign in {}", dir.display()));

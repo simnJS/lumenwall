@@ -1,9 +1,11 @@
 //! Minisign signatures and the `SHA256SUMS` list.
 //!
-//! Every published file is signed in minisign's pre-hashed mode (BLAKE2b-512, then
-//! Ed25519). The signature's trusted comment is signed too and must name the file
-//! (`file:<name>`): a valid signature of another file, such as an older archive served
-//! under a newer name, is refused.
+//! A release signs one file, `SHA256SUMS`, in minisign's pre-hashed mode (BLAKE2b-512,
+//! then Ed25519). The signature's trusted comment is signed too and must name the file
+//! (`file:SHA256SUMS`): a valid signature of another file is refused. The list binds
+//! each published name to its SHA-256, so an archive whose hash matches its signed line
+//! is the file the release key listed: an older archive served under a newer name has
+//! another hash, or no line at all.
 
 use minisign_verify::{PublicKey, Signature};
 

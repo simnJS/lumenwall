@@ -1,16 +1,22 @@
 # Releasing Lumenwall
 
-A release is a GitHub Release built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v<version>` tag is pushed. The app's updater ([`crates/lumenwall-update`](../crates/lumenwall-update/README.md)) installs only files signed with the **release key**, whose public half is compiled into the app. This page covers the one-time key setup, each release, and what to do when something goes wrong.
+A release is a GitHub Release built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v<version>` tag is pushed. The app's updater ([`crates/lumenwall-update`](../crates/lumenwall-update/README.md)) installs only files listed in a `SHA256SUMS` signed with the **release key**, whose public half is compiled into the app. This page covers the one-time key setup, each release, and what to do when something goes wrong.
+
+Each release publishes these seven files and nothing else (the workflow checks the list):
 
 | Asset | Content | Made by |
 |---|---|---|
-| `lumenwall-<version>-x86_64-unknown-linux-gnu.tar.gz` | `lumenwall`, `lumenwall-ui`, under `share/` the `.desktop` files, icons and the GNOME Shell extension, licences, `THIRD-PARTY-NOTICES.html` (cargo-about), `README.txt`, `lumenwall.bundle` | `packaging/release/package.py` |
+| `Lumenwall-Setup.exe` | Windows installer of the zip's files: per user, `%LOCALAPPDATA%\Programs\Lumenwall`, Start menu shortcut, optional start with Windows, uninstaller. Same name in every release: `releases/latest/download/Lumenwall-Setup.exe` | `packaging/windows/build-installer.sh` (NSIS, `lumenwall.nsi`) |
 | `lumenwall-<version>-x86_64-pc-windows-msvc.zip` | `lumenwall.exe`, `lumenwall-ui.exe`, licences, notices, `README.txt`, `lumenwall.bundle` | `packaging/release/package.py` |
-| `lumenwall-<version>-x86_64-windows-setup.exe` | Windows installer of the zip's files: per user, `%LOCALAPPDATA%\Programs\Lumenwall`, Start menu shortcut, optional start with Windows, uninstaller | `packaging/windows/build-installer.sh` (NSIS, `lumenwall.nsi`) |
+| `lumenwall-<version>-x86_64-unknown-linux-gnu.tar.gz` | `lumenwall`, `lumenwall-ui`, under `share/` the `.desktop` files, icons and the GNOME Shell extension, licences, `THIRD-PARTY-NOTICES.html` (cargo-about), `README.txt`, `lumenwall.bundle` | `packaging/release/package.py` |
 | `lumenwall-<version>-amd64.deb` | System-wide package: `/usr/bin`, `/usr/share/applications`, icons, `/usr/share/gnome-shell/extensions`; Depends from `dpkg-shlibdeps` plus `libvulkan1`, Recommends FFmpeg and a Vulkan driver | `packaging/release/deb.py` (`dpkg-deb`) |
 | `install.sh` | The one-line installer (`curl -fsSL …/releases/latest/download/install.sh \| sh`), same file in every release | `packaging/linux/install.sh` |
-| `<file>.minisig` | minisign signature of each file above | `release_sign sign` |
-| `SHA256SUMS`, `SHA256SUMS.minisig` | SHA-256 of every file above, and its signature | `release_sign sign` |
+| `SHA256SUMS` | SHA-256 of the five files above | `release_sign sign` |
+| `SHA256SUMS.minisig` | minisign signature of `SHA256SUMS`, the release's only signature | `release_sign sign` |
+
+**One signature for the whole release.** `SHA256SUMS` binds each file's name to its SHA-256, and its signature (trusted comment `file:SHA256SUMS`) proves the release key wrote that list. A file whose SHA-256 equals its signed line is therefore exactly the file the key holder listed, as surely as if it had its own signature: forging one would need either the key or a second file with the same SHA-256. The updater and `install.sh` check it this way: signature of the list, then the hash of the downloaded file against its line.
+
+The release notes start with a download section, [`packaging/release/release-notes.md`](../packaging/release/release-notes.md) (`@VERSION@` replaced by the version), followed by GitHub's generated notes. The app's update panel skips what is between its `<!-- downloads -->` and `<!-- /downloads -->` markers.
 
 The updater uses the two archives only. The installer and the `.deb` install the same programs: an installer copy (in the user's `%LOCALAPPDATA%`, marked by `lumenwall.bundle`) keeps updating itself; a `.deb` copy (`/usr/bin`) is recognised as a distribution package and never touched by the updater.
 
@@ -75,9 +81,9 @@ Do this once, on a machine you trust, **outside the repository**. The secret key
    | Job | What it does |
    |---|---|
    | check the tag | `v<semver>`, equal to the `Cargo.toml` version; `RELEASE_PUBLIC_KEY` set |
-   | build (Linux, Windows) | `cargo build --workspace --release --locked` without cache, `cargo about generate` (notices), `packaging/release/package.py` (archive, timestamps of the tagged commit); Linux also: `packaging/release/deb.py` (the `.deb`, shown with `dpkg-deb --info/--contents`) and `shellcheck` on `install.sh` |
-   | windows installer | on Ubuntu: `apt install nsis`, `packaging/windows/build-installer.sh` on the Windows zip (fails on any `makensis` error, then checks with `7z` that the programs are inside) |
-   | sign and publish | builds `release_sign` before any secret is loaded; adds `install.sh`; `release_sign sign` writes `SHA256SUMS` and one `.minisig` per file (refuses a key that is not `RELEASE_PUBLIC_KEY`); `release_sign verify` checks every archive with the app's own code and installs the Linux one into a temporary folder; `sha256sum --check`; checks that every expected file, its signature and its `SHA256SUMS` line exist; runs `install.sh --require-signature` then `--uninstall` on the signed files in a throw-away home; `gh release create --draft --generate-notes`, then publishes it once every file is uploaded |
+   | build (Linux, Windows) | `cargo build --workspace --release --locked` without cache; Windows: the `AUTHENTICODE` step, skipped until [Authenticode signing](#authenticode-signing) is set up; `cargo about generate` (notices), `packaging/release/package.py` (archive, timestamps of the tagged commit); Linux also: `packaging/release/deb.py` (the `.deb`, shown with `dpkg-deb --info/--contents`) and `shellcheck` on `install.sh` |
+   | windows installer | on Ubuntu: `apt install nsis`, `packaging/windows/build-installer.sh` on the Windows zip, which writes `Lumenwall-Setup.exe` (fails on any `makensis` error, then checks with `7z` that the programs are inside); the second `AUTHENTICODE` step, skipped likewise |
+   | sign and publish | builds `release_sign` before any secret is loaded; adds `install.sh`; `release_sign sign` writes `SHA256SUMS` and `SHA256SUMS.minisig` (refuses a key that is not `RELEASE_PUBLIC_KEY`, and any other `.minisig`); `release_sign verify` checks every archive with the app's own code and installs the Linux one into a temporary folder; `sha256sum --check`; checks that exactly the seven files above are there and that `SHA256SUMS` lists exactly the five that are not the list or its signature; runs `install.sh --require-signature` on a copy whose `SHA256SUMS` was changed after signing (must fail, nothing installed), then on the signed files in a throw-away home, then `--uninstall`; `gh release create --draft --generate-notes --notes-file` (the download section, then the generated notes), then publishes it once every file is uploaded |
 
 4. Check the published release:
 
@@ -85,14 +91,14 @@ Do this once, on a machine you trust, **outside the repository**. The secret key
    gh release view v0.2.0
    mkdir /tmp/lumenwall-0.2.0 && gh release download v0.2.0 --repo simnJS/lumenwall --dir /tmp/lumenwall-0.2.0
    cd /tmp/lumenwall-0.2.0
+   ls    # the seven files of the table above, nothing else
    minisign -Vm SHA256SUMS -p ~/.lumenwall-release/lumenwall-release.pub
-   minisign -Vm lumenwall-0.2.0-x86_64-unknown-linux-gnu.tar.gz -p ~/.lumenwall-release/lumenwall-release.pub
    sha256sum --check SHA256SUMS
    ```
 
-   Then open the previous version of the app: Settings › Updates › Check now offers 0.2.0, and "Update and restart" installs it. Try the installers once per release: `curl -fsSL https://github.com/simnJS/lumenwall/releases/latest/download/install.sh | sh` in a test account (it must report the new version), the `.deb` in a container or VM (`apt install ./lumenwall-0.2.0-amd64.deb`, `lumenwall-ui --version`), and the Windows installer over the previous version on a Windows machine (the app keeps running, the engine is restarted, Settings › Apps shows 0.2.0).
+   Open the release page: it starts with the download section, and its `Lumenwall-Setup.exe` link works, as does `https://github.com/simnJS/lumenwall/releases/latest/download/Lumenwall-Setup.exe` (latest stable release). Then open the previous version of the app: Settings › Updates › Check now offers 0.2.0 (its notes start at "What's Changed"), and "Update and restart" installs it. Try the installers once per release: `curl -fsSL https://github.com/simnJS/lumenwall/releases/latest/download/install.sh | sh` in a test account (it must report the new version), the `.deb` in a container or VM (`apt install ./lumenwall-0.2.0-amd64.deb`, `lumenwall-ui --version`), and the Windows installer over the previous version on a Windows machine (the app keeps running, the engine is restarted, Settings › Apps shows 0.2.0).
 
-5. The generated notes list the merged pull requests. Edit them on GitHub or with `gh release edit v0.2.0 --notes-file notes.md`; the app shows them as text (headings, lists, links reduced to their text).
+5. The generated notes, after the download section, list the merged pull requests. Edit them on GitHub or with `gh release edit v0.2.0 --notes-file notes.md` (keep the download section and its two markers); the app shows them as text (headings, lists, links reduced to their text).
 
 ## When something goes wrong
 
@@ -106,36 +112,48 @@ Do this once, on a machine you trust, **outside the repository**. The secret key
 This is a contract with every installed copy; change it only together with `lumenwall-update`.
 
 - Tag `v<semver>`, release not a draft; pre-releases marked as such.
-- For each platform: the archive named above, `<archive>.minisig`, plus `SHA256SUMS` and `SHA256SUMS.minisig` in the same release. A release missing any of them is ignored.
-- Signatures in minisign's pre-hashed mode (the default since minisign 0.8), with a trusted comment containing `file:<asset name>` (`release_sign` writes `timestamp:<unix time>`, `file:<name>` and `lumenwall <version>`, separated by tabs).
+- For each platform: the archive named above, plus `SHA256SUMS` and `SHA256SUMS.minisig` in the same release. A release missing any of them is ignored. `SHA256SUMS` lists the archive as `<sha256 hex>  <archive name>` (`sha256sum` format).
+- `SHA256SUMS.minisig` in minisign's pre-hashed mode (the default since minisign 0.8), with a trusted comment containing `file:SHA256SUMS` (`release_sign` writes `timestamp:<unix time>`, `file:SHA256SUMS` and `lumenwall <version>`, separated by tabs). There is no signature per file.
 - Archives: one top-level folder holding at least `lumenwall` and `lumenwall-ui` (`.exe` on Windows), and `lumenwall.bundle`. No links, no absolute paths.
 - Other files in the release (installer, `.deb`, `install.sh`) are ignored by the updater; the extra `SHA256SUMS` lines are fine.
 
-`install.sh`, once published, relies on the same layout: `releases/latest/download/SHA256SUMS` lists `lumenwall-<version>-x86_64-unknown-linux-gnu.tar.gz` (the version is read from that line), and `releases/download/v<version>/` holds the archive, its `.minisig` and `SHA256SUMS.minisig`, with `file:<name>` in each trusted comment.
+`install.sh`, once published, relies on the same layout: `releases/latest/download/SHA256SUMS` lists `lumenwall-<version>-x86_64-unknown-linux-gnu.tar.gz` (the version is read from that line), and `releases/download/v<version>/` holds the archive and `SHA256SUMS.minisig`, with `file:SHA256SUMS` in its trusted comment.
 
 ## Signing by hand
 
-If the workflow cannot run, sign on the machine that holds the key (archives built with `packaging/release/package.py` in `dist/`):
+If the workflow cannot run, sign on the machine that holds the key (archives built with `packaging/release/package.py`, the `.deb` and `Lumenwall-Setup.exe` in `dist/`):
 
 ```sh
 cp packaging/linux/install.sh dist/
 cd dist
-sha256sum lumenwall-0.2.0-* install.sh > SHA256SUMS
-for f in lumenwall-0.2.0-* install.sh SHA256SUMS; do
-  minisign -S -s ~/.lumenwall-release/lumenwall-release.key -m "$f" \
-    -t "timestamp:$(date +%s) file:$f lumenwall 0.2.0"
-done
+sha256sum Lumenwall-Setup.exe lumenwall-0.2.0-* install.sh > SHA256SUMS
+minisign -S -s ~/.lumenwall-release/lumenwall-release.key -m SHA256SUMS \
+  -t "timestamp:$(date +%s) file:SHA256SUMS lumenwall 0.2.0"
 cd .. && cargo run --locked -p lumenwall-update --example release_sign -- verify --version 0.2.0 dist
-gh release create v0.2.0 --verify-tag --generate-notes --title "Lumenwall 0.2.0" dist/*
+sed 's/@VERSION@/0.2.0/g' packaging/release/release-notes.md > /tmp/notes.md
+gh release create v0.2.0 --verify-tag --generate-notes --notes-file /tmp/notes.md --title "Lumenwall 0.2.0" dist/*
 ```
 
 ## Verify a download
 
-Users can check an archive by hand with the release public key:
+`SHA256SUMS.minisig` signs `SHA256SUMS`, which holds the SHA-256 of every file of the release. Download both next to your file, check the list's signature with the release public key, then your file's hash against the list.
+
+Linux (`minisign` from your distribution):
 
 ```sh
-minisign -Vm lumenwall-<version>-x86_64-unknown-linux-gnu.tar.gz -P <release public key>
+minisign -Vm SHA256SUMS -P <release public key>
+sha256sum --check --ignore-missing SHA256SUMS
 ```
+
+Windows (PowerShell, with `scoop install minisign`):
+
+```powershell
+minisign -Vm SHA256SUMS -P <release public key>
+(Get-FileHash Lumenwall-Setup.exe -Algorithm SHA256).Hash.ToLower()
+Select-String Lumenwall-Setup.exe SHA256SUMS
+```
+
+`minisign` must print `Signature and comment signature verified` and a trusted comment with `file:SHA256SUMS` and the release's version; on Windows the two hashes must be equal.
 
 Release public key (the same one is compiled into the app):
 
@@ -143,12 +161,33 @@ Release public key (the same one is compiled into the app):
 RWQt/7tWeHNqM8Z/BqlP0VmbIHU4DhM9iWA8dzM7rfrHXK5ZxtoIHMbY
 ```
 
+## Authenticode signing
+
+**Not set up.** The Windows programs and installer have no Authenticode signature: SmartScreen shows "Windows protected your PC" (users click More info › Run anyway, see the README) and Windows names no publisher. The minisign-signed `SHA256SUMS` is what proves where the files come from meanwhile. The candidates are Azure Artifact Signing (Microsoft's service, formerly Trusted Signing) and SignPath; neither is chosen, and no secret exists for it.
+
+The workflow already has the two places, marked `AUTHENTICODE` in `release.yml`, in the order the signatures must be made, all before `SHA256SUMS` is computed (signing changes the bytes it hashes):
+
+| Step | Job (runner) | Signs | When |
+|---|---|---|---|
+| `AUTHENTICODE: sign lumenwall.exe and lumenwall-ui.exe` | build (`windows-latest`) | `target/x86_64-pc-windows-msvc/release/lumenwall.exe`, `lumenwall-ui.exe`, in place | after `cargo build`, before `package.py` zips them: the zip, the updater's copies and the installer all carry the signed programs |
+| `AUTHENTICODE: sign Lumenwall-Setup.exe` | windows installer (`ubuntu-latest`) | `dist/Lumenwall-Setup.exe`, in place | after `build-installer.sh`, before the upload to "sign and publish" |
+
+Both run only when `env.AUTHENTICODE` is `true`, i.e. when a repository secret named `AUTHENTICODE_TOKEN` exists (the workflow-level `env` reads whether it is empty, never its value). Until a signing command replaces them, both fail with an error if that secret appears: a release is never published unsigned by mistake once signing is meant to be on.
+
+To plug a service in:
+
+1. Set up the service's account and certificate profile, and add its credential as a repository secret (preferably in the `release` environment, see the one-time setup). Name it `AUTHENTICODE_TOKEN`, or change the `AUTHENTICODE:` line at the top of `release.yml` to test the secret the service needs.
+2. Replace the `run:` of both steps by the service's signing step, using the `FILES` each step lists, with an RFC 3161 timestamp so the signatures stay valid after the certificate expires. Give its secrets to that step only (`env:` or `with:` of the step), never to the job: the build job runs `cargo build` first.
+3. The installer step runs on Ubuntu. A tool that needs Windows (`signtool`, Microsoft's GitHub action) needs that job moved to `windows-latest`, or a small Windows job between `installer` and `publish` that downloads `release-windows-installer`, signs it and uploads it again; SignPath's action submits the file to its service and works from any runner.
+4. The uninstaller that NSIS writes inside the setup is only signed if `packaging/windows/lumenwall.nsi` signs it too (`!uninstfinalize`).
+5. After each signing step, check it (`signtool verify /pa`, or `osslsigncode verify` on Linux), then update the SmartScreen sentence of `README.md`, `README.fr.md` and `packaging/release/release-notes.md`. A new certificate can still trigger SmartScreen until its files have built a reputation.
+
 ## Trying it without publishing
 
-- `cargo test -p lumenwall-update`: the whole check, download, verification, installation and restart path against a fake GitHub signed with the test key.
-- In the app (debug build): `cargo run -p lumenwall-update --example fake_github -- 0.2.0 --slow`, then start `lumenwall-ui` with the three variables it prints. `--bad-signature`, `--bad-checksum`, `--rate-limit` show the error states.
+- `cargo test -p lumenwall-update`: the whole check, download, verification, installation and restart path against a fake GitHub whose `SHA256SUMS` is signed with the test key; a missing, foreign or replayed `SHA256SUMS.minisig`, an edited list and an archive that does not match its line are refused.
+- In the app (debug build): `cargo run -p lumenwall-update --example fake_github -- 0.2.0 --slow`, then start `lumenwall-ui` with the three variables it prints. `--bad-signature` (`SHA256SUMS` signed by another key), `--bad-checksum`, `--rate-limit` show the error states.
 - The `.deb`, from release binaries (Debian or Ubuntu with `dpkg-dev`; `--no-ffmpeg` without FFmpeg's development files): `python3 packaging/release/deb.py --version 0.2.0 --bin-dir target/release --notices /tmp/rel/notices.html --out /tmp/rel/dist`, then `dpkg-deb --info` and `dpkg-deb --contents` on it.
-- The Windows installer, from a Windows zip (`package.py --target x86_64-pc-windows-msvc`), with NSIS installed: `packaging/windows/build-installer.sh 0.2.0 /tmp/rel/dist/lumenwall-0.2.0-x86_64-pc-windows-msvc.zip /tmp/rel/dist`. Running it needs Windows.
+- The Windows installer, from a Windows zip (`package.py --target x86_64-pc-windows-msvc`), with NSIS installed: `packaging/windows/build-installer.sh 0.2.0 /tmp/rel/dist/lumenwall-0.2.0-x86_64-pc-windows-msvc.zip /tmp/rel/dist` writes `/tmp/rel/dist/Lumenwall-Setup.exe`. Running it needs Windows.
 - `install.sh` against a local copy of a release signed with the test key: serve a folder holding `releases/latest/download/` and `releases/download/v0.2.0/` (both the signed `dist`), e.g. with `python3 -m http.server`, then run it in a throw-away home with `LUMENWALL_RELEASES_URL=http://127.0.0.1:<port>/releases` and `LUMENWALL_PUBLIC_KEY=<test key>` (testing only). Use a non-GNOME `XDG_CURRENT_DESKTOP`, or fake `gnome-extensions` and `gsettings` first in `PATH`: GSettings writes go to the session's real configuration whatever `HOME` says.
 - The release tooling, with fake programs and the test key:
 
@@ -167,7 +206,7 @@ RWQt/7tWeHNqM8Z/BqlP0VmbIHU4DhM9iWA8dzM7rfrHXK5ZxtoIHMbY
 ## Open points
 
 - **Linux build image.** The archive is built on `ubuntu-latest` and links against that image's glibc and FFmpeg shared libraries: users need a distribution at least as recent, with FFmpeg's libraries for video wallpapers. Pinning the image (e.g. `ubuntu-24.04`) would make the requirement explicit.
-- **Windows installer.** NSIS, per user (above). Not Authenticode-signed: SmartScreen warns until a code-signing certificate exists (its minisign signature and `SHA256SUMS` are the check meanwhile). An MSIX/Store package would instead be updated by the Store (the updater detects `WindowsApps` and stays off).
+- **Windows installer.** NSIS, per user (above). Not Authenticode-signed: SmartScreen warns until a code-signing service is plugged in ([Authenticode signing](#authenticode-signing); the signed `SHA256SUMS` is the check meanwhile). An MSIX/Store package would instead be updated by the Store (the updater detects `WindowsApps` and stays off).
 - **Debian package.** Built on `ubuntu-latest` (glibc and the FFmpeg major versions of that image, see `Recommends`); no apt repository yet, so users install each new `.deb` by hand (the app says its updates come from the package). `lumenwall-web-host` is not in it.
 - **Web wallpapers.** `lumenwall-web-host` and the CEF runtime are not built by the workflow yet. `package.py` already includes the host when it is built, and the CEF files with `--web-runtime <dir>` (layout in `crates/lumenwall-web/README.md`).
 - **Video on Windows.** FFmpeg DLLs are not shipped yet (`crates/lumenwall-video/README.md`); their LGPL obligations (`deny.toml`) apply when they are.

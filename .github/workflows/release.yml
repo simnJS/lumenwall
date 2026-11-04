@@ -1,9 +1,13 @@
 # Lumenwall releases. Push a tag v<version> (the [workspace.package] version of
 # Cargo.toml): Linux and Windows archives, the Debian package and the Windows installer
-# are built, install.sh is added, SHA256SUMS is written, every file is signed with the
-# minisign release key, checked exactly as the app checks updates (and the one-line
-# installer is tried on the signed files), and the GitHub release is published with
-# generated notes.
+# (Lumenwall-Setup.exe) are built, install.sh is added, SHA256SUMS lists them all and is
+# the one file signed with the minisign release key (SHA256SUMS.minisig), checked
+# exactly as the app checks updates (and the one-line installer is tried on the signed
+# files), and the GitHub release is published: a download section
+# (packaging/release/release-notes.md), then the generated notes.
+# Published files, nothing else: Lumenwall-Setup.exe, lumenwall-<v>-x86_64-pc-windows-msvc.zip,
+# lumenwall-<v>-x86_64-unknown-linux-gnu.tar.gz, lumenwall-<v>-amd64.deb, install.sh,
+# SHA256SUMS, SHA256SUMS.minisig.
 # Procedure, key creation and checks: docs/RELEASING.md.
 # Third-party actions are pinned to a commit SHA (tag in the trailing comment).
 name: Release
@@ -22,6 +26,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # Authenticode code signing of the Windows programs and installer, not set up yet
+  # (docs/RELEASING.md#authenticode-signing). "true" once the AUTHENTICODE_TOKEN
+  # secret exists; until then the two steps marked "AUTHENTICODE" are skipped. Only
+  # whether the secret exists is read here, never its value.
+  AUTHENTICODE: ${{ secrets.AUTHENTICODE_TOKEN != '' }}
 
 defaults:
   run:
@@ -102,6 +111,20 @@ jobs:
       - name: Build
         run: cargo build --workspace --release --locked --target "$TARGET"
 
+      # ---- AUTHENTICODE (1/2): plug the code-signing service in here ----------------
+      # Signs the programs in place, before package.py zips them: the zip, the
+      # installer made from it and SHA256SUMS then all carry the signed files.
+      # Skipped until the AUTHENTICODE_TOKEN secret exists (env.AUTHENTICODE above);
+      # fails while it exists but no signing command replaces this placeholder, so a
+      # release is never published unsigned by mistake. docs/RELEASING.md#authenticode-signing
+      - name: "AUTHENTICODE: sign lumenwall.exe and lumenwall-ui.exe"
+        if: runner.os == 'Windows' && env.AUTHENTICODE == 'true'
+        env:
+          FILES: target/${{ matrix.target }}/release/lumenwall.exe target/${{ matrix.target }}/release/lumenwall-ui.exe
+        run: |
+          echo "::error::AUTHENTICODE_TOKEN is set but no signing command is plugged in for: $FILES (docs/RELEASING.md#authenticode-signing)"
+          exit 1
+
       - name: Third-party notices
         run: |
           cargo about generate --workspace --locked --fail \
@@ -177,15 +200,29 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends nsis p7zip-full
           makensis -VERSION
-      # Fails on any makensis error, then checks the programs are inside (7z).
+      # Writes dist/Lumenwall-Setup.exe (same name in every release, so
+      # releases/latest/download/Lumenwall-Setup.exe always works). Fails on any
+      # makensis error, then checks the programs are inside (7z).
       - name: Build the installer
         run: |
           packaging/windows/build-installer.sh "$VERSION" \
             "windows/lumenwall-$VERSION-x86_64-pc-windows-msvc.zip" dist
+          test -s dist/Lumenwall-Setup.exe
+      # ---- AUTHENTICODE (2/2): plug the code-signing service in here ----------------
+      # Signs the installer once it is built, before the "sign and publish" job
+      # computes SHA256SUMS. Skipped and guarded like step 1/2 (build job).
+      # docs/RELEASING.md#authenticode-signing
+      - name: "AUTHENTICODE: sign Lumenwall-Setup.exe"
+        if: env.AUTHENTICODE == 'true'
+        env:
+          FILES: dist/Lumenwall-Setup.exe
+        run: |
+          echo "::error::AUTHENTICODE_TOKEN is set but no signing command is plugged in for: $FILES (docs/RELEASING.md#authenticode-signing)"
+          exit 1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows-installer
-          path: dist/lumenwall-*-setup.exe
+          path: dist/Lumenwall-Setup.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -222,6 +259,9 @@ jobs:
       - name: Add the one-line installer
         run: cp packaging/linux/install.sh dist/install.sh
 
+      # Writes SHA256SUMS (every file in dist) and SHA256SUMS.minisig, the release's
+      # only signature; refuses any other .minisig. Everything Windows that gets an
+      # Authenticode signature is signed before this point (AUTHENTICODE 1/2, 2/2).
       - name: Sign
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -232,33 +272,55 @@ jobs:
         run: |
           target/debug/examples/release_sign verify --version "$VERSION" dist
           (cd dist && sha256sum --check --strict SHA256SUMS)
-          for f in "lumenwall-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-            "lumenwall-$VERSION-x86_64-pc-windows-msvc.zip" \
-            "lumenwall-$VERSION-amd64.deb" \
-            "lumenwall-$VERSION-x86_64-windows-setup.exe" install.sh; do
-            if [[ ! -f "dist/$f" || ! -f "dist/$f.minisig" ]] || ! grep -q "  $f\$" dist/SHA256SUMS; then
-              echo "::error::$f, its signature or its SHA256SUMS line is missing"
-              exit 1
-            fi
-          done
+          # Exactly these files are published, and SHA256SUMS lists exactly them.
+          files=(
+            Lumenwall-Setup.exe
+            "lumenwall-$VERSION-x86_64-pc-windows-msvc.zip"
+            "lumenwall-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+            "lumenwall-$VERSION-amd64.deb"
+            install.sh
+          )
+          printf '%s\n' "${files[@]}" | LC_ALL=C sort > "$RUNNER_TEMP/want-listed"
+          printf '%s\n' "${files[@]}" SHA256SUMS SHA256SUMS.minisig | LC_ALL=C sort > "$RUNNER_TEMP/want-published"
+          awk '{ print $2 }' dist/SHA256SUMS | LC_ALL=C sort > "$RUNNER_TEMP/listed"
+          (cd dist && ls -A) | LC_ALL=C sort > "$RUNNER_TEMP/published"
+          if ! diff -u "$RUNNER_TEMP/want-listed" "$RUNNER_TEMP/listed"; then
+            echo "::error::SHA256SUMS does not list exactly the release files (diff above)"
+            exit 1
+          fi
+          if ! diff -u "$RUNNER_TEMP/want-published" "$RUNNER_TEMP/published"; then
+            echo "::error::dist does not hold exactly the files to publish (diff above)"
+            exit 1
+          fi
           ls -l dist
 
       # What `curl -fsSL .../install.sh | sh` does, on these signed files (served
-      # from disk), in a throw-away home: download, signature, checksum, install,
-      # uninstall.
+      # from disk), in a throw-away home: download, SHA256SUMS.minisig, checksum,
+      # install, uninstall; and a SHA256SUMS changed after signing is refused.
       - name: Try the one-line installer
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends minisign
-          srv="$RUNNER_TEMP/releases"
-          mkdir -p "$srv/latest" "$srv/download"
-          ln -s "$PWD/dist" "$srv/latest/download"
-          ln -s "$PWD/dist" "$srv/download/v$VERSION"
+          serve() { # folder holding the release files -> releases URL
+            mkdir -p "$RUNNER_TEMP/$2/latest" "$RUNNER_TEMP/$2/download"
+            ln -s "$1" "$RUNNER_TEMP/$2/latest/download"
+            ln -s "$1" "$RUNNER_TEMP/$2/download/v$VERSION"
+            echo "file://$RUNNER_TEMP/$2"
+          }
           home=$(mktemp -d)
           run() {
             env -i HOME="$home" PATH=/usr/bin:/bin XDG_CURRENT_DESKTOP=none \
-              LUMENWALL_RELEASES_URL="file://$srv" sh dist/install.sh "$@"
+              LUMENWALL_RELEASES_URL="$url" sh dist/install.sh "$@"
           }
+          cp -R dist "$RUNNER_TEMP/tampered"
+          printf '\n' >> "$RUNNER_TEMP/tampered/SHA256SUMS"
+          url=$(serve "$RUNNER_TEMP/tampered" tampered-releases)
+          if run --require-signature; then
+            echo "::error::install.sh accepted a SHA256SUMS that does not match SHA256SUMS.minisig"
+            exit 1
+          fi
+          test ! -e "$home/.local/bin/lumenwall-ui"
+          url=$(serve "$PWD/dist" releases)
           run --require-signature
           test -x "$home/.local/bin/lumenwall" && test -x "$home/.local/bin/lumenwall-ui"
           grep -q "^Exec=\"$home/.local/bin/lumenwall-ui\"" "$home/.local/share/applications/lumenwall-ui.desktop"
@@ -267,6 +329,9 @@ jobs:
           run --uninstall
           test ! -e "$home/.local/bin/lumenwall-ui" && test ! -e "$home/.config/autostart/lumenwall.desktop"
 
+      # Notes: the download section (packaging/release/release-notes.md, the app's
+      # update panel skips it), then GitHub's generated notes: with --generate-notes,
+      # the API appends them to the given body.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -274,7 +339,13 @@ jobs:
           TAG: ${{ github.ref_name }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
         run: |
-          flags=(--verify-tag --generate-notes --title "Lumenwall $VERSION" --draft)
+          notes="$RUNNER_TEMP/release-notes.md"
+          { sed "s/@VERSION@/$VERSION/g" packaging/release/release-notes.md; echo; } > "$notes"
+          if grep -q '@VERSION@' "$notes" || ! grep -q "download/v$VERSION/Lumenwall-Setup.exe" "$notes"; then
+            echo "::error::packaging/release/release-notes.md was not filled in"
+            exit 1
+          fi
+          flags=(--verify-tag --generate-notes --notes-file "$notes" --title "Lumenwall $VERSION" --draft)
           if [[ "$PRERELEASE" == true ]]; then
             flags+=(--prerelease)
           fi

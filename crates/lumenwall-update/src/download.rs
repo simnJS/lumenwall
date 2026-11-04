@@ -1,9 +1,12 @@
 //! Download of a release archive, verified while it streams to disk.
 //!
-//! Order: the signed `SHA256SUMS` first (small), then the archive's signature, and
-//! only then the archive itself, hashed (SHA-256) and signature-checked (BLAKE2b) as
-//! it is written. The file keeps a `.part` name until both checks pass; on any failure
-//! it is deleted.
+//! Order: `SHA256SUMS.minisig` and `SHA256SUMS` first (small): the list must verify
+//! with the release key and name the archive, before a byte of the archive is
+//! fetched. Then the archive itself, hashed (SHA-256) as it is written. The file keeps
+//! a `.part` name until its hash equals the signed line; on any failure it is deleted.
+//!
+//! The signed list is the only signature: it binds the archive's name to its SHA-256,
+//! so an archive that matches its line is exactly the file the key holder listed.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -21,7 +24,7 @@ const MAX_SUMS: u64 = 64 << 10;
 const MAX_ARCHIVE: u64 = 2 << 30;
 const CHUNK: usize = 64 << 10;
 
-/// An archive whose signature and checksum both matched.
+/// An archive whose SHA-256 matched its line in the signed `SHA256SUMS`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
     pub archive: PathBuf,
@@ -56,11 +59,6 @@ pub fn download(
     let sums_sig = small(&http, &release.sums_signature.url, MAX_SIGNATURE)?;
     let sums = small(&http, &release.sums.url, MAX_SUMS)?;
     let expected = expected_sum(key, &sums, &sums_sig, name)?;
-
-    let sig = verify::signature(&small(&http, &release.signature.url, MAX_SIGNATURE)?)?;
-    // Checked before downloading: the signature must be for this very file.
-    verify::names(&sig, name)?;
-    let mut verifier = key.verify_stream(&sig).map_err(|e| verify::why(&e, name))?;
 
     if release.archive.size > MAX_ARCHIVE {
         return Err(Error::TooLarge);
@@ -106,7 +104,6 @@ pub fn download(
                 return Err(Error::TooLarge);
             }
             sha.update(&buf[..n]);
-            verifier.update(&buf[..n]);
             file.write_all(&buf[..n])
                 .map_err(|e| Error::io(part.display(), &e))?;
             if done - shown >= step {
@@ -116,7 +113,6 @@ pub fn download(
         }
         progress(done, total);
         file.sync_all().map_err(|e| Error::io(part.display(), &e))?;
-        verifier.finalize().map_err(|e| verify::why(&e, name))?;
         let sha256 = verify::hex(sha.finish().as_ref());
         if sha256 != expected {
             return Err(Error::Checksum(format!(
@@ -159,8 +155,8 @@ fn expected_sum(
 }
 
 /// Verifies release files already on disk exactly as [`download`] does: `dir` holds
-/// the archive of `version` for `target`, its `.minisig`, `SHA256SUMS` and
-/// `SHA256SUMS.minisig`. Used by the release workflow before publishing.
+/// the archive of `version` for `target`, `SHA256SUMS` and `SHA256SUMS.minisig`.
+/// Used by the release workflow before publishing.
 pub fn verify_local(
     source: &Source,
     dir: &Path,
@@ -179,18 +175,12 @@ pub fn verify_local(
         std::fs::read(&path).map_err(|e| Error::io(path.display(), &e))
     };
     let sig_suffix = crate::SIGNATURE_SUFFIX;
-    let key = source.key();
     let expected = expected_sum(
-        key,
+        source.key(),
         &read(SUMS_NAME, MAX_SUMS)?,
         &read(&format!("{SUMS_NAME}{sig_suffix}"), MAX_SIGNATURE)?,
         &name,
     )?;
-    let sig = verify::signature(&read(&format!("{name}{sig_suffix}"), MAX_SIGNATURE)?)?;
-    verify::names(&sig, &name)?;
-    let mut verifier = key
-        .verify_stream(&sig)
-        .map_err(|e| verify::why(&e, &name))?;
     let archive = dir.join(&name);
     let mut file = File::open(&archive).map_err(|e| Error::io(archive.display(), &e))?;
     let mut sha = ring::digest::Context::new(&ring::digest::SHA256);
@@ -203,9 +193,7 @@ pub fn verify_local(
             break;
         }
         sha.update(&buf[..n]);
-        verifier.update(&buf[..n]);
     }
-    verifier.finalize().map_err(|e| verify::why(&e, &name))?;
     let sha256 = verify::hex(sha.finish().as_ref());
     if sha256 != expected {
         return Err(Error::Checksum(format!(

@@ -16,6 +16,13 @@ use serde_json::{Value, json};
 
 pub const TEST_PUBLIC_KEY: &str = include_str!("../keys/TEST-ONLY-lumenwall-update.pub");
 const TEST_SECRET_KEY: &str = include_str!("../keys/TEST-ONLY-lumenwall-update.key");
+/// The Windows installer's name in every release (ignored by the updater).
+pub const SETUP_NAME: &str = "Lumenwall-Setup.exe";
+
+/// `SHA256SUMS.minisig`, the one signature of a release.
+pub fn sums_signature_name() -> String {
+    format!("{SUMS_NAME}{SIGNATURE_SUFFIX}")
+}
 
 pub fn target() -> &'static str {
     lumenwall_update::TARGET.unwrap_or("x86_64-unknown-linux-gnu")
@@ -145,7 +152,9 @@ pub struct FakeRelease {
 }
 
 impl FakeRelease {
-    /// A correct release: archive, its signature, `SHA256SUMS` and its signature.
+    /// A correct release, as the release workflow publishes it: the archive, the
+    /// installer, `install.sh`, `SHA256SUMS` listing them all, and `SHA256SUMS.minisig`
+    /// (the only signature).
     pub fn signed(version: &str) -> Self {
         Self::signed_padded(version, 0)
     }
@@ -153,28 +162,43 @@ impl FakeRelease {
     /// Same, with an archive of at least `padding` bytes.
     pub fn signed_padded(version: &str, padding: usize) -> Self {
         let version = Version::parse(version).unwrap();
-        let sk = test_secret_key();
         let name = archive_name(&version, target());
-        let archive = release_archive(&version, padding);
-        let sums = format!("{}  {name}\n", sha256_hex(&archive)).into_bytes();
         let mut assets = HashMap::new();
-        assets.insert(
-            format!("{name}{SIGNATURE_SUFFIX}"),
-            sign(&sk, &archive, &name),
-        );
-        assets.insert(
-            format!("{SUMS_NAME}{SIGNATURE_SUFFIX}"),
-            sign(&sk, &sums, SUMS_NAME),
-        );
-        assets.insert(SUMS_NAME.to_owned(), sums);
-        assets.insert(name, archive);
-        Self {
+        assets.insert(name, release_archive(&version, padding));
+        assets.insert(SETUP_NAME.to_owned(), b"MZ fake installer".to_vec());
+        assets.insert("install.sh".to_owned(), b"#!/bin/sh\n".to_vec());
+        let mut release = Self {
             prerelease: !version.pre.is_empty(),
             version,
             notes: "## What's Changed\n* Faster scene loading in https://github.com/simnJS/lumenwall/pull/12\n".into(),
             assets,
             announced: HashMap::new(),
-        }
+        };
+        release.sign_sums();
+        release
+    }
+
+    /// Writes `SHA256SUMS` for every asset (except the list and its signature) and
+    /// signs it with the test key, like `release_sign sign`.
+    pub fn sign_sums(&mut self) {
+        let mut names: Vec<&String> = self
+            .assets
+            .keys()
+            .filter(|n| !n.ends_with(SIGNATURE_SUFFIX) && n.as_str() != SUMS_NAME)
+            .collect();
+        names.sort();
+        let sums: String = names
+            .into_iter()
+            .map(|n| format!("{}  {n}\n", sha256_hex(&self.assets[n])))
+            .collect();
+        self.set_sums(sums.into_bytes(), &test_secret_key());
+    }
+
+    /// Replaces `SHA256SUMS` with `sums`, signed by `sk`.
+    pub fn set_sums(&mut self, sums: Vec<u8>, sk: &minisign::SecretKey) {
+        self.assets
+            .insert(sums_signature_name(), sign(sk, &sums, SUMS_NAME));
+        self.assets.insert(SUMS_NAME.to_owned(), sums);
     }
 
     pub fn archive_name(&self) -> String {
