@@ -276,3 +276,30 @@ From empty, the first frame waits for a new process, a cold Vulkan driver and NV
 chain of a device (≈ 0.2 s): about 0.45 s before any scene work. Only a device kept open would
 remove it, and a device keeps the driver in memory (≥ 30 MiB private): the empty daemon and the
 switch from empty are traded against each other.
+
+## Windows, part E: presentation and shared GPU memory (measured by part E)
+
+Probe outside the repo (RTX 4080 SUPER, driver 621.01, resizable BAR, 2560×1440, 30 fps), per process, GPU
+Process Memory counters = `VK_EXT_memory_budget`. Details in `crates/lumenwall-render/README.md`, "Windows: shared
+GPU memory and presentation".
+
+| Step | Shared GPU memory |
+|---|---|
+| Vulkan device, one queue (bare or wgpu, any queue family/priority/API version) | 12.4–12.9 MiB |
+| FIFO swap chain (before) / Mailbox swap chain (now) | +26.8 / +0.03 MiB |
+| GPU timer readback (`MAP_READ`: a 4 MiB system-memory block kept for the device's life) / now (`MAP_READ \| MAP_WRITE`) | +4.0 / +0 MiB |
+| Command buffers: 65 passes in 1 / in 65 command buffers per frame (bare Vulkan, 300 frames); wgpu-core makes 2 per pass | +0 / +5 MiB (wgpu: +2.5–3 paced, +16 back to back on 3463520581) |
+| For comparison: D3D11 device + DXGI swap chain / D3D12 device + queue + swap chain | 0.7 / 26.4 MiB in all |
+
+FIFO also costs ≈ 0.69 ms of 3D time per presented frame at idle clocks (probe: 0.737 vs 0.045 ms/frame) and
+190–230 ms to create (Mailbox 16 ms).
+
+| Change | Before | After |
+|---|---|---|
+| Mailbox presentation on Windows (never tearing; daemon in an off-screen 2560×1440 window, process tree, 30 fps, Idle priority, a game running so GPU clocks were high; interleaved) | 3463520581: GPU 3D 1.83/2.08 %, shared 42.7/43.7 MiB, dedicated 266.7 MiB, private 344–350 MiB; 3018340632: 2.23/2.18 %, 42.2/42.7, 217.1, 284–286 | 1.45/1.46/1.50 %, 15.9 MiB, 248.2 MiB, 279–281 MiB; 1.70/1.67 %, 15.4, 198.6, 221–222 |
+
+Projection to the desktop bench (no game): desktop ms/frame = 1.10 × headless ms + 0.945 ms (fit on main's two
+scenes; the constant is presentation, absent headless). Without FIFO: 3463520581 ≈ 2.2–2.6 % (WE 3.23),
+3018340632 ≈ 1.3–1.4 % (WE 2.89); Perf A's projection × the measured Mailbox/FIFO ratio (0.70–0.80, game clocks):
+2.3–3.0 %. Shared memory floor with Vulkan: 12.4–12.9 MiB (WE 3 MiB, D3D11): below it only with a Direct3D 11
+renderer (decision for the person).
