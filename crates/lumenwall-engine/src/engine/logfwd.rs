@@ -72,30 +72,38 @@ impl Forwarder {
 struct Fields {
     message: String,
     rest: String,
+    /// The module of a `log` record: tracing-log gives it as the `log.target` field (the
+    /// event's own target is then `log`).
+    log_target: Option<String>,
 }
 
-/// Fields that tracing-log adds to a `log` record (`log.target`, `log.file`…): the target is
-/// already the event's own, the rest the daemon's formatter does not show either.
+/// Fields that tracing-log adds to a `log` record (`log.target`, `log.file`…), which the
+/// daemon's formatter does not show either.
 fn is_log_metadata(field: &Field) -> bool {
     field.name().starts_with("log.")
 }
 
 impl Visit for Fields {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message.push_str(value);
-        } else if is_log_metadata(field) {
-        } else {
-            let _ = write!(self.rest, " {}={value:?}", field.name());
+        match field.name() {
+            "message" => self.message.push_str(value),
+            "log.target" => self.log_target = Some(value.to_owned()),
+            _ if is_log_metadata(field) => {}
+            name => {
+                let _ = write!(self.rest, " {name}={value:?}");
+            }
         }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            let _ = write!(self.message, "{value:?}");
-        } else if is_log_metadata(field) {
-        } else {
-            let _ = write!(self.rest, " {}={value:?}", field.name());
+        match field.name() {
+            "message" => {
+                let _ = write!(self.message, "{value:?}");
+            }
+            _ if is_log_metadata(field) => {}
+            name => {
+                let _ = write!(self.rest, " {name}={value:?}");
+            }
         }
     }
 }
@@ -130,7 +138,8 @@ impl Subscriber for Forwarder {
         event.record(&mut fields);
         let meta = event.metadata();
         fields.message.push_str(&fields.rest);
-        (self.send)(level_number(*meta.level()), meta.target(), fields.message);
+        let target = fields.log_target.as_deref().unwrap_or(meta.target());
+        (self.send)(level_number(*meta.level()), target, fields.message);
     }
 
     fn enter(&self, _: &Id) {}
@@ -217,6 +226,44 @@ mod tests {
         assert_eq!(level_of(0), None);
     }
 
+    /// The shape of tracing-log's events: target `log`, the record's module in `log.target`.
+    fn dispatch_log_record(module: &str, message: &str) {
+        struct LogLike(OnceLock<Metadata<'static>>);
+        impl Callsite for LogLike {
+            fn set_interest(&self, _: Interest) {}
+            fn metadata(&self) -> &Metadata<'_> {
+                self.0.get().expect("set below")
+            }
+        }
+        static LOG_LIKE: LogLike = LogLike(OnceLock::new());
+        static LOG_FIELDS: &[&str] = &["message", "log.target", "log.line"];
+        let meta: &'static Metadata<'static> = LOG_LIKE.0.get_or_init(|| {
+            Metadata::new(
+                "log record",
+                "log",
+                Level::WARN,
+                None,
+                None,
+                None,
+                FieldSet::new(LOG_FIELDS, Identifier(&LOG_LIKE)),
+                Kind::EVENT,
+            )
+        });
+        let fields = meta.fields();
+        let (m, t, l) = (
+            fields.field("message").unwrap(),
+            fields.field("log.target").unwrap(),
+            fields.field("log.line").unwrap(),
+        );
+        let line = 12u32;
+        let values = [
+            (&m, Some(&message as &dyn Value)),
+            (&t, Some(&module as &dyn Value)),
+            (&l, Some(&line as &dyn Value)),
+        ];
+        Event::dispatch(meta, &fields.value_set(&values));
+    }
+
     #[test]
     fn the_forwarder_formats_and_filters() {
         let got = Arc::new(Mutex::new(Vec::new()));
@@ -232,15 +279,24 @@ mod tests {
         tracing::subscriber::with_default(fwd, || {
             tracing::info!(target: "lumenwall_engine::engine", output = "DISPLAY1", "scene loaded in {} ms", 98);
             tracing::debug!("filtered out");
+            // A `log` record as tracing-log hands it over: target `log`, the module in a field.
+            dispatch_log_record("wgpu_hal::vulkan::adapter", "driver warning");
         });
         let got = got.lock().unwrap();
         assert_eq!(
             *got,
-            vec![(
-                3,
-                "lumenwall_engine::engine".to_owned(),
-                "scene loaded in 98 ms output=\"DISPLAY1\"".to_owned()
-            )]
+            vec![
+                (
+                    3,
+                    "lumenwall_engine::engine".to_owned(),
+                    "scene loaded in 98 ms output=\"DISPLAY1\"".to_owned()
+                ),
+                (
+                    2,
+                    "wgpu_hal::vulkan::adapter".to_owned(),
+                    "driver warning".to_owned()
+                )
+            ]
         );
     }
 
