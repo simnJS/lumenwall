@@ -14,12 +14,26 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use interprocess::local_socket::{ListenerNonblockingMode, ListenerOptions, Stream, prelude::*};
+use interprocess::ConnectWaitMode;
+use interprocess::local_socket::{
+    ConnectOptions, ListenerNonblockingMode, ListenerOptions, Name, Stream, prelude::*,
+};
 
 use crate::proto::*;
 use crate::transport::{Endpoint, encode_frame, read_frame, write_frame};
 use crate::{Error, PROTOCOL_VERSION};
+
+/// Connects to our own endpoint for a probe or a wake-up. On a Windows named pipe whose
+/// instances are all taken, a plain `Stream::connect` waits without limit; never let the
+/// daemon block on that.
+fn connect_briefly(name: Name<'_>) -> io::Result<Stream> {
+    ConnectOptions::new()
+        .name(name)
+        .wait_mode(ConnectWaitMode::Timeout(Duration::from_secs(1)))
+        .connect_sync()
+}
 
 /// Per-client queue length. A client that falls this far behind loses events
 /// (replies always get through: the reader waits for room).
@@ -143,7 +157,7 @@ impl Server {
         if let Endpoint::Path(path) = endpoint
             && path.exists()
         {
-            if Stream::connect(endpoint.name()?).is_ok() {
+            if connect_briefly(endpoint.name()?).is_ok() {
                 return Err(Error::AlreadyRunning);
             }
             // Nobody listens: a leftover from a crash.
@@ -153,12 +167,20 @@ impl Server {
             .name(endpoint.name()?)
             .nonblocking(ListenerNonblockingMode::Neither)
             .create_sync()
-            .map_err(|e| {
-                if e.kind() == io::ErrorKind::AddrInUse {
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::AddrInUse => Error::AlreadyRunning,
+                // Windows: creating the first instance of a pipe name that already exists
+                // fails with "access denied", not "address in use". Tell that apart from a
+                // real permission problem by checking that something answers on the name.
+                io::ErrorKind::PermissionDenied
+                    if matches!(endpoint, Endpoint::Name(_))
+                        && endpoint
+                            .name()
+                            .is_ok_and(|name| connect_briefly(name).is_ok()) =>
+                {
                     Error::AlreadyRunning
-                } else {
-                    Error::Io(e)
                 }
+                _ => Error::Io(e),
             })?;
         let shared = Arc::new(Shared {
             handler,
@@ -206,13 +228,18 @@ impl Drop for Server {
         // Tell clients, then close their queues: writer threads flush and exit.
         self.publisher().publish(&Event::ShuttingDown);
         lock(&self.shared.clients).clear();
-        // Wake the accept thread, blocked in accept(), with a throwaway connection.
-        if let Ok(name) = self.endpoint.name() {
-            let _ = Stream::connect(name);
-        }
+        // Wake the accept thread, blocked in accept(), with a throwaway connection. Keep it
+        // open until the thread has finished: on a Windows named pipe, a client that hangs
+        // up before the server calls `ConnectNamedPipe` can leave the accept blocked.
+        let wake = self
+            .endpoint
+            .name()
+            .ok()
+            .and_then(|name| connect_briefly(name).ok());
         if let Some(thread) = self.accept_thread.take() {
             let _ = thread.join();
         }
+        drop(wake);
         // The listener removed its socket file when the accept thread dropped it.
     }
 }

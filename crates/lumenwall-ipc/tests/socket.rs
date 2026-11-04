@@ -1,7 +1,7 @@
 //! End-to-end tests over a real local socket (Unix socket / named pipe).
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +20,31 @@ fn test_endpoint() -> Endpoint {
         Endpoint::Path(dir.join(format!("s{n}.sock")))
     } else {
         Endpoint::Name(format!("lumenwall-ipc-test-{}-{n}", std::process::id()))
+    }
+}
+
+/// An absolute path on every host: `/w/1` has no drive on Windows, so the daemon double
+/// (which rejects relative paths) would refuse it there.
+fn abs(path: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{path}"))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+/// Runs `body` on its own thread and fails the test instead of hanging when it does not
+/// finish in time (a server whose accept thread never wakes would block `drop` forever).
+fn within(limit: Duration, body: impl FnOnce() + Send + 'static) {
+    let (done_tx, done_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        body();
+        let _ = done_tx.send(());
+    });
+    match done_rx.recv_timeout(limit) {
+        // Finished, or ended without reporting because it panicked: `join` surfaces that.
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => handle.join().unwrap(),
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!("test body still running after {limit:?}"),
     }
 }
 
@@ -244,13 +269,13 @@ fn handshake_and_every_call() {
     assert_eq!(outputs[1].x, 2560);
 
     client
-        .apply(Some("HDMI-A-1"), "/w/3018340632", Scaling::Fit)
+        .apply(Some("HDMI-A-1"), abs("/w/3018340632"), Scaling::Fit)
         .unwrap();
     let state = client.state().unwrap();
     assert_eq!(state.outputs.len(), 1);
     assert_eq!(
         state.outputs[0].wallpaper.as_deref(),
-        Some(Path::new("/w/3018340632"))
+        Some(abs("/w/3018340632").as_path())
     );
     assert_eq!(state.outputs[0].scaling, Scaling::Fit);
 
@@ -293,7 +318,7 @@ fn remote_errors_keep_the_connection() {
     let (_server, _daemon, endpoint) = start();
     let client = Client::connect(&endpoint, "test").unwrap();
     let err = client
-        .apply(Some("DP-9"), "/w/1", Scaling::Fill)
+        .apply(Some("DP-9"), abs("/w/1"), Scaling::Fill)
         .unwrap_err();
     assert!(
         matches!(
@@ -486,32 +511,47 @@ fn concurrent_calls_get_their_own_replies() {
 
 #[test]
 fn not_running_and_already_running() {
-    let endpoint = test_endpoint();
-    assert!(matches!(
-        Client::connect(&endpoint, "test"),
-        Err(Error::NotRunning)
-    ));
+    within(Duration::from_secs(30), || {
+        let endpoint = test_endpoint();
+        assert!(matches!(
+            Client::connect(&endpoint, "test"),
+            Err(Error::NotRunning)
+        ));
 
-    let (server, _daemon, endpoint) = start();
-    let second = Server::bind(&endpoint, Arc::new(FakeDaemon::default()), "fake", "1");
-    assert!(matches!(second, Err(Error::AlreadyRunning)));
-    drop(server);
+        let (server, _daemon, endpoint) = start();
+        let second = Server::bind(&endpoint, Arc::new(FakeDaemon::default()), "fake", "1");
+        assert!(matches!(second, Err(Error::AlreadyRunning)));
+        drop(server);
+    });
 }
 
 #[test]
 fn shutdown_notifies_clients_and_cleans_up() {
-    let (server, _daemon, endpoint) = start();
-    let (client, events) = connect_with_channel(&endpoint);
-    drop(server);
-    let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(event, ClientEvent::Event(Event::ShuttingDown));
-    if let Endpoint::Path(path) = &endpoint {
-        assert!(!path.exists(), "socket file left behind");
-    }
-    // A new daemon can take over the endpoint.
-    let daemon = Arc::new(FakeDaemon::default());
-    let _again = Server::bind(&endpoint, daemon, "fake", "2").unwrap();
-    drop(client);
+    within(Duration::from_secs(30), || {
+        let (server, _daemon, endpoint) = start();
+        let (client, events) = connect_with_channel(&endpoint);
+        drop(server);
+        let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(event, ClientEvent::Event(Event::ShuttingDown));
+        if let Endpoint::Path(path) = &endpoint {
+            assert!(!path.exists(), "socket file left behind");
+        }
+        // On Windows a pipe name stays taken until every connection to it is closed (there
+        // is no socket file to unlink), so the new daemon can only take over once the old
+        // client is gone and the old server's reader thread has seen it hang up.
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let _again = loop {
+            let daemon = Arc::new(FakeDaemon::default());
+            match Server::bind(&endpoint, daemon, "fake", "2") {
+                Ok(server) => break server,
+                Err(Error::AlreadyRunning | Error::Io(_)) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("a new daemon cannot take over the endpoint: {e}"),
+            }
+        };
+    });
 }
 
 #[cfg(unix)]

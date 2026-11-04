@@ -807,8 +807,13 @@ fn display_summarises_the_plan() {
     ])
     .to_string();
     assert!(text.contains("mode: desktop"), "{text}");
+    // The fake catalogue builds the path with `Path::join`, so it uses the host separator.
+    let first = Path::new("/playlists").join("day").join("first");
     assert!(
-        text.contains("A: /playlists/day/first (fill, clamp, playlist day)"),
+        text.contains(&format!(
+            "A: {} (fill, clamp, playlist day)",
+            first.display()
+        )),
         "{text}"
     );
     assert!(text.contains("fps 30, volume 64 (silent)"), "{text}");

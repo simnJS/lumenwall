@@ -232,14 +232,14 @@ fn programs_outside_a_bundle_only_replace_what_is_there() {
     assert_eq!(installed.files.len(), 2);
     let mut names = leftovers(bin.path());
     names.sort();
-    // Sorted the same way: with ".exe", "lumenwall-ui.exe" comes before "lumenwall.exe".
-    let mut want = [
+    let mut expected = [
         format!("lumenwall{exe}"),
         format!("lumenwall-ui{exe}"),
         format!("something-else{exe}"),
     ];
-    want.sort();
-    assert_eq!(names, want);
+    // `-` sorts before `.`: the order depends on whether there is an `.exe` suffix.
+    expected.sort();
+    assert_eq!(names, expected);
 }
 
 #[test]
