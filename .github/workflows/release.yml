@@ -11,7 +11,8 @@
 # The Windows zip (and the installer made from it) also ships FFmpeg's LGPL DLLs (video
 # wallpapers; Lumenwall's minimal build, packaging/ffmpeg/build.sh, made by the `ffmpeg`
 # job) and lumenwall-web-host.exe with the CEF runtime (web wallpapers):
-# packaging/release/windows-runtime.toml lists them.
+# packaging/release/windows-runtime.toml lists them. Its programs link the C runtime
+# statically: no VC++ redistributable needed (build job, CARGO_TARGET_..._RUSTFLAGS).
 # Procedure, key creation and checks: docs/RELEASING.md.
 # Third-party actions are pinned to a commit SHA (tag in the trailing comment).
 name: Release
@@ -124,6 +125,14 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       TARGET: ${{ matrix.target }}
+      # Windows, both builds below (the workspace, the CEF web host): the C runtime linked
+      # statically, so the programs import no vcruntime140.dll and start on a Windows
+      # without the VC++ redistributable, which a per-user installer cannot install.
+      # cc and cef-dll-sys then build all C and C++ code with /MT; `-D linker-messages`
+      # fails the link on any linker warning, LNK4098 (mixed C runtimes) included. Only
+      # for the x86_64-pc-windows-msvc target's code (not build scripts), only in
+      # releases: .cargo/config.toml. package.py refuses a zip that imports the runtime.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static -D linker-messages"
     steps:
       - name: Check out with LF line endings
         if: runner.os == 'Windows'
@@ -382,7 +391,8 @@ jobs:
           (cd dist && sha256sum --check --strict SHA256SUMS)
           # The Windows zip (and so the installer made from it) holds exactly a release's
           # files: the programs, FFmpeg's DLLs, the CEF runtime with every locale, their
-          # licences and notices (packaging/release/windows-runtime.toml), nothing else.
+          # licences and notices (packaging/release/windows-runtime.toml), nothing else;
+          # and none of its .exe and .dll imports the VC++ redistributable.
           python3 packaging/release/package.py --check "dist/lumenwall-$VERSION-x86_64-pc-windows-msvc.zip"
           # Exactly these files are published, and SHA256SUMS lists exactly them.
           files=(

@@ -38,8 +38,10 @@ Archive layout (what crates/lumenwall-update installs):
 
 On Windows, the files that Cargo does not build are listed in windows-runtime.toml:
 exactly those are copied, their notices are written into THIRD-PARTY-NOTICES.html, and
-the zip is then checked to hold exactly the expected files. `--check <zip>` runs that
-check alone on a release zip, requiring FFmpeg and CEF (the workflow's last check).
+the zip is then checked to hold exactly the expected files, none of whose programs and
+DLLs imports the Visual C++ redistributable (the release links the C runtime statically).
+`--check <zip>` runs that check alone on a release zip, requiring FFmpeg and CEF (the
+workflow's last check).
 
 Linux gets a .tar.gz, Windows a .zip. Entries are sorted, owned by root, with
 fixed permissions and the SOURCE_DATE_EPOCH timestamp when it is set, so the same
@@ -54,6 +56,7 @@ import os
 import re
 import shutil
 import string
+import struct
 import sys
 import tarfile
 import time
@@ -70,6 +73,14 @@ ABOUT = ROOT / "packaging" / "about"
 TOP_FILES = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.html", "README.txt", "lumenwall.bundle"]
 # Where cargo-about's template (packaging/about/about.hbs) leaves room for them.
 BUNDLED_MARKER = re.compile(r"<!-- lumenwall:bundled-libraries[^>]*-->")
+# DLLs of the Visual C++ redistributable (and Visual Studio's debug runtime): not part of
+# Windows, so a program that imports one does not start on a fresh installation ("The code
+# execution cannot proceed because VCRUNTIME140.dll was not found"), and the per-user
+# installer cannot install them. The release links the C runtime statically instead
+# (`-C target-feature=+crt-static`, release.yml). The Universal CRT (ucrtbase.dll,
+# api-ms-win-crt-*.dll) and msvcrt.dll (FFmpeg's DLLs, built with mingw-w64) are part of
+# Windows 10 and later.
+VC_REDIST_DLL = re.compile(r"(vcruntime|msvcp|concrt|vccorlib|vcomp|vcamp|mfcm?)\d.*\.dll|ucrtbased\.dll", re.I)
 
 README = """Lumenwall {version} ({target})
 ================================
@@ -384,11 +395,64 @@ def stage(args: argparse.Namespace) -> tuple[Path, bool, bool]:
     return top, ffmpeg, web
 
 
+def pe_imports(data: bytes) -> list[str]:
+    """The DLL names a PE image (.exe, .dll) imports, from its import table and its
+    delay-load import table, as written in the file. ValueError if it is not a PE image."""
+    try:
+        if data[:2] != b"MZ":
+            raise ValueError("no MZ header")
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe : pe + 4] != b"PE\0\0":
+            raise ValueError("no PE signature")
+        sections_count, optional_size = struct.unpack_from("<H12xH", data, pe + 6)
+        optional = pe + 24
+        magic = struct.unpack_from("<H", data, optional)[0]
+        if magic not in (0x10B, 0x20B):
+            raise ValueError(f"unknown optional header magic {magic:#x}")
+        # PE32 / PE32+: NumberOfRvaAndSizes, then the data directories (RVA, size).
+        directories = optional + (96 if magic == 0x10B else 112)
+        directories_count = struct.unpack_from("<I", data, directories - 4)[0]
+        first_section = optional + optional_size
+        # (VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData) of each section.
+        sections = [struct.unpack_from("<4I", data, first_section + 40 * i + 8) for i in range(sections_count)]
+
+        def offset(rva: int) -> int:
+            for virtual_size, address, raw_size, raw in sections:
+                if address <= rva < address + max(virtual_size, raw_size):
+                    return rva - address + raw
+            raise ValueError(f"RVA {rva:#x} is in no section")
+
+        def name(rva: int) -> str:
+            start = offset(rva)
+            return data[start : data.index(b"\0", start)].decode("ascii")
+
+        names = []
+        # Directory 1: IMAGE_IMPORT_DESCRIPTOR (20 bytes, DLL name RVA at 12); directory 13:
+        # the delay-load descriptors (32 bytes, DLL name RVA at 4). Each table ends with an
+        # all-zero entry.
+        for index, size, name_at in [(1, 20, 12), (13, 32, 4)]:
+            if index >= directories_count:
+                continue
+            rva = struct.unpack_from("<I", data, directories + 8 * index)[0]
+            if rva == 0:
+                continue
+            at = offset(rva)
+            while (entry := data[at : at + size]) != bytes(size):
+                if len(entry) < size:
+                    raise ValueError("truncated import table")
+                names.append(name(struct.unpack_from("<I", entry, name_at)[0]))
+                at += size
+        return names
+    except (struct.error, UnicodeDecodeError) as e:
+        raise ValueError(e) from e
+
+
 def check_windows_zip(archive: Path, ffmpeg: bool = True, web: bool = True) -> None:
     """Fails unless the Windows zip holds exactly the files a release ships: the
     programs, the bundle files, and (when expected) FFmpeg's DLLs and the CEF runtime of
     windows-runtime.toml with their licences and notices. Nothing else: no build-time
-    file of CEF, no FFmpeg tool or other library."""
+    file of CEF, no FFmpeg tool or other library. And none of its programs and DLLs may
+    import the Visual C++ redistributable (VC_REDIST_DLL)."""
     runtime = windows_runtime()
     f, c = runtime["ffmpeg"], runtime["cef"]
     try:
@@ -420,6 +484,19 @@ def check_windows_zip(archive: Path, ffmpeg: bool = True, web: bool = True) -> N
             paks = [n for n in locales if re.fullmatch(r"locales/[^/]+\.pak", n)]
             if len(paks) != len(locales) or len(paks) != c["locales"] or "locales/en-US.pak" not in locales:
                 problems.append(f"locales/: {len(paks)} .pak files of {len(locales)}, expected {c['locales']} with en-US.pak")
+        images = [n for n in sorted(files) if n.lower().endswith((".exe", ".dll"))]
+        for n in images:
+            try:
+                imports = pe_imports(z.read(f"{top}/{n}"))
+            except ValueError as e:
+                problems.append(f"{n}: not a PE image ({e})")
+                continue
+            redist = [d for d in imports if VC_REDIST_DLL.fullmatch(d)]
+            if redist:
+                problems.append(
+                    f"{n} imports {', '.join(redist)}, from the Visual C++ redistributable that a fresh "
+                    "Windows lacks: build it with -C target-feature=+crt-static (docs/RELEASING.md)"
+                )
         if not problems:
             notices = z.read(f"{top}/THIRD-PARTY-NOTICES.html").decode("utf-8", errors="replace")
             for shipped, anchor, needles in [
@@ -449,7 +526,7 @@ def check_windows_zip(archive: Path, ffmpeg: bool = True, web: bool = True) -> N
         f"checked: {archive.name} holds the programs"
         + (f", {len(f['dlls'])} FFmpeg DLLs" if ffmpeg else "")
         + (f", the CEF runtime ({len(c['required']) + len(c['recommended'])} files, {c['locales']} locales)" if web else "")
-        + " and nothing else"
+        + f" and nothing else; none of its {len(images)} programs and DLLs imports the VC++ redistributable"
     )
 
 

@@ -25,7 +25,20 @@
 # rustflags = ["-C", "target-cpu=x86-64-v2"]
 
 # --- Windows C runtime --------------------------------------------------------------
-# Also NOT enabled: `-C target-feature=+crt-static` on x86_64-pc-windows-msvc would
-# remove the dependency on the VC++ redistributable (vcruntime140.dll). Decide once the
-# installer exists: CEF and FFmpeg DLLs bring their own CRT, and objects allocated by
-# one CRT must never be freed by another.
+# Decided (November 2026): the Windows RELEASE programs link the C runtime statically.
+# .github/workflows/release.yml sets CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS to
+# `-C target-feature=+crt-static -D linker-messages` for its builds; it is NOT set here,
+# where it would apply to every dev, test and CI build and rebuild every tree. Why: a
+# fresh Windows (Windows Sandbox) has no VC++ redistributable, so programs importing
+# vcruntime140.dll do not start at all, and the per-user installer cannot install it
+# (no admin rights). Why it is safe:
+# - One runtime per program: cc builds the C code of build scripts (QuickJS, ring,
+#   blake3, psm, stacker) with /MT once crt-static is on, cef-dll-sys builds CEF's C++
+#   wrapper with /MT in every build, and `-D linker-messages` fails the link on any
+#   linker warning, LNK4098 (mixed /MD and /MT objects) included.
+# - Nothing crosses a C runtime: libcef.dll has its own and FFmpeg's DLLs use msvcrt.dll
+#   (mingw-w64), but CEF strings, lists and maps are allocated and freed by libcef's
+#   functions (the cef crate), FFmpeg's buffers by av_malloc/av_freep and its objects by
+#   their own *_free functions; Rust's allocator is the process heap, not the CRT's.
+# package.py refuses a Windows zip whose programs or DLLs import the redistributable.
+# Local release builds: docs/RELEASING.md ("Trying it without publishing").
