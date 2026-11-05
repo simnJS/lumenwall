@@ -8,6 +8,8 @@
 //! media time continuous.
 
 #[cfg(windows)]
+pub mod d3d11;
+#[cfg(windows)]
 mod dxgi;
 pub(crate) mod hw;
 mod io;
@@ -173,6 +175,9 @@ pub(crate) enum Attempt {
     Shared(HwDevice),
     /// A hardware device opened by FFmpeg (frames downloaded).
     Device(HwKind),
+    /// FFmpeg's D3D11VA decoder on the Direct3D 11 renderer's device (zero copy, [`d3d11`]).
+    #[cfg(windows)]
+    D3d11(HwDevice, c_int),
 }
 
 /// How a pixel format maps onto [`YuvLayout`].
@@ -349,6 +354,10 @@ pub(crate) struct Source {
     warned_convert: bool,
     /// Decoding on wgpu's device: NV12 frames stay on the GPU.
     zero_copy: bool,
+    /// Decoding on the Direct3D 11 renderer's device ([`d3d11`]): frames stay on the GPU.
+    native_d3d11: bool,
+    /// Hardware frames kept in the decoder's pool beyond what it needs itself.
+    extra_hw_frames: c_int,
 }
 
 // SAFETY: the FFmpeg contexts are only used by the thread that owns the `Source`.
@@ -391,6 +400,8 @@ impl Source {
             let what = match &attempt {
                 Some(Attempt::Shared(_)) => "Vulkan Video on the render device",
                 Some(Attempt::Device(k)) => k.name(),
+                #[cfg(windows)]
+                Some(Attempt::D3d11(..)) => "D3D11VA on the render device",
                 None => "software",
             };
             match Self::open_with(input, attempt, adapter, pool.clone()) {
@@ -413,6 +424,23 @@ impl Source {
         adapter: &AdapterHint,
         pool: FramePool,
     ) -> Result<(Self, DecodedFrame), VideoError> {
+        let (mut s, first, _) = Self::open_raw(input, attempt, adapter, pool)?;
+        let prepared = s.prepare(first)?;
+        s.info.pixel_format = s.decoded_format_name(&prepared);
+        if let (DecodedFrame::Gpu(_), Some(dev)) = (&prepared, &s.hw) {
+            s.path_kind = DecodePath::ZeroCopy(dev.kind);
+        }
+        Ok((s, prepared))
+    }
+
+    /// Opens the demuxer and the decoder of one attempt and decodes the first frame, left
+    /// as FFmpeg gave it (with its media time).
+    fn open_raw(
+        input: &VideoInput,
+        attempt: Option<Attempt>,
+        adapter: &AdapterHint,
+        pool: FramePool,
+    ) -> Result<(Self, Frame, f64), VideoError> {
         let path = PathBuf::from(input.name());
         let open_err = |message: String| VideoError::Open {
             path: path.clone(),
@@ -477,6 +505,8 @@ impl Source {
             path_kind: DecodePath::Software,
             warned_convert: false,
             zero_copy: false,
+            native_d3d11: false,
+            extra_hw_frames: 6,
         };
         if s.pkt.is_null() {
             return Err(VideoError::OutOfMemory);
@@ -513,6 +543,16 @@ impl Source {
                 s.choice.wanted = pix as c_int;
                 s.hw = Some(dev);
             }
+            #[cfg(windows)]
+            Some(Attempt::D3d11(mut dev, extra_frames)) => {
+                let pix = hw::hw_pix_fmt(codec, HwKind::D3d11va)
+                    .ok_or_else(|| missing(HwKind::D3d11va, &s.info.codec))?;
+                dev.pix_fmt = pix;
+                s.choice.wanted = pix as c_int;
+                s.hw = Some(dev);
+                s.native_d3d11 = true;
+                s.extra_hw_frames = extra_frames;
+            }
             Some(Attempt::Shared(mut dev)) => {
                 let pix = hw::hw_pix_fmt(codec, HwKind::Vulkan)
                     .ok_or_else(|| missing(HwKind::Vulkan, &s.info.codec))?;
@@ -539,12 +579,7 @@ impl Source {
             );
             s.path_kind = DecodePath::HardwareCopy(dev.kind);
         }
-        let prepared = s.prepare(first.0)?;
-        s.info.pixel_format = s.decoded_format_name(&prepared);
-        if let (DecodedFrame::Gpu(_), Some(dev)) = (&prepared, &s.hw) {
-            s.path_kind = DecodePath::ZeroCopy(dev.kind);
-        }
-        Ok((s, prepared))
+        Ok((s, first.0, first.1))
     }
 
     fn read_stream_info(&mut self, codec: *const ff::AVCodec) {
@@ -641,7 +676,7 @@ impl Source {
                     (*self.ctx).opaque = (&*self.choice as *const FormatChoice).cast_mut().cast();
                     (*self.ctx).thread_count = 1;
                     // Frames held by the queue, the decimator and the displayed one.
-                    (*self.ctx).extra_hw_frames = 6;
+                    (*self.ctx).extra_hw_frames = self.extra_hw_frames;
                 }
                 None => {
                     // Frame + slice threads, count chosen by FFmpeg (one per core).

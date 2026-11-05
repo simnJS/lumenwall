@@ -31,6 +31,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use error::VideoError;
+#[cfg(all(windows, feature = "ffmpeg"))]
+pub use ffmpeg::d3d11;
 pub use player::{VideoPlayer, VideoStats};
 pub use queue::Notify;
 

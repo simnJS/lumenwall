@@ -121,6 +121,7 @@ pub(crate) fn adapters() -> Vec<DxgiAdapter> {
                 vendor: desc.vendor_id,
                 device: desc.device_id,
                 name: String::from_utf16_lossy(&desc.description[..len]),
+                luid: Some((desc.adapter_luid[0], desc.adapter_luid[1] as i32)),
             });
         }
     }

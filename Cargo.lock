@@ -3088,6 +3088,7 @@ dependencies = [
  "ash",
  "ffmpeg-sys-next",
  "libc",
+ "lumenwall-d3d11",
  "lumenwall-render",
  "memmap2",
  "thiserror 2.0.21",

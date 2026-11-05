@@ -113,6 +113,41 @@ DMA-BUF import (VA-API → `texture_from_dmabuf_fd`) was not needed: FFmpeg's Vu
 gives true zero copy on the same device with AMD's RADV too, without per-frame imports; wgpu
 30's DMA-BUF import is also single-plane only.
 
+### Direct3D 11 (`lumenwall_video::d3d11`, Windows, feature `ffmpeg`)
+
+For the Direct3D 11 renderer (`lumenwall-d3d11`, `crates/lumenwall-d3d11/README.md`, "Video zero
+copy" and task 6/n) the decoder part is [`d3d11::D3d11Decoder`]: it does not go through
+`VideoPlayer`, wgpu or Vulkan (those paths are unchanged and stay the Vulkan backend's); the
+renderer pulls frames in order and does its own pacing and decimation.
+
+- **Device.** FFmpeg's D3D11VA decoder runs on the renderer's own `Device`: an
+  `AVD3D11VADeviceContext` (`libavutil/hwcontext_d3d11va.h`, declared by hand in
+  `ffmpeg/d3d11.rs`: `ffmpeg-sys-next` does not bind that header) holding the device and the
+  immediate context, `BindFlags = D3D11_BIND_SHADER_RESOURCE` so the decoder's texture array can
+  be sampled. `Device::set_multithread_protected(true)` is called first: the device must be
+  created without `single_threaded` (the decoding thread and the render thread share the
+  context). The adapter is the device's; `AdapterHint::from_luid` / `DxgiAdapter::luid` name an
+  adapter by its LUID (exact key, no vendor guess) for the DXGI-based paths.
+- **Frames.** `FrameImage::Hardware(HardwareFrame)`: `decoded()` is a `lumenwall_d3d11::DecodedFrame`
+  (the pool's array texture, the slice, NV12 or P010, visible size) for `plane_views` and the YUV
+  pass; no `av_hwframe_transfer_data`. The `HardwareFrame` owns its `AVFrame` reference: FFmpeg
+  does not reuse the slice before it is dropped, so drop it once the draw that samples it is
+  recorded (the GPU orders the decoder's writes and the renderer's reads, one device).
+  `D3d11Options::held_frames` sizes the pool for that (default 4).
+- **Fallback.** WARP (no `ID3D11VideoDevice`, FFmpeg refuses the device), a GPU that refuses the
+  stream (H.264 above 4096 pixels), an FFmpeg without D3D11VA, frames that are not NV12/P010, or
+  `HwDecode::No` give `FrameImage::Software(SoftwareFrame)`: CPU planes (libavcodec, or the
+  hardware frame downloaded) that `PlaneTextures` uploads to writable `R8`/`R8G8` (8-bit) or
+  `R16`/`R16G16` UNORM (deeper, like the views of a P010 texture; `YuvColor::shift` says where the
+  bits are) textures, one `UpdateSubresource` per plane.
+- **Tests** (`tests/d3d11_decode.rs`): WARP by default; `LUMENWALL_D3D11_TEST_ADAPTER=hardware`
+  runs them on the default adapter under `%LOCALAPPDATA%\lumenwall-dev\gpu.lock`. Frames of
+  Windows' own sample clips (`LUMENWALL_TEST_CLIPS=a.mkv;b.mp4` for others) are decoded with
+  D3D11VA, held eight at a time, read back (staging copy of the slice) and compared with
+  libavcodec's samples; the software path is checked through the writable textures. On the RTX 4080
+  SUPER, VP9 8-bit (NV12) and 10-bit (P010) are bit-exact; on WARP the stream falls back to
+  software, which is what the tests then check.
+
 ## YUV → RGB
 
 `lumenwall_render::yuv`: 8-bit planes sampled as UNORM, 9–16-bit planes as `R16Uint`/`Rg16Uint`
@@ -319,7 +354,7 @@ cargo build -p lumenwall --release --features lumenwall-engine/video-ffmpeg
   changes in `scene.rs`, which other work streams are modifying, and no installed scene uses
   one to test against.
 - HDR (PQ/HLG) is not tone-mapped and BT.2020 primaries are not converted to BT.709 (matrix
-  only). Zero copy is NV12 only (10-bit streams go through the download path).
+  only). Zero copy on Vulkan is NV12 only (10-bit streams go through the download path); the Direct3D 11 path handles NV12 and P010.
 - Audio and video loops are independent: a sound track a few ms longer than the picture
   drifts slowly over many loops (the reference wallpaper's track is 7 ms longer).
 - Zero copy needs Vulkan (Linux, and Windows when wgpu picks Vulkan, the default when the

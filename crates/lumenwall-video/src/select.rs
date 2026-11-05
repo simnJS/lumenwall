@@ -24,9 +24,21 @@ pub struct AdapterHint {
     pub pci_bus_id: String,
     /// Adapter name.
     pub name: String,
+    /// Locally unique identifier `(LowPart, HighPart)` (Windows): the exact key between the
+    /// renderer's Direct3D 11 device and the DXGI adapter FFmpeg decodes on.
+    pub luid: Option<(u32, i32)>,
 }
 
 impl AdapterHint {
+    /// A hint that names the adapter by its LUID only.
+    #[must_use]
+    pub fn from_luid(low: u32, high: i32) -> Self {
+        Self {
+            luid: Some((low, high)),
+            ..Self::default()
+        }
+    }
+
     #[must_use]
     pub fn from_wgpu(info: &wgpu::AdapterInfo) -> Self {
         Self {
@@ -34,6 +46,7 @@ impl AdapterHint {
             device: info.device,
             pci_bus_id: info.device_pci_bus_id.clone(),
             name: info.name.clone(),
+            luid: None,
         }
     }
 }
@@ -129,14 +142,21 @@ pub struct DxgiAdapter {
     pub device: u32,
     /// Adapter description.
     pub name: String,
+    /// `(LowPart, HighPart)` of the adapter's LUID.
+    pub luid: Option<(u32, i32)>,
 }
 
 /// Index (in DXGI's enumeration order, FFmpeg's D3D11VA device string) of the adapter wgpu
-/// renders on: same PCI vendor and device ids, else the first one of the same vendor.
-/// `None` (FFmpeg's default adapter) for software and unknown renderers: decoding on any
-/// hardware GPU still beats software decoding there.
+/// renders on: the same LUID when the hint has one, else the same PCI vendor and device ids,
+/// else the first one of the same vendor. `None` (FFmpeg's default adapter) for software and
+/// unknown renderers: decoding on any hardware GPU still beats software decoding there.
 #[must_use]
 pub fn pick_dxgi_adapter(adapters: &[DxgiAdapter], adapter: &AdapterHint) -> Option<usize> {
+    if let Some(luid) = adapter.luid {
+        // An exact key, no fallback to another adapter: a LUID that is not listed means the
+        // caller's device is gone (LUIDs change at every boot).
+        return adapters.iter().position(|a| a.luid == Some(luid));
+    }
     if adapter.vendor == 0 || adapter.vendor == VENDOR_MICROSOFT {
         return None;
     }
@@ -240,6 +260,7 @@ mod tests {
             vendor,
             device,
             name: String::new(),
+            luid: Some((device, -1)),
         };
         // AMD iGPU first (primary display), two NVIDIA GPUs, then WARP.
         let adapters = vec![
@@ -274,6 +295,19 @@ mod tests {
         assert_eq!(pick_dxgi_adapter(&adapters, &gpu(0, 0)), None);
         assert_eq!(
             pick_dxgi_adapter(&adapters, &gpu(VENDOR_INTEL, 0x56a0)),
+            None
+        );
+        // A LUID is an exact key: WARP included, and no fallback when it is not listed.
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &AdapterHint::from_luid(0x2684, -1)),
+            Some(1)
+        );
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &AdapterHint::from_luid(0x8c, -1)),
+            Some(3)
+        );
+        assert_eq!(
+            pick_dxgi_adapter(&adapters, &AdapterHint::from_luid(0x2684, 0)),
             None
         );
     }
