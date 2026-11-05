@@ -136,9 +136,17 @@ fn manifest_glob(entries: &[AdapterEntry], vendor: u32, device: u32) -> Option<S
     let entry = entries
         .iter()
         .find(|e| (e.vendor, e.device) == (vendor, device))?;
-    let name = entry.drivers.first()?.file_name()?.to_str()?;
+    let name = manifest_file_name(entry.drivers.first()?)?;
     let glob = format!("*{name}");
     valid_glob(&glob).then_some(glob)
+}
+
+/// File name of a manifest path as the Windows registry stores it. Splits on both `\` and `/`,
+/// whatever the host's separator (`Path::file_name` ignores `\` off Windows).
+fn manifest_file_name(path: &Path) -> Option<&str> {
+    let s = path.to_str()?;
+    let name = s.rsplit(['\\', '/']).next()?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// Names of the implicit layers that the drivers of the other adapters register, minus those
@@ -397,12 +405,26 @@ mod tests {
     }
 
     fn read(p: &Path) -> Option<String> {
-        let name = p.file_name()?.to_str()?;
+        let name = manifest_file_name(p)?;
         Some(match name {
             "nv-vk64.json" => NV_JSON.to_owned(),
             "amd-vulkan64.json" => AMD_JSON.to_owned(),
             _ => return None,
         })
+    }
+
+    #[test]
+    fn manifest_file_name_splits_on_both_separators_on_every_host() {
+        for (path, want) in [
+            ("C:\\ds\\nv_dispi.inf\\nv-vk64.json", Some("nv-vk64.json")),
+            ("C:/ds/nv_dispi.inf/nv-vk64.json", Some("nv-vk64.json")),
+            ("C:\\ds/mixed\\amd-vulkan64.json", Some("amd-vulkan64.json")),
+            ("plain.json", Some("plain.json")),
+            ("C:\\ds\\", None),
+            ("", None),
+        ] {
+            assert_eq!(manifest_file_name(Path::new(path)), want, "{path}");
+        }
     }
 
     #[test]
