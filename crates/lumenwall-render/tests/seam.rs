@@ -197,7 +197,8 @@ fn recorder(scene: &lumenwall_render::RenderScene) -> &Recorder {
 
 #[test]
 fn a_scene_builds_and_renders_without_wgpu() {
-    let mut b = SceneBuilder::with_backend(Gpu::Other, Box::new(Recorder::default()), (256.0, 256.0));
+    let mut b =
+        SceneBuilder::with_backend(Gpu::Other, Box::new(Recorder::default()), (256.0, 256.0));
     let st = b
         .targets
         .create_scene_targets(Gpu::Other, (256, 256), SamplerKey::CLAMP_LINEAR);
@@ -252,7 +253,10 @@ fn a_scene_builds_and_renders_without_wgpu() {
     assert_eq!(built.passes, 6);
     assert_eq!(built.ops, scene.ops());
     // The aliasing plan reached the backend: shared targets, cleared by their first draw.
-    assert!(!built.shares.is_empty(), "transient composites share memory");
+    assert!(
+        !built.shares.is_empty(),
+        "transient composites share memory"
+    );
     assert!(built.clear_first > 0);
     assert!(scene.targets().iter().any(|t| t.shares().is_some()));
     // At build the backend got the whole region.

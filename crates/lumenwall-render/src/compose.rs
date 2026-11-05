@@ -545,7 +545,10 @@ mod tests {
                 mode: [1.0, 0.0, 0.0, 0.0],
             }
         );
-        assert_eq!(compose_sampler(ClampMode::Border).address, AddressMode::Clamp);
+        assert_eq!(
+            compose_sampler(ClampMode::Border).address,
+            AddressMode::Clamp
+        );
         let s = ComposeSettings {
             flip_vertical: true,
             ..ComposeSettings::default()
