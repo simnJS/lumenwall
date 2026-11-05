@@ -135,10 +135,12 @@ pub fn translate(module: &Module, vertex_entry: &str, fragment_entry: &str) -> R
             },
         );
     }
+    // Every resource of the module is in `binding_map` (`resources` refused the others): the
+    // only binding naga fakes is the sampler index buffer, which `plain_samplers` removes.
     let options = hlsl::Options {
         shader_model: hlsl::ShaderModel::V5_0,
         binding_map,
-        fake_missing_bindings: false,
+        fake_missing_bindings: true,
         ..hlsl::Options::default()
     };
     let pipeline = hlsl::PipelineOptions::default();
@@ -366,12 +368,17 @@ struct VsIn { @location(0) a_Position: vec3<f32>, @location(1) a_TexCoord: vec2<
     fn translation_maps_every_resource_and_input() {
         let p = translate(&module(SHADER), "vs_main", "fs_main").unwrap();
         let s = &p.source;
-        assert!(s.contains("register(b0)"), "{s}");
+        // naga's namer may add a trailing `_` to names ending in a digit.
+        let declared = |prefix: &str, register: &str| {
+            s.lines()
+                .any(|l| l.starts_with(prefix) && l.ends_with(&format!(": register({register});")))
+        };
+        assert!(declared("cbuffer pass_block", "b0") || s.contains("register(b0)"), "{s}");
         assert!(s.contains("register(b1)"), "{s}");
-        assert!(s.contains("Texture2D<float4> g_Texture0 : register(t0);"), "{s}");
-        assert!(s.contains("Texture3D<float4> g_Texture3 : register(t3);"), "{s}");
-        assert!(s.contains("SamplerState g_Texture0Sampler : register(s0);"), "{s}");
-        assert!(s.contains("SamplerState g_Texture3Sampler : register(s3);"), "{s}");
+        assert!(declared("Texture2D<float4> g_Texture0", "t0"), "{s}");
+        assert!(declared("Texture3D<float4> g_Texture3", "t3"), "{s}");
+        assert!(declared("SamplerState g_Texture0Sampler", "s0"), "{s}");
+        assert!(declared("SamplerState g_Texture3Sampler", "s3"), "{s}");
         assert!(!s.contains("SamplerHeap") && !s.contains("space"), "{s}");
         assert!(s.contains(": LOC0") && s.contains(": LOC4"), "{s}");
         assert_eq!(

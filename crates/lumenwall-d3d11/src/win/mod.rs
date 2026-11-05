@@ -25,7 +25,7 @@ pub use compile::{
 pub use device::{AdapterChoice, AdapterInfo, Caps, Device, DeviceOptions, Luid};
 pub use memory::{GpuMemory, SegmentMemory};
 pub use query::GpuTimer;
-pub use readback::{read_subresource, read_texture_rgba8};
+pub use readback::{Subresource, read_subresource, read_texture_rgba8};
 pub use state::StateCache;
 pub use swapchain::{PresentStatus, SwapChain};
 pub use target::{DepthBuffer, RenderTarget, TargetDesc, TargetFormat};

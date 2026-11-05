@@ -319,13 +319,17 @@ mod tests {
     #[test]
     fn default_attributes_layout() {
         let f: Vec<f32> = DEFAULT_ATTRIBUTES[..16]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert_eq!(f, [0.0, 0.0, 0.0, 1.0]);
         let i: Vec<u32> = DEFAULT_ATTRIBUTES[16..]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         assert_eq!(i, [0, 0, 0, 1]);
     }

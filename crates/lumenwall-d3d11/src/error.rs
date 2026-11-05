@@ -176,10 +176,11 @@ mod tests {
         );
     }
 
+    // `Present` returns it as a success: it must never be read as a failure.
+    const _: () = assert!(hresult::DXGI_STATUS_OCCLUDED > 0);
+
     #[test]
-    fn occluded_is_a_success_code() {
-        // `Present` returns it as a success: it must never be read as a failure.
-        assert!(hresult::DXGI_STATUS_OCCLUDED > 0);
+    fn occluded_is_not_a_device_loss() {
         assert!(LostReason::from_hresult(hresult::DXGI_STATUS_OCCLUDED).is_none());
     }
 }

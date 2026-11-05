@@ -30,19 +30,24 @@ fn block_info(f: DXGI_FORMAT) -> Option<(u32, u32)> {
     })
 }
 
-/// Mip level `mip` of a single-sample 2D texture or volume, tightly packed (rows of blocks,
-/// slices one after the other), and its `(width, height, depth)`.
-pub fn read_subresource(
-    device: &Device,
-    resource: &ID3D11Resource,
-    mip: u32,
-) -> Result<(Vec<u8>, (u32, u32, u32), DXGI_FORMAT)> {
+/// One mip level read back.
+#[derive(Clone, Debug)]
+pub struct Subresource {
+    /// Tightly packed: rows of blocks, slices one after the other.
+    pub data: Vec<u8>,
+    /// `(width, height, depth)` of the level.
+    pub size: (u32, u32, u32),
+    pub format: DXGI_FORMAT,
+}
+
+/// Mip level `mip` of a single-sample 2D texture or volume.
+pub fn read_subresource(device: &Device, resource: &ID3D11Resource, mip: u32) -> Result<Subresource> {
     // SAFETY: plain query of a live resource.
     let kind = unsafe { resource.GetType() };
     let raw = device.raw();
     // A staging copy of the whole resource (copying one BC level into a texture of its own size
     // would break the "multiple of 4" rule of BC level 0).
-    let (staging, format, size): (ID3D11Resource, DXGI_FORMAT, (u32, u32, u32)) = if kind
+    let (staging, format, size) = if kind
         == D3D11_RESOURCE_DIMENSION_TEXTURE2D
     {
         let t: ID3D11Texture2D = resource.cast().map_err(|e| device.error("cast", &e))?;
@@ -123,17 +128,21 @@ pub fn read_subresource(
         ctx.Unmap(&staging, mip);
         data
     };
-    Ok((data, size, format))
+    Ok(Subresource { data, size, format })
 }
 
 /// Level 0 of an RGBA8 or BGRA8 texture as RGBA8 rows (swap chain buffers are BGRA8).
 pub fn read_texture_rgba8(device: &Device, texture: &ID3D11Texture2D) -> Result<(u32, u32, Vec<u8>)> {
     let resource: ID3D11Resource = texture.cast().map_err(|e| device.error("cast", &e))?;
-    let (mut data, (w, h, _), format) = read_subresource(device, &resource, 0)?;
+    let Subresource {
+        mut data,
+        size: (w, h, _),
+        format,
+    } = read_subresource(device, &resource, 0)?;
     match format {
         DXGI_FORMAT_R8G8B8A8_UNORM => {}
         DXGI_FORMAT_B8G8R8A8_UNORM => {
-            for px in data.chunks_exact_mut(4) {
+            for px in data.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
         }
