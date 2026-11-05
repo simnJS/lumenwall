@@ -2459,6 +2459,10 @@ const MEMORY_CHILD: &str = "LUMENWALL_D3D11_SCENE_MEMORY_CHILD";
 /// | 30 frames presented | 1.05–1.22 | 61.39–61.40 | 58.88 |
 /// | 90 frames presented | **1.22–1.28** | 61.40 | 58.88 |
 ///
+/// Two more runs over 20 s (`LUMENWALL_D3D11_MEMORY_SECONDS=20`, 600 frames, all presented):
+/// shared 1.17 / 1.09 at 30 frames, 1.19 / 1.28 at 90, 1.22 / 1.28 at 300 and **1.22 / 1.28 at
+/// 600**: flat after the first seconds, under the 1.5 MiB target and Wallpaper Engine's 3 MiB.
+///
 /// The scene adds 0.03 MiB to the device until frames run, then 0.3–0.5 MiB while they run (the
 /// 2560×1440 swap chain alone stays at 0.80 in the foundation's measurement). 66 Direct3D objects:
 /// 3 buffers (constant arena of 112 KiB, vertex region, static vertex data), 2 input layouts,
