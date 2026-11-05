@@ -112,7 +112,9 @@ fn draw_triangle(ctx: &GpuContext, msaa: Msaa) -> (RenderScene, Msaa, Vec<u8>) {
 }
 
 fn partial_pixels(px: &[u8]) -> usize {
-    px.chunks_exact(4)
+    px.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[0] > 8 && p[0] < 247)
         .count()
 }
