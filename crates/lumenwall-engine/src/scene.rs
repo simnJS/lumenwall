@@ -111,19 +111,21 @@ impl EngineSettings {
     /// unset or unreadable variable keeps the default.
     #[must_use]
     pub fn from_env() -> Self {
-        fn parsed<T: std::str::FromStr + Default>(name: &str) -> T {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or_default()
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] over any variable lookup.
+    #[must_use]
+    pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Self {
+        fn parsed<T: std::str::FromStr + Default>(v: Option<String>) -> T {
+            v.and_then(|v| v.parse().ok()).unwrap_or_default()
         }
         Self {
             quality: QualitySettings {
-                msaa: parsed("LUMENWALL_MSAA"),
-                texture_resolution: parsed("LUMENWALL_TEXTURE_RESOLUTION"),
-                hdr: parsed("LUMENWALL_HDR"),
-                native_resolution: std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS")
-                    .is_some_and(|v| v != "0"),
+                msaa: parsed(get("LUMENWALL_MSAA")),
+                texture_resolution: parsed(get("LUMENWALL_TEXTURE_RESOLUTION")),
+                hdr: parsed(get("LUMENWALL_HDR")),
+                native_resolution: get("LUMENWALL_FULL_SIZE_CHAINS").is_some_and(|v| v != "0"),
             },
         }
     }
@@ -2480,6 +2482,57 @@ mod tests {
             property_json(&Value::from_text("abc")),
             Json::String("abc".into())
         );
+    }
+
+    #[test]
+    fn engine_settings_default_costs_nothing_more() {
+        let s = EngineSettings::default();
+        assert!(s.quality.is_default());
+        assert_eq!(EngineSettings::from_vars(|_| None), s);
+        // Unreadable values keep the default.
+        let junk = EngineSettings::from_vars(|_| Some("junk".into()));
+        assert_eq!(junk.quality.msaa, Msaa::Off);
+        assert_eq!(
+            junk.quality.texture_resolution,
+            lumenwall_render::TextureResolution::Full
+        );
+        assert_eq!(junk.quality.hdr, HdrMode::Off);
+    }
+
+    #[test]
+    fn engine_settings_read_the_developer_variables() {
+        let vars = [
+            ("LUMENWALL_MSAA", "x4"),
+            ("LUMENWALL_TEXTURE_RESOLUTION", "half"),
+            ("LUMENWALL_HDR", "scene"),
+            ("LUMENWALL_FULL_SIZE_CHAINS", "1"),
+        ];
+        let s = EngineSettings::from_vars(|n| {
+            vars.iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| (*v).to_owned())
+        });
+        assert_eq!(s.quality.msaa, Msaa::X4);
+        assert_eq!(
+            s.quality.texture_resolution,
+            lumenwall_render::TextureResolution::Half
+        );
+        assert_eq!(s.quality.hdr, HdrMode::Scene);
+        assert!(s.quality.native_resolution);
+        let off =
+            EngineSettings::from_vars(|n| (n == "LUMENWALL_FULL_SIZE_CHAINS").then(|| "0".into()));
+        assert!(!off.quality.native_resolution);
+    }
+
+    #[test]
+    fn native_resolution_renders_chains_at_scene_size() {
+        let shown = 0.5;
+        assert_eq!(chain_scale_for(&QualitySettings::default(), shown), shown);
+        let native = QualitySettings {
+            native_resolution: true,
+            ..Default::default()
+        };
+        assert_eq!(chain_scale_for(&native, shown), 1.0);
     }
 
     #[test]
