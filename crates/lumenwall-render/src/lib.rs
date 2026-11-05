@@ -9,7 +9,11 @@
 //!
 //! * [`math`], [`chain`], [`compose`] (UV windows), [`blend`]: spec formulas, unit tested;
 //! * [`context`], [`surface`], [`texture`], [`targets`]: device, outputs, uploads, render targets;
-//! * [`shader`], [`dynbuf`], [`graph`]: pass contract, uniforms, the compiled pass graph;
+//! * [`shader`], [`dynbuf`], [`desc`], [`graph`]: pass contract, uniforms, the scene
+//!   descriptors and the backend-neutral pass graph front;
+//! * [`backend`]: the seam ([`backend::SceneBackend`], [`backend::SceneDesc`]) between that front
+//!   and the GPU backends; [`wgpu_scene`] (with [`hal`], the direct Vulkan recording) is the wgpu
+//!   one, Direct3D 11 plugs in through the engine;
 //! * [`image`]: image objects (chain plan → passes, per-frame geometry and matrices);
 //! * [`bloom`], [`headless`], [`stats`]: bloom chain, off-screen readback, debug counters.
 //!
@@ -18,11 +22,13 @@
 //! precomputed segments (render bundles where possible), allocates nothing and
 //! can be skipped entirely when [`graph::RenderScene::needs_redraw`] is false.
 
+pub mod backend;
 pub mod blend;
 pub mod bloom;
 pub mod chain;
 pub mod compose;
 pub mod context;
+pub mod desc;
 pub mod dynbuf;
 pub mod error;
 pub mod graph;
@@ -39,8 +45,13 @@ pub mod surface;
 pub mod targets;
 pub mod texture;
 pub mod video_device;
+pub mod wgpu_scene;
 pub mod yuv;
 
+pub use backend::{
+    BoundTexture, Frame, Gpu, MeshInfo, PassState, ResolvedSlot, SceneBackend, SceneDesc,
+    StreamState,
+};
 pub use blend::{BlendMode, CullMode, WriteMask};
 pub use compose::{ClampMode, ComposeSettings, Compositor, OutputComposer, ScalingMode};
 pub use context::{ContextOptions, GpuCaps, GpuContext, GpuInstance};
@@ -59,7 +70,10 @@ pub use image::{
 };
 pub use math::{SkinVertex, UvRange, Vertex};
 pub use quality::{HdrMode, Msaa, QualitySettings, TextureResolution};
-pub use shader::ShaderDesc;
+pub use shader::{PreparedShader, ShaderDesc};
 pub use surface::OutputSurface;
 pub use targets::{RenderTargetPool, RtId};
-pub use texture::{MipLevel, TexFlags, TexelFormat, TextureUpload, VolumeLevel, VolumeUpload};
+pub use texture::{
+    MipLevel, TexFlags, TexelFormat, TextureInfo, TextureUpload, VolumeLevel, VolumeUpload,
+};
+pub use wgpu_scene::WgpuScene;

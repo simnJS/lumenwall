@@ -224,19 +224,74 @@ pub fn conversion_matrix(color: &YuvColor, depth: PlaneDepth) -> [[f32; 4]; 3] {
     })
 }
 
+/// Uniform block of both conversion shaders (`params`, `@group(0) @binding(4)`, 96 bytes):
+/// what a backend uploads for a stream (`YuvSource::set_params` on wgpu).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-struct Params {
-    r: [f32; 4],
-    g: [f32; 4],
-    b: [f32; 4],
-    chroma: [f32; 4],
-    dst: [f32; 4],
-    crop: [f32; 4],
+pub struct YuvParams {
+    /// `rgb = (dot(r, v), dot(g, v), dot(b, v))` with `v = (Y, Cb, Cr, 1)` in sample units
+    /// ([`conversion_matrix`]).
+    pub r: [f32; 4],
+    pub g: [f32; 4],
+    pub b: [f32; 4],
+    /// xy: chroma siting offset in chroma texels; z: 1 = three planes; w: 1 = V before U.
+    pub chroma: [f32; 4],
+    /// Target size in pixels: `(w, h, 1/w, 1/h)`.
+    pub dst: [f32; 4],
+    /// xy: visible part of the planes (decoders pad the picture to their alignment).
+    pub crop: [f32; 4],
 }
 
-const FLOAT_WGSL: &str = include_str!("shaders/yuv_float.wgsl");
-const UINT_WGSL: &str = include_str!("shaders/yuv_uint.wgsl");
+impl YuvParams {
+    /// Parameters for `color`, planes of `depth` stored as `planes`, a target of `target`
+    /// pixels and planes whose visible part is `crop` (fraction of their size, `[1, 1]` = whole
+    /// planes).
+    #[must_use]
+    pub fn new(
+        color: &YuvColor,
+        depth: PlaneDepth,
+        planes: ChromaPlanes,
+        target: (u32, u32),
+        crop: [f32; 2],
+    ) -> Self {
+        let m = conversion_matrix(color, depth);
+        let (w, h) = (target.0.max(1) as f32, target.1.max(1) as f32);
+        Self {
+            r: m[0],
+            g: m[1],
+            b: m[2],
+            chroma: [
+                color.chroma_offset[0],
+                color.chroma_offset[1],
+                if planes == ChromaPlanes::Planar {
+                    1.0
+                } else {
+                    0.0
+                },
+                if planes == ChromaPlanes::InterleavedSwapped {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
+            dst: [w, h, 1.0 / w, 1.0 / h],
+            crop: [crop[0], crop[1], 0.0, 0.0],
+        }
+    }
+}
+
+/// Conversion shader of 8-bit planes (WGSL, written in wgpu's clip space: no clip fix):
+/// `plane0..2: texture_2d<f32>` at bindings 0–2 (unused planes bound to plane 1), a linear
+/// clamp-to-edge sampler at 3, [`YuvParams`] at 4. Entry points [`YUV_VERTEX_ENTRY`] and
+/// [`YUV_FRAGMENT_ENTRY`]: three vertices, no vertex buffer, blending off, the whole target.
+pub const YUV_FLOAT_WGSL: &str = include_str!("shaders/yuv_float.wgsl");
+/// Conversion shader of 9–16-bit planes (`texture_2d<u32>`, filtered in the shader, no
+/// sampler): same bindings and entry points as [`YUV_FLOAT_WGSL`] but binding 3.
+pub const YUV_UINT_WGSL: &str = include_str!("shaders/yuv_uint.wgsl");
+/// Vertex entry point of the conversion shaders.
+pub const YUV_VERTEX_ENTRY: &str = "vs_main";
+/// Fragment entry point of the conversion shaders.
+pub const YUV_FRAGMENT_ENTRY: &str = "fs_main";
 
 /// Plane bindings and parameters of one stream, ready for [`YuvConverter::encode`].
 pub struct YuvSource {
@@ -244,7 +299,7 @@ pub struct YuvSource {
     planes: ChromaPlanes,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    written: Option<Params>,
+    written: Option<YuvParams>,
 }
 
 impl YuvSource {
@@ -258,29 +313,7 @@ impl YuvSource {
         target: (u32, u32),
         crop: [f32; 2],
     ) {
-        let m = conversion_matrix(color, self.depth);
-        let (w, h) = (target.0.max(1) as f32, target.1.max(1) as f32);
-        let params = Params {
-            r: m[0],
-            g: m[1],
-            b: m[2],
-            chroma: [
-                color.chroma_offset[0],
-                color.chroma_offset[1],
-                if self.planes == ChromaPlanes::Planar {
-                    1.0
-                } else {
-                    0.0
-                },
-                if self.planes == ChromaPlanes::InterleavedSwapped {
-                    1.0
-                } else {
-                    0.0
-                },
-            ],
-            dst: [w, h, 1.0 / w, 1.0 / h],
-            crop: [crop[0], crop[1], 0.0, 0.0],
-        };
+        let params = YuvParams::new(color, self.depth, self.planes, target, crop);
         if self.written != Some(params) {
             ctx.queue()
                 .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&params));
@@ -373,7 +406,7 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
-            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<YuvParams>() as u64),
         },
         count: None,
     }
@@ -424,7 +457,7 @@ impl YuvConverter {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &module,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(YUV_VERTEX_ENTRY),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[],
                 },
@@ -433,7 +466,7 @@ impl YuvConverter {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(YUV_FRAGMENT_ENTRY),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: RT_FORMAT,
@@ -445,8 +478,8 @@ impl YuvConverter {
                 cache: ctx.pipeline_cache(),
             })
         };
-        let float_pipeline = pipeline("lumenwall.yuv.float", &float_layout, FLOAT_WGSL);
-        let uint_pipeline = pipeline("lumenwall.yuv.uint", &uint_layout, UINT_WGSL);
+        let float_pipeline = pipeline("lumenwall.yuv.float", &float_layout, YUV_FLOAT_WGSL);
+        let uint_pipeline = pipeline("lumenwall.yuv.uint", &uint_layout, YUV_UINT_WGSL);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("lumenwall.yuv.sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -522,7 +555,7 @@ impl YuvConverter {
     ) -> YuvSource {
         let uniform = ctx.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("lumenwall.yuv.params"),
-            size: std::mem::size_of::<Params>() as u64,
+            size: std::mem::size_of::<YuvParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -605,6 +638,38 @@ impl YuvConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shaders other backends translate parse, validate and declare the parameter block
+    /// [`YuvParams`] lays out.
+    #[test]
+    fn shaders_match_their_parameters() {
+        for src in [YUV_FLOAT_WGSL, YUV_UINT_WGSL] {
+            let module = naga::front::wgsl::parse_str(src).unwrap();
+            crate::shader::validate(&module, "yuv").unwrap();
+            for entry in [YUV_VERTEX_ENTRY, YUV_FRAGMENT_ENTRY] {
+                assert!(module.entry_points.iter().any(|e| e.name == entry));
+            }
+            let (_, params) = module
+                .global_variables
+                .iter()
+                .find(|(_, v)| v.space == naga::AddressSpace::Uniform)
+                .unwrap();
+            assert_eq!(params.binding.as_ref().map(|b| b.binding), Some(4));
+            assert_eq!(
+                module.types[params.ty].inner.size(module.to_ctx()) as usize,
+                std::mem::size_of::<YuvParams>()
+            );
+        }
+        let p = YuvParams::new(
+            &YuvColor::default(),
+            PlaneDepth::U8,
+            ChromaPlanes::Planar,
+            (4, 2),
+            [1.0, 0.5],
+        );
+        assert_eq!(p.dst, [4.0, 2.0, 0.25, 0.5]);
+        assert_eq!((p.chroma[2], p.chroma[3], p.crop[1]), (1.0, 0.0, 0.5));
+    }
 
     fn apply(m: &[[f32; 4]; 3], y: f32, cb: f32, cr: f32) -> [f32; 3] {
         let v = [y, cb, cr, 1.0];

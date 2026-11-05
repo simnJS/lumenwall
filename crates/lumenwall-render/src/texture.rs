@@ -189,6 +189,75 @@ pub struct VolumeUpload<'a> {
     pub flags: TexFlags,
 }
 
+/// What the scene front keeps of an uploaded texture (backend-neutral): its sizes, format and
+/// sampling. Returned by the backends' uploads ([`crate::backend::SceneBackend::add_texture`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextureInfo {
+    pub format: TexelFormat,
+    /// Allocated size of level 0.
+    pub storage: (u32, u32),
+    /// Declared content size.
+    pub content: (u32, u32),
+    /// Level-0 depth (1 for 2D textures).
+    pub depth: u32,
+    /// A volume (3D) texture, bound only to `texture_3d` slots.
+    pub volume: bool,
+    pub mip_levels: u32,
+    pub sampler: SamplerKey,
+}
+
+impl TextureInfo {
+    /// What a 2D upload becomes (the level-0 size, every level, the declared content size).
+    #[must_use]
+    pub fn for_upload(up: &TextureUpload<'_>) -> Self {
+        let l0 = up.levels.first().map_or((1, 1), |l| (l.width, l.height));
+        let mip_levels = up.levels.len() as u32;
+        Self {
+            format: up.format,
+            storage: l0,
+            content: up.content_size.unwrap_or(l0),
+            depth: 1,
+            volume: false,
+            mip_levels,
+            sampler: SamplerKey::for_texture(up.flags, mip_levels),
+        }
+    }
+
+    /// What a volume upload becomes.
+    #[must_use]
+    pub fn for_volume(up: &VolumeUpload<'_>) -> Self {
+        let l0 = up
+            .levels
+            .first()
+            .map_or((1, 1, 1), |l| (l.width, l.height, l.depth));
+        let mip_levels = up.levels.len() as u32;
+        Self {
+            format: up.format,
+            storage: (l0.0, l0.1),
+            content: (l0.0, l0.1),
+            depth: l0.2,
+            volume: true,
+            mip_levels,
+            sampler: SamplerKey::for_texture(up.flags, mip_levels),
+        }
+    }
+
+    /// `g_TextureNResolution` value: `(storage w, storage h, content w, content h)`.
+    #[must_use]
+    pub fn resolution(&self) -> [f32; 4] {
+        [
+            self.storage.0 as f32,
+            self.storage.1 as f32,
+            self.content.0 as f32,
+            self.content.1 as f32,
+        ]
+    }
+}
+
+/// Sampling of the default textures (1×1 `(0, 0, 0, 1)` and its volume twin) bound to slots
+/// without a texture: clamp, linear, no mipmaps.
+pub const DEFAULT_TEXTURE_SAMPLER: SamplerKey = SamplerKey::CLAMP_LINEAR;
+
 /// A texture resident on the GPU.
 #[derive(Debug)]
 pub struct GpuTexture {
@@ -258,12 +327,21 @@ impl GpuTexture {
     /// `g_TextureNResolution` value: `(storage w, storage h, content w, content h)`.
     #[must_use]
     pub fn resolution(&self) -> [f32; 4] {
-        [
-            self.storage.0 as f32,
-            self.storage.1 as f32,
-            self.content.0 as f32,
-            self.content.1 as f32,
-        ]
+        self.info().resolution()
+    }
+
+    /// The backend-neutral description of the texture.
+    #[must_use]
+    pub fn info(&self) -> TextureInfo {
+        TextureInfo {
+            format: self.format,
+            storage: self.storage,
+            content: self.content,
+            depth: self.depth,
+            volume: self.volume,
+            mip_levels: self.mip_levels,
+            sampler: self.sampler,
+        }
     }
 
     /// Replace level 0 in place (video frames, thumbnails of the same size).
@@ -564,6 +642,37 @@ pub fn default_volume(ctx: &GpuContext) -> GpuTexture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neutral_texture_info() {
+        // The default textures are uploaded with the clamp flag only.
+        assert_eq!(
+            SamplerKey::for_texture(TexFlags(TexFlags::CLAMP_UVS), 1),
+            DEFAULT_TEXTURE_SAMPLER
+        );
+        let data = [0u8; 4 * 4 * 4 + 2 * 2 * 4];
+        let levels = [
+            MipLevel {
+                width: 4,
+                height: 4,
+                data: &data[..64],
+            },
+            MipLevel {
+                width: 2,
+                height: 2,
+                data: &data[64..],
+            },
+        ];
+        let info = TextureInfo::for_upload(&TextureUpload {
+            label: "t",
+            format: TexelFormat::Rgba8,
+            levels: &levels,
+            content_size: Some((3, 4)),
+            flags: TexFlags::default(),
+        });
+        assert_eq!(info.resolution(), [4.0, 4.0, 3.0, 4.0]);
+        assert!(info.sampler.mipmaps && !info.volume);
+    }
 
     #[test]
     fn layouts() {

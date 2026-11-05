@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::backend::Gpu;
 use crate::context::{GpuContext, MemoryToken};
 use crate::texture::SamplerKey;
 
@@ -28,6 +29,14 @@ pub fn texel_bytes(format: wgpu::TextureFormat) -> u64 {
 /// Handle of a render target in a [`RenderTargetPool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RtId(pub(crate) u32);
+
+impl RtId {
+    /// Position in the pool (creation order, from 0).
+    #[must_use]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Handle of a name scope (pass/effect, image, scene).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -435,12 +444,17 @@ impl RenderTargetPool {
     /// Gives every target its GPU memory: `shares` maps a target to the one whose texture it
     /// uses (that one must not share itself). The pool is no longer deferred afterwards: later
     /// targets are allocated when created.
-    pub fn materialize(
+    pub fn materialize<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         shares: &HashMap<RtId, RtId>,
         sizes: &HashMap<RtId, (u32, u32)>,
     ) {
+        let gpu: Gpu<'g> = gpu.into();
+        let Some(ctx) = gpu.wgpu() else {
+            self.plan_without_memory(shares, sizes);
+            return;
+        };
         for (&id, &(w, h)) in sizes {
             if let Some(t) = self.targets.get_mut(id.0 as usize)
                 && t.gpu.is_none()
@@ -480,11 +494,49 @@ impl RenderTargetPool {
         self.deferred = false;
     }
 
+    /// [`Self::materialize`] for a backend that holds the memory itself (no wgpu context): the
+    /// sizes of flexible targets and the shares are recorded ([`RenderTarget::shares`],
+    /// [`RenderTarget::size`]), nothing is allocated.
+    fn plan_without_memory(
+        &mut self,
+        shares: &HashMap<RtId, RtId>,
+        sizes: &HashMap<RtId, (u32, u32)>,
+    ) {
+        if self.deferred {
+            for (&id, &(w, h)) in sizes {
+                if let Some(t) = self.targets.get_mut(id.0 as usize)
+                    && t.flexible
+                {
+                    (t.width, t.height) = (w.max(1), h.max(1));
+                }
+            }
+            for (&id, &owner) in shares {
+                // The owner keeps memory of its own (it shares nothing itself).
+                if owner == id
+                    || owner.0 as usize >= self.targets.len()
+                    || shares.contains_key(&owner)
+                {
+                    continue;
+                }
+                let size = owner_size(&self.targets, owner);
+                if let Some(t) = self.targets.get_mut(id.0 as usize)
+                    && (t.width, t.height) == size
+                {
+                    t.shares = Some(owner);
+                }
+            }
+        }
+        self.deferred = false;
+    }
+
     /// Gives every target that shares another's texture a texture of its own (the frame
     /// order changed after the scene was built, so lifetimes no longer hold).
-    pub fn unshare(&mut self, ctx: &GpuContext) {
+    pub fn unshare<'g>(&mut self, gpu: impl Into<Gpu<'g>>) {
+        let gpu: Gpu<'g> = gpu.into();
         for t in &mut self.targets {
-            if t.shares.take().is_some() {
+            if t.shares.take().is_some()
+                && let Some(ctx) = gpu.wgpu()
+            {
                 Self::allocate_gpu(ctx, t);
             }
         }
@@ -556,7 +608,7 @@ impl RenderTargetPool {
 
     fn allocate(
         &self,
-        ctx: &GpuContext,
+        gpu: Gpu<'_>,
         label: &str,
         (width, height): (u32, u32),
         nominal: (u32, u32),
@@ -576,7 +628,9 @@ impl RenderTargetPool {
             samples: 1,
             msaa: None,
         };
-        if !self.deferred {
+        if !self.deferred
+            && let Some(ctx) = gpu.wgpu()
+        {
             Self::allocate_gpu(ctx, &mut t);
         }
         t
@@ -584,28 +638,30 @@ impl RenderTargetPool {
 
     /// Create a target and register `name` in `scope` (a later registration of
     /// the same name in the same scope shadows the earlier one).
-    pub fn create(
+    pub fn create<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         scope: ScopeId,
         name: &str,
         size: (u32, u32),
         sampler: SamplerKey,
     ) -> RtId {
-        let id = self.create_anonymous(ctx, name, size, sampler);
+        let gpu: Gpu<'g> = gpu.into();
+        let id = self.create_anonymous(gpu, name, size, sampler);
         self.alias(scope, name, id);
         id
     }
 
     /// Create a target without a name.
-    pub fn create_anonymous(
+    pub fn create_anonymous<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         label: &str,
         size: (u32, u32),
         sampler: SamplerKey,
     ) -> RtId {
-        let t = self.allocate(ctx, label, size, size, sampler);
+        let gpu: Gpu<'g> = gpu.into();
+        let t = self.allocate(gpu, label, size, size, sampler);
         self.targets.push(t);
         RtId(self.targets.len() as u32 - 1)
     }
@@ -613,17 +669,18 @@ impl RenderTargetPool {
     /// [`Self::create`] for a target rendered at `scale` (≤ 1) of `nominal`, the size it stands
     /// for: allocated at [`scaled_actual`], reporting `nominal` to the shaders
     /// ([`RenderTarget::resolution`]).
-    pub fn create_scaled(
+    pub fn create_scaled<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         scope: ScopeId,
         name: &str,
         nominal: (u32, u32),
         scale: f32,
         sampler: SamplerKey,
     ) -> RtId {
-        let mut t = self.allocate(ctx, name, scaled_actual(nominal, scale), nominal, sampler);
-        t.flexible = t.gpu.is_none() && scale < 1.0 && t.size() != t.nominal;
+        let gpu: Gpu<'g> = gpu.into();
+        let mut t = self.allocate(gpu, name, scaled_actual(nominal, scale), nominal, sampler);
+        t.flexible = self.deferred && scale < 1.0 && t.size() != t.nominal;
         self.targets.push(t);
         let id = RtId(self.targets.len() as u32 - 1);
         self.alias(scope, name, id);
@@ -632,15 +689,16 @@ impl RenderTargetPool {
 
     /// An unnamed target of `actual` pixels standing for `nominal` (`lumenwall.blank`: a
     /// never-written layer source is 1×1 whatever the size it reports).
-    pub fn create_anonymous_at(
+    pub fn create_anonymous_at<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         label: &str,
         actual: (u32, u32),
         nominal: (u32, u32),
         sampler: SamplerKey,
     ) -> RtId {
-        let t = self.allocate(ctx, label, actual, nominal, sampler);
+        let gpu: Gpu<'g> = gpu.into();
+        let t = self.allocate(gpu, label, actual, nominal, sampler);
         self.targets.push(t);
         RtId(self.targets.len() as u32 - 1)
     }
@@ -670,11 +728,12 @@ impl RenderTargetPool {
     /// Shared scratch target of a given size, used to copy a destination
     /// before a pass that samples it (spec 04 §24.6). Passes run in order on
     /// the GPU, so one scratch per size serves every hazard of the frame.
-    pub fn scratch(&mut self, ctx: &GpuContext, size: (u32, u32)) -> RtId {
+    pub fn scratch<'g>(&mut self, gpu: impl Into<Gpu<'g>>, size: (u32, u32)) -> RtId {
+        let gpu: Gpu<'g> = gpu.into();
         if let Some(id) = self.scratch.get(&size) {
             return *id;
         }
-        let id = self.create_anonymous(ctx, "lumenwall.scratch", size, SamplerKey::CLAMP_LINEAR);
+        let id = self.create_anonymous(gpu, "lumenwall.scratch", size, SamplerKey::CLAMP_LINEAR);
         self.scratch.insert(size, id);
         id
     }
@@ -691,7 +750,8 @@ impl RenderTargetPool {
 
     /// Reallocate a target at a new size (video / web wallpapers, output
     /// resize). Event-driven, never per frame. Bind groups must be rebuilt.
-    pub fn resize(&mut self, ctx: &GpuContext, id: RtId, size: (u32, u32)) {
+    pub fn resize<'g>(&mut self, gpu: impl Into<Gpu<'g>>, id: RtId, size: (u32, u32)) {
+        let gpu: Gpu<'g> = gpu.into();
         let Some(t) = self.targets.get(id.0 as usize) else {
             return;
         };
@@ -701,11 +761,18 @@ impl RenderTargetPool {
         }
         let (label, sampler) = (t.label.clone(), t.sampler);
         // A resized target never shares memory any more (its size is its own).
-        self.targets[id.0 as usize] = self.allocate(ctx, &label, size, size, sampler);
+        self.targets[id.0 as usize] = self.allocate(gpu, &label, size, size, sampler);
     }
 
     /// [`Self::resize`] for a target rendered at `scale` of `nominal` ([`Self::create_scaled`]).
-    pub fn resize_scaled(&mut self, ctx: &GpuContext, id: RtId, nominal: (u32, u32), scale: f32) {
+    pub fn resize_scaled<'g>(
+        &mut self,
+        gpu: impl Into<Gpu<'g>>,
+        id: RtId,
+        nominal: (u32, u32),
+        scale: f32,
+    ) {
+        let gpu: Gpu<'g> = gpu.into();
         let Some(t) = self.targets.get(id.0 as usize) else {
             return;
         };
@@ -714,7 +781,7 @@ impl RenderTargetPool {
             return;
         }
         let (label, sampler) = (t.label.clone(), t.sampler);
-        self.targets[id.0 as usize] = self.allocate(ctx, &label, actual, nominal, sampler);
+        self.targets[id.0 as usize] = self.allocate(gpu, &label, actual, nominal, sampler);
     }
 
     #[must_use]
@@ -770,31 +837,33 @@ impl RenderTargetPool {
     /// Deviation: the shadow atlas is never filled (it always samples as
     /// transparent black), so it is allocated 1×1 instead of W×H; only its
     /// `g_TextureNResolution` differs. Saves 4·W·H bytes of VRAM.
-    pub fn create_scene_targets(
+    pub fn create_scene_targets<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         size: (u32, u32),
         full_sampler: SamplerKey,
     ) -> SceneTargets {
-        self.create_scene_targets_at(ctx, size, size, full_sampler)
+        let gpu: Gpu<'g> = gpu.into();
+        self.create_scene_targets_at(gpu, size, size, full_sampler)
     }
 
     /// [`Self::create_scene_targets`] with `_rt_FullFrameBuffer` rendered at `actual` pixels while
     /// standing for `nominal` (the scene at its displayed size, [`RenderTarget::resolution`]).
-    pub fn create_scene_targets_at(
+    pub fn create_scene_targets_at<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         nominal: (u32, u32),
         actual: (u32, u32),
         full_sampler: SamplerKey,
     ) -> SceneTargets {
+        let gpu: Gpu<'g> = gpu.into();
         let root = self.scene_scope();
         let full =
-            self.create_anonymous_at(ctx, "_rt_FullFrameBuffer", actual, nominal, full_sampler);
+            self.create_anonymous_at(gpu, "_rt_FullFrameBuffer", actual, nominal, full_sampler);
         self.alias(root, "_rt_FullFrameBuffer", full);
         self.alias(root, "_rt_MipMappedFrameBuffer", full);
         let shadow_atlas = self.create(
-            ctx,
+            gpu,
             root,
             "_rt_shadowAtlas",
             (1, 1),
@@ -806,87 +875,102 @@ impl RenderTargetPool {
 
     /// Create `_rt_4FrameBuffer`, `_rt_8FrameBuffer`, `_rt_Bloom` (call after
     /// creating objects, so that objects cannot resolve them).
-    pub fn create_bloom_targets(&mut self, ctx: &GpuContext, size: (u32, u32)) -> BloomTargets {
-        self.create_bloom_targets_scaled(ctx, size, 1.0)
+    pub fn create_bloom_targets<'g>(
+        &mut self,
+        gpu: impl Into<Gpu<'g>>,
+        size: (u32, u32),
+    ) -> BloomTargets {
+        let gpu: Gpu<'g> = gpu.into();
+        self.create_bloom_targets_scaled(gpu, size, 1.0)
     }
 
     /// [`Self::create_bloom_targets`] rendered at `scale` of their nominal sizes.
-    pub fn create_bloom_targets_scaled(
+    pub fn create_bloom_targets_scaled<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         size: (u32, u32),
         scale: f32,
     ) -> BloomTargets {
+        let gpu: Gpu<'g> = gpu.into();
         let root = self.scene_scope();
         let q = divided_size(size, 4);
         let e = divided_size(size, 8);
         let c = SamplerKey::CLAMP_LINEAR;
         BloomTargets {
-            quarter: self.create_scaled(ctx, root, "_rt_4FrameBuffer", q, scale, c),
-            eighth: self.create_scaled(ctx, root, "_rt_8FrameBuffer", e, scale, c),
-            bloom: self.create_scaled(ctx, root, "_rt_Bloom", e, scale, c),
+            quarter: self.create_scaled(gpu, root, "_rt_4FrameBuffer", q, scale, c),
+            eighth: self.create_scaled(gpu, root, "_rt_8FrameBuffer", e, scale, c),
+            bloom: self.create_scaled(gpu, root, "_rt_Bloom", e, scale, c),
         }
     }
 
     /// Composites of the synthetic bloom image (id −1, spec 04 §17). Its chain
     /// never writes B, and no object can resolve the name (bloom is created
     /// after every object), so B is allocated 1×1.
-    pub fn create_bloom_composites(&mut self, ctx: &GpuContext, size: (u32, u32)) -> PingPong {
-        self.create_bloom_composites_scaled(ctx, size, 1.0)
+    pub fn create_bloom_composites<'g>(
+        &mut self,
+        gpu: impl Into<Gpu<'g>>,
+        size: (u32, u32),
+    ) -> PingPong {
+        let gpu: Gpu<'g> = gpu.into();
+        self.create_bloom_composites_scaled(gpu, size, 1.0)
     }
 
     /// [`Self::create_bloom_composites`] with A rendered at `scale` of `size`.
-    pub fn create_bloom_composites_scaled(
+    pub fn create_bloom_composites_scaled<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         size: (u32, u32),
         scale: f32,
     ) -> PingPong {
+        let gpu: Gpu<'g> = gpu.into();
         let (na, nb) = composite_names(crate::bloom::BLOOM_IMAGE_ID);
         let root = self.scene_scope();
         PingPong {
-            a: self.create_scaled(ctx, root, &na, size, scale, SamplerKey::CLAMP_LINEAR),
-            b: self.create(ctx, root, &nb, (1, 1), SamplerKey::CLAMP_LINEAR),
+            a: self.create_scaled(gpu, root, &na, size, scale, SamplerKey::CLAMP_LINEAR),
+            b: self.create(gpu, root, &nb, (1, 1), SamplerKey::CLAMP_LINEAR),
         }
     }
 
     /// Create the composite pair of image `id` in the scene scope (spec 04 §8.9).
-    pub fn create_composites(
+    pub fn create_composites<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         id: i64,
         size: (u32, u32),
         sampler: SamplerKey,
     ) -> PingPong {
-        self.create_composites_sized(ctx, id, (size, size), sampler)
+        let gpu: Gpu<'g> = gpu.into();
+        self.create_composites_sized(gpu, id, (size, size), sampler)
     }
 
     /// [`Self::create_composites`] with a size for A and one for B: a composite the chain never
     /// writes and no material names holds only zeros and can be 1×1 (lumenwall-engine decides).
-    pub fn create_composites_sized(
+    pub fn create_composites_sized<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         id: i64,
         (size_a, size_b): ((u32, u32), (u32, u32)),
         sampler: SamplerKey,
     ) -> PingPong {
-        self.create_composites_scaled(ctx, id, (size_a, size_b), 1.0, sampler)
+        let gpu: Gpu<'g> = gpu.into();
+        self.create_composites_scaled(gpu, id, (size_a, size_b), 1.0, sampler)
     }
 
     /// [`Self::create_composites_sized`] rendered at `scale` of their nominal sizes.
-    pub fn create_composites_scaled(
+    pub fn create_composites_scaled<'g>(
         &mut self,
-        ctx: &GpuContext,
+        gpu: impl Into<Gpu<'g>>,
         id: i64,
         (size_a, size_b): ((u32, u32), (u32, u32)),
         scale: f32,
         sampler: SamplerKey,
     ) -> PingPong {
+        let gpu: Gpu<'g> = gpu.into();
         let (na, nb) = composite_names(id);
         let root = self.scene_scope();
         PingPong {
-            a: self.create_scaled(ctx, root, &na, size_a, scale, sampler),
-            b: self.create_scaled(ctx, root, &nb, size_b, scale, sampler),
+            a: self.create_scaled(gpu, root, &na, size_a, scale, sampler),
+            b: self.create_scaled(gpu, root, &nb, size_b, scale, sampler),
         }
     }
 }
