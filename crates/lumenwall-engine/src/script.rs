@@ -2022,7 +2022,6 @@ mod tests {
         assert!(c.uniforms, "the fade started");
         assert!(p.settings.value(fx).boolean(), "shown by the script");
         assert!(s.needs_frames());
-        eprintln!("DBG {:?} anim={:?}", eval(&mut s, &mut p, "const a = thisScene.getLayer('cover').getEffect(0).getMaterial(0).getAnimation('multiply'); [a.fps, a.isPlaying(), a.getFrame()]"), p.settings.animation(multiply).is_some());
         let first = p.settings.value(multiply).float();
         assert!(
             first > 0.9,

@@ -27,10 +27,10 @@ pub(crate) struct Animations {
     playing: usize,
 }
 
-/// Value of a setting built from the components of a timeline, in the type the setting has.
+/// Value of a setting built from the components of a timeline, in the type the setting has. An
+/// integer-tagged setting becomes a float: `"value": 0` is how files write a float 0.
 fn setting_value(current: &SValue, c: [f32; 4]) -> SValue {
     match current.tag() {
-        ValueTag::Int => SValue::from_int(c[0].round() as i32),
         ValueTag::Bool => SValue::from_bool(c[0] >= 0.5),
         ValueTag::Vec2 => SValue::from_vec2(glam::Vec2::new(c[0], c[1])),
         ValueTag::Vec3 => SValue::from_vec3(glam::Vec3::new(c[0], c[1], c[2])),
