@@ -438,6 +438,46 @@ impl<'de: 'a, 'a, V: Deserialize<'de>> Deserialize<'de> for RawMap<'a, V> {
     }
 }
 
+raw_struct! {
+    /// Timeline of an animated setting (`animation`): one keyframe list per component.
+    pub struct RawAnimation<'a> {
+        c0: RawSeq<RawKeyframe<'a>> = "c0",
+        c1: RawSeq<RawKeyframe<'a>> = "c1",
+        c2: RawSeq<RawKeyframe<'a>> = "c2",
+        c3: RawSeq<RawKeyframe<'a>> = "c3",
+        options: RawAnimationOptions<'a> = "options",
+    }
+}
+
+raw_struct! {
+    /// One keyframe with its two bezier handles.
+    pub struct RawKeyframe<'a> {
+        frame: Json<'a> = "frame",
+        value: Json<'a> = "value",
+        back: RawHandle<'a> = "back",
+        front: RawHandle<'a> = "front",
+    }
+}
+
+raw_struct! {
+    /// Bezier handle of a keyframe.
+    pub struct RawHandle<'a> {
+        enabled: Json<'a> = "enabled",
+        x: Json<'a> = "x",
+        y: Json<'a> = "y",
+    }
+}
+
+raw_struct! {
+    /// `options` of a timeline.
+    pub struct RawAnimationOptions<'a> {
+        fps: Json<'a> = "fps",
+        length: Json<'a> = "length",
+        mode: Json<'a> = "mode",
+        startpaused: Json<'a> = "startpaused",
+    }
+}
+
 /// A setting node (spec 02 §5.1): a scalar, or an object with `value`, `user`, `script`,
 /// `scriptproperties`. Public so that other crates (particles) can embed settings in their own
 /// typed structures and register them with [`crate::Project::add_setting`].
@@ -470,6 +510,8 @@ raw_struct! {
         script: Json<'a> = "script",
         /// `scriptproperties`.
         script_properties: RawMap<'a, RawSetting<'a>> = "scriptproperties",
+        /// `animation`: keyframes played on the value.
+        animation: RawAnimation<'a> = "animation",
     }
 }
 

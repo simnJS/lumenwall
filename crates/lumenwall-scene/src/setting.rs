@@ -45,6 +45,8 @@ pub struct SettingMeta {
     pub condition: Option<Sym>,
     /// Attached script (data only; executed by `lumenwall-script`).
     pub script: Option<ScriptId>,
+    /// Timeline (`animation`) a script can play with `getAnimation()`.
+    pub animation: Option<crate::animation::AnimationId>,
 }
 
 /// Script attached to a setting (§5.2-3).
@@ -63,6 +65,7 @@ pub struct Settings {
     meta: Vec<SettingMeta>,
     scripts: Vec<Script>,
     scripted: Vec<SettingId>,
+    animations: Vec<crate::animation::PropertyAnimation>,
 }
 
 impl Settings {
@@ -99,6 +102,14 @@ impl Settings {
     /// Script by id.
     pub fn script(&self, id: ScriptId) -> &Script {
         &self.scripts[id.index()]
+    }
+
+    /// Timeline of a setting, if it has one.
+    pub fn animation(&self, id: SettingId) -> Option<&crate::animation::PropertyAnimation> {
+        self.meta
+            .get(id.index())?
+            .animation
+            .and_then(|a| self.animations.get(a.index()))
     }
 
     /// All scripts.
@@ -339,6 +350,15 @@ impl Binder<'_> {
                 .at("user");
             }
         };
+
+        if register
+            && let Some(anim) = crate::animation::PropertyAnimation::from_raw(&obj.animation)
+        {
+            meta.animation = Some(crate::animation::AnimationId(
+                self.settings.animations.len() as u32,
+            ));
+            self.settings.animations.push(anim);
+        }
 
         if let Some((name, condition)) = binding
             && let Some(pid) = self.props.find(name)

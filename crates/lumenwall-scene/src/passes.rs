@@ -140,6 +140,19 @@ impl Project {
     /// Effect visibility is read now: call again when a bound property changes to toggle
     /// effects live. Blending modes are the materials' own (no first/last swap).
     pub fn image_passes(&self, obj: ObjectIndex) -> Option<ImagePasses> {
+        self.image_passes_with(obj, &|_, ie| self.settings.value(ie.visible).boolean())
+    }
+
+    /// [`Self::image_passes`] with the visibility of each effect given by `visible(index,
+    /// effect)` instead of the settings: the chain of one combination of effect visibilities,
+    /// for images whose effects scripts or properties toggle at run time (the ping-pong
+    /// buffers of a chain depend on the passes before them, so the renderer keeps one chain per
+    /// combination and switches between them).
+    pub fn image_passes_with(
+        &self,
+        obj: ObjectIndex,
+        visible: &dyn Fn(u32, &crate::scene::ImageEffect) -> bool,
+    ) -> Option<ImagePasses> {
         let scene = self.scene.as_ref()?;
         let image = scene.objects.get(obj.index())?.as_layer()?;
         let model = scene.model(image.model?);
@@ -158,7 +171,7 @@ impl Project {
         }
         let mut any_visible = false;
         for (ei, ie) in image.effects.iter().enumerate() {
-            if !self.settings.value(ie.visible).boolean() {
+            if !visible(ei as u32, ie) {
                 continue;
             }
             any_visible = true;
@@ -212,8 +225,8 @@ impl Project {
         let names = &scene.names;
         // parity: magenta tint heuristic of the reference (Q28).
         let mut tint = None;
-        'search: for ie in &image.effects {
-            if !self.settings.value(ie.visible).boolean() {
+        'search: for (ei, ie) in image.effects.iter().enumerate() {
+            if !visible(ei as u32, ie) {
                 continue;
             }
             for ov in &ie.overrides {
@@ -277,6 +290,43 @@ impl Project {
         // applies it to the final chain (after debug filters, with the puppet rule).
         out.draws = !(model.passthrough && !any_visible);
         Some(out)
+    }
+
+    /// Effects of an image whose `visible` can change after load, as `(effect index, setting)`:
+    /// first those bound to a user property or carrying a script (their value moves by
+    /// itself), then, when `scripts_reach_effects` (some script calls `getEffect`, so any
+    /// effect can be written), all the others. Constant effects of an image no script reaches
+    /// are not listed: their chain never changes.
+    pub fn togglable_effects(
+        &self,
+        obj: ObjectIndex,
+        scripts_reach_effects: bool,
+    ) -> Vec<(u32, SettingId)> {
+        let Some(image) = self
+            .scene
+            .as_ref()
+            .and_then(|s| s.objects.get(obj.index())?.as_layer())
+        else {
+            return Vec::new();
+        };
+        let moves = |id: SettingId| {
+            let m = self.settings.meta(id);
+            m.property.is_some() || m.script.is_some()
+        };
+        let mut out: Vec<(u32, SettingId)> = Vec::new();
+        for (i, ie) in image.effects.iter().enumerate() {
+            if moves(ie.visible) {
+                out.push((i as u32, ie.visible));
+            }
+        }
+        if scripts_reach_effects {
+            for (i, ie) in image.effects.iter().enumerate() {
+                if !moves(ie.visible) {
+                    out.push((i as u32, ie.visible));
+                }
+            }
+        }
+        out
     }
 
     fn parts<'a>(

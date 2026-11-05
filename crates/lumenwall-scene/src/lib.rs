@@ -16,6 +16,7 @@
 //! assert_eq!(project.file, "a.mp4");
 //! ```
 
+mod animation;
 mod asset;
 mod build;
 mod convert;
@@ -32,6 +33,7 @@ mod setting;
 mod text;
 mod value;
 
+pub use animation::{AnimationId, AnimationMode, Keyframe, PropertyAnimation};
 pub use asset::{AssetError, AssetSource};
 pub use build::{
     AddedObject, BLOOM_MATERIALS, BloomInfo, BuildOptions, MAX_PARENT_DEPTH, PASSTHROUGH_MATERIAL,

@@ -1451,6 +1451,52 @@ fn passthrough_images() {
     assert!(p.image_passes(ObjectIndex::new(0)).unwrap().draws);
 }
 
+#[test]
+fn chain_of_a_visibility_combination_and_togglable_effects() {
+    let objects = img_obj(
+        r#", "effects": [
+            { "file": "effects/blur/effect.json", "visible": { "value": false, "user": "showclock" } },
+            { "file": "effects/blur/effect.json", "visible": true }
+        ]"#,
+    );
+    let f = base_files(&scene_with(ortho(), &objects));
+    let mut p = load_with(&f, &["showclock=0"]);
+    p.build(&f, &BuildOptions::new(1920, 1080)).unwrap();
+    let idx = ObjectIndex::new(0);
+    let effects = |p: &lumenwall_scene::Project, mask: &[bool]| {
+        let passes = p.image_passes_with(idx, &|i, _| mask[i as usize]).unwrap();
+        let mut seen: Vec<u32> = passes
+            .passes
+            .iter()
+            .filter_map(|d| d.effect.map(|e| e.0))
+            .collect();
+        seen.dedup();
+        seen
+    };
+    // Settings say: effect 0 hidden, effect 1 shown.
+    let by_settings = p.image_passes(idx).unwrap();
+    assert_eq!(effects(&p, &[false, true]), [1]);
+    assert_eq!(
+        by_settings.passes.len(),
+        p.image_passes_with(idx, &|i, _| i == 1)
+            .unwrap()
+            .passes
+            .len()
+    );
+    assert_eq!(effects(&p, &[true, true]), [0, 1]);
+    assert!(effects(&p, &[false, false]).is_empty());
+    // Only the effect bound to a property moves by itself; a script reaching effects adds
+    // the constant one.
+    let moving: Vec<u32> = p
+        .togglable_effects(idx, false)
+        .iter()
+        .map(|e| e.0)
+        .collect();
+    assert_eq!(moving, [0]);
+    let all: Vec<u32> = p.togglable_effects(idx, true).iter().map(|e| e.0).collect();
+    assert_eq!(all, [0, 1]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // §13: construction
 
@@ -1846,4 +1892,29 @@ fn user_shader_values_bind_material_constants() {
     // The constant follows the property.
     p.set_property_text("schemecolor", "1 0 0").unwrap();
     assert_eq!(p.value(color1).vec3(), Vec3::new(1.0, 0.0, 0.0));
+}
+
+#[test]
+fn animated_setting_keeps_its_timeline() {
+    let objects = img_obj(
+        r#", "alpha": { "value": 0.5, "animation": { "c0": [
+            { "frame": 0, "value": 1, "back": {"enabled": true, "x": -1, "y": 0}, "front": {"enabled": true, "x": 1, "y": 0} },
+            { "frame": 15, "value": 0, "back": {"enabled": true, "x": -1, "y": 0}, "front": {"enabled": true, "x": 1, "y": 0} }
+        ], "options": { "fps": 15, "length": 15, "mode": "loop", "startpaused": true } } }"#,
+    );
+    let f = base_files(&scene_with(ortho(), &objects));
+    let p = load_with(&f, &[]);
+    let id = image(&p, 0).alpha;
+    assert_eq!(
+        p.settings.value(id).float(),
+        0.5,
+        "the value is the one written in the file"
+    );
+    let a = p.settings.animation(id).expect("timeline");
+    assert_eq!((a.fps, a.length, a.start_paused), (15.0, 15.0, true));
+    assert_eq!(a.mode, lumenwall_scene::AnimationMode::Loop);
+    assert_eq!(a.channels.len(), 1);
+    assert!((a.value_at(7.5)[0] - 0.5).abs() < 1e-3);
+    // No animation key: no timeline.
+    assert!(p.settings.animation(image(&p, 0).brightness).is_none());
 }
