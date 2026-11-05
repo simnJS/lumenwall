@@ -730,6 +730,10 @@ pub(super) fn extend(scene: &mut Scene, device: &Device, ext: ScenePlanExtension
         scene.constants_len = old_len;
         scene.vertex_bytes = old_vertex_bytes;
         scene.depth_cleared.resize(old_targets, false);
+        // Layouts made for a removed stream must not serve a later stream of that index.
+        scene
+            .layout_index
+            .retain(|&(_, k), _| !matches!(k, LayoutKind::Stream(s) if s >= old_streams));
     }
     r
 }

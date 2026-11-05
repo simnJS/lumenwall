@@ -1552,8 +1552,10 @@ fn steady_state_frames() {
     for i in 1..3 {
         frame(&mut scene, &mut f, 0.25 + i as f32 * 0.001);
     }
+    // The scene counts every object it creates. (Process GPU memory is no witness here: the
+    // other tests of this binary create devices at the same time; the 100-pass measurement reads
+    // it alone in a child process.)
     let objects = scene.stats().objects_created;
-    let memory = d.memory().unwrap();
     for i in 0..10 {
         let s = frame(&mut scene, &mut f, 0.25 + i as f32 * 0.01);
         assert_eq!(s.constant_maps, 1, "one Map per frame (time changed)");
@@ -1565,12 +1567,6 @@ fn steady_state_frames() {
         scene.stats().objects_created,
         objects,
         "no Direct3D object created per frame"
-    );
-    let after = d.memory().unwrap();
-    assert_eq!(
-        (after.local.usage, after.non_local.usage),
-        (memory.local.usage, memory.non_local.usage),
-        "process GPU memory unchanged by frames"
     );
     let (w, data) = read(&d, &scene, full);
     assert!(
