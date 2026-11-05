@@ -13,6 +13,7 @@ use crate::settings::{Clamp, HwDecode, Layer, Scaling};
 
 const WALLPAPER: &str = "Wallpaper";
 const PERFORMANCE: &str = "Performance";
+const QUALITY: &str = "Quality";
 const SOUND: &str = "Sound";
 const SCREENSHOT: &str = "Screenshot";
 const CONTENT: &str = "Content";
@@ -150,6 +151,22 @@ pub(crate) struct CliSchema {
     /// Wallpaper Engine 'assets' folder (detected automatically by default).
     #[arg(long = "assets-dir", value_name = "DIR", help_heading = CONTENT)]
     assets_dir: Option<PathBuf>,
+
+    /// Anti-aliasing of the scene: off, x2, x4, x8 (the GPU may offer less).
+    #[arg(long = "msaa", value_name = "MODE", help_heading = QUALITY)]
+    msaa: Option<String>,
+
+    /// Texture size: full, half, quarter.
+    #[arg(long = "texture-resolution", value_name = "SIZE", help_heading = QUALITY)]
+    texture_resolution: Option<String>,
+
+    /// HDR render targets for the scenes that ask for them: off, scene.
+    #[arg(long = "hdr", value_name = "MODE", help_heading = QUALITY)]
+    hdr: Option<String>,
+
+    /// Render image chains and effects at the scene's own size even when it is shown smaller.
+    #[arg(long = "native-resolution", help_heading = QUALITY)]
+    native_resolution: bool,
 
     /// Do not create particle systems.
     #[arg(long = "disable-particles", help_heading = WALLPAPER_CONFIG)]

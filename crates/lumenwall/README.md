@@ -77,6 +77,10 @@ marked *target* apply to the output or span group named by the last `-r`/`--scre
 | `--screenshot` | | file | — | `.bmp`, `.png`, `.jpg`, `.jpeg` (case-sensitive) |
 | `--screenshot-delay` | | integer ≥ 0 | 5 | Frames before the capture, clamped to 5 |
 | `--assets-dir` | | dir | auto | Wallpaper Engine `assets` folder |
+| `--msaa` | | `off` `x2` `x4` `x8` | `off` | Anti-aliasing of the scene; the GPU may offer less (clamped to what it supports). Costs GPU time and memory |
+| `--texture-resolution` | | `full` `half` `quarter` | `full` | Texture size: half or quarter drops the top mip levels (less memory) |
+| `--hdr` | | `off` `scene` | `off` | `scene`: 16-bit float targets for the scenes that declare HDR (bloom keeps values above 1); `off`: 8-bit whatever the scene says |
+| `--native-resolution` | | | off | Render image chains and effects at the scene's own size even when it is shown smaller (sharper, more GPU time and memory) |
 | `--disable-particles` | | | off | No particle systems |
 | `--disable-mouse` | | | off | No mouse interaction |
 | `--disable-parallax` | | | off | No parallax |
@@ -126,6 +130,10 @@ hwdec = "auto"
 mouse = true
 parallax = true
 particles = true
+msaa = "off"                       # anti-aliasing: off, x2, x4, x8
+texture-resolution = "full"        # full, half, quarter
+hdr = "off"                        # off, scene
+native-resolution = false          # true: render at the scene's own size
 assets-dir = "/path/to/assets"
 screenshot = "/tmp/wall.png"
 screenshot-delay = 5
@@ -209,9 +217,24 @@ ReadDirectoryChangesW; no polling), so editor rename-replace and late creation a
 After 150 ms of quiet the file is re-read; unchanged bytes are ignored. A valid file
 rebuilds the plan and sends `Control::Reload { plan, changes }` to the engine with the
 `PlanChange` list (output mode, target added/removed/content/scaling, fps, audio, pause,
-input, particles, hwdec, layer, assets, properties, screenshot). An invalid file is logged
+input, particles, quality, hwdec, layer, assets, properties, screenshot). An invalid file is logged
 and the running settings stay; a removed file means defaults. The log level is reloaded;
 log file settings apply at next start. The directory must exist at startup to be watched.
+
+## Quality
+
+Four settings trade quality against cost (Wallpaper Engine's quality options): `--msaa`,
+`--texture-resolution`, `--hdr` and `--native-resolution`, or `msaa`, `texture-resolution`, `hdr`
+and `native-resolution` in the configuration file; the command line wins. A bad value is rejected
+with the list of accepted ones (a bad value in the file makes the whole file invalid, see above).
+The defaults (no anti-aliasing, full-size textures, 8-bit targets, scenes rendered at the size
+they are shown at) cost exactly what rendering cost before these settings existed. Changing a
+setting in the file reloads the running wallpapers, no restart needed. The engine logs the
+settings it builds a scene with when they differ from the defaults.
+
+The development variables `LUMENWALL_MSAA`, `LUMENWALL_TEXTURE_RESOLUTION`, `LUMENWALL_HDR` and
+`LUMENWALL_FULL_SIZE_CHAINS=1` stay as overrides for developers: when set (and valid) in the
+engine's environment they win, setting by setting, over the file and the command line.
 
 ## Pause on battery
 

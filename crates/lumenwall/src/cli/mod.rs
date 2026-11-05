@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use clap::CommandFactory;
+use lumenwall_engine::{HdrMode, Msaa, TextureResolution};
 
 use crate::settings::{
     Clamp, HwDecode, Layer, RenderDebug, Scaling, WallpaperRef, WallpaperSource, WindowGeometry,
@@ -145,6 +146,10 @@ pub struct CliSettings {
     pub screenshot_delay: Option<u32>,
     pub assets_dir: Option<PathBuf>,
     pub disable_particles: bool,
+    pub msaa: Option<Msaa>,
+    pub texture_resolution: Option<TextureResolution>,
+    pub hdr: Option<HdrMode>,
+    pub native_resolution: bool,
     pub disable_mouse: bool,
     pub disable_parallax: bool,
     pub list_properties: bool,
@@ -278,6 +283,10 @@ enum OptKind {
     ScreenshotDelay,
     AssetsDir,
     DisableParticles,
+    Msaa,
+    TextureResolution,
+    Hdr,
+    NativeResolution,
     DisableMouse,
     DisableParallax,
     ListProperties,
@@ -315,6 +324,10 @@ impl OptKind {
             "screenshot_delay" => Self::ScreenshotDelay,
             "assets_dir" => Self::AssetsDir,
             "disable_particles" => Self::DisableParticles,
+            "msaa" => Self::Msaa,
+            "texture_resolution" => Self::TextureResolution,
+            "hdr" => Self::Hdr,
+            "native_resolution" => Self::NativeResolution,
             "disable_mouse" => Self::DisableMouse,
             "disable_parallax" => Self::DisableParallax,
             "list_properties" => Self::ListProperties,
@@ -750,6 +763,20 @@ impl State {
             }
             OptKind::AssetsDir => settings.assets_dir = Some(non_empty_path(name, value)?),
             OptKind::DisableParticles => settings.disable_particles = true,
+            OptKind::Msaa => {
+                let text = utf8(name, &value)?;
+                settings.msaa = Some(text.parse().map_err(|e| invalid(name, &text, e))?);
+            }
+            OptKind::TextureResolution => {
+                let text = utf8(name, &value)?;
+                settings.texture_resolution =
+                    Some(text.parse().map_err(|e| invalid(name, &text, e))?);
+            }
+            OptKind::Hdr => {
+                let text = utf8(name, &value)?;
+                settings.hdr = Some(text.parse().map_err(|e| invalid(name, &text, e))?);
+            }
+            OptKind::NativeResolution => settings.native_resolution = true,
             OptKind::DisableMouse => settings.disable_mouse = true,
             OptKind::DisableParallax => settings.disable_parallax = true,
             OptKind::ListProperties => settings.list_properties = true,

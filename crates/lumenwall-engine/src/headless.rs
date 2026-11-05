@@ -8,10 +8,13 @@ use glam::Vec2;
 use lumenwall_render::compose::{ComposeSettings, Compositor};
 use lumenwall_render::math::{Pointer, UvRange, pointer_disabled};
 use lumenwall_render::stats::GpuTimer;
-use lumenwall_render::{ClampMode, ContextOptions, GpuContext, HeadlessOutput, ScalingMode};
+use lumenwall_render::{
+    ClampMode, ContextOptions, GpuContext, HeadlessOutput, QualitySettings, ScalingMode,
+};
 
 use crate::plan::DebugPlan;
-use crate::scene::{FrameState, SceneOptions, SceneStats, ScreenState, build_scene};
+use crate::plan::quality_with_overrides;
+use crate::scene::{FrameState, SceneOptions, SceneStats, ScreenState, build_scene_with};
 use crate::shaders::default_provider;
 use crate::wallpaper::Wallpaper;
 
@@ -58,6 +61,8 @@ pub struct HeadlessOptions {
     /// whatever else runs. `None` (default): frames back to back. The measured CPU split
     /// (update, encode, finish, submit) never includes the wait.
     pub pace: Option<f32>,
+    /// Quality settings; the development variables (`LUMENWALL_MSAA`, ...) override them.
+    pub quality: QualitySettings,
 }
 
 impl Default for HeadlessOptions {
@@ -84,6 +89,7 @@ impl Default for HeadlessOptions {
             audio_level: 0.0,
             scene_size_target: crate::scene::scene_size_target_forced(),
             pace: None,
+            quality: QualitySettings::default(),
         }
     }
 }
@@ -202,7 +208,8 @@ pub fn render_headless(
         return crate::web::render_headless_web(&ctx, &wp, opts, t0);
     }
     let mut shaders = default_provider();
-    let mut rt = build_scene(
+    let settings = quality_with_overrides(opts.quality, |name| std::env::var(name).ok());
+    let mut rt = build_scene_with(
         &ctx,
         &mut wp.project,
         &wp.vfs,
@@ -215,7 +222,17 @@ pub fn render_headless(
             debug: opts.debug.clone(),
             display: (!opts.scene_size_target).then_some(((opts.width, opts.height), opts.scaling)),
         },
+        &settings,
     )?;
+    if !settings.quality.is_default() {
+        tracing::info!(
+            "quality: msaa {}, textures {}, hdr {}, native resolution {}",
+            settings.quality.msaa,
+            settings.quality.texture_resolution,
+            settings.quality.hdr,
+            settings.quality.native_resolution
+        );
+    }
     let load_time = t0.elapsed();
     let out = HeadlessOutput::new(&ctx, opts.width, opts.height);
     let mut compositor = Compositor::new(&ctx);
