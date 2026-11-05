@@ -107,12 +107,16 @@ impl GpuTimer {
             let Some(frame) = slot.pending else { continue };
             let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
             let flags = D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32;
-            if !get_data(ctx, &slot.disjoint, &mut dj, flags).map_err(|e| device.error("GetData", &e))? {
+            if !get_data(ctx, &slot.disjoint, &mut dj, flags)
+                .map_err(|e| device.error("GetData", &e))?
+            {
                 continue;
             }
             let (mut t0, mut t1) = (0u64, 0u64);
-            let ready = get_data(ctx, &slot.begin, &mut t0, flags).map_err(|e| device.error("GetData", &e))?
-                && get_data(ctx, &slot.end, &mut t1, flags).map_err(|e| device.error("GetData", &e))?;
+            let ready = get_data(ctx, &slot.begin, &mut t0, flags)
+                .map_err(|e| device.error("GetData", &e))?
+                && get_data(ctx, &slot.end, &mut t1, flags)
+                    .map_err(|e| device.error("GetData", &e))?;
             if !ready {
                 continue;
             }

@@ -116,8 +116,13 @@ impl SwapChain {
         unsafe {
             device.context().ClearState();
             device.context().Flush();
-            self.swap
-                .ResizeBuffers(BUFFERS, size.0, size.1, SWAP_FORMAT, DXGI_SWAP_CHAIN_FLAG(0))
+            self.swap.ResizeBuffers(
+                BUFFERS,
+                size.0,
+                size.1,
+                SWAP_FORMAT,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
         }
         .map_err(|e| device.error("ResizeBuffers", &e))?;
         self.size = size;
@@ -128,13 +133,17 @@ impl SwapChain {
     /// flip model unbinds it).
     #[must_use]
     pub fn rtv(&self) -> &ID3D11RenderTargetView {
-        self.rtv.as_ref().expect("swap chain view exists between resizes")
+        self.rtv
+            .as_ref()
+            .expect("swap chain view exists between resizes")
     }
 
     /// The current back buffer (copies, readback in tests).
     #[must_use]
     pub fn back_buffer(&self) -> &ID3D11Texture2D {
-        self.back.as_ref().expect("swap chain buffer exists between resizes")
+        self.back
+            .as_ref()
+            .expect("swap chain buffer exists between resizes")
     }
 
     #[must_use]
@@ -158,7 +167,9 @@ impl SwapChain {
         let hr = unsafe { self.swap.Present(0, DXGI_PRESENT(0)) };
         match hr.0 {
             hresult::DXGI_STATUS_OCCLUDED => Ok(PresentStatus::Occluded),
-            code if code < 0 => Err(device.error("Present", &windows::core::Error::from_hresult(hr))),
+            code if code < 0 => {
+                Err(device.error("Present", &windows::core::Error::from_hresult(hr)))
+            }
             // S_OK and the other success codes (mode change in progress…).
             _ => Ok(PresentStatus::Presented),
         }
@@ -172,4 +183,3 @@ impl Drop for SwapChain {
         self.back = None;
     }
 }
-

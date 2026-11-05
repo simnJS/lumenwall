@@ -151,7 +151,9 @@ impl Device {
                     code: hresult::DXGI_ERROR_SDK_COMPONENT_MISSING,
                     ..
                 }) => {
-                    tracing::warn!("Direct3D debug layer not installed; creating the device without it");
+                    tracing::warn!(
+                        "Direct3D debug layer not installed; creating the device without it"
+                    );
                     create(&adapter, flags)
                 }
                 r => r,
@@ -163,9 +165,9 @@ impl Device {
         let device: ID3D11Device1 = device
             .cast()
             .map_err(|_| Error::Unsupported("Direct3D 11.1 runtime (ID3D11Device1)".into()))?;
-        let context: ID3D11DeviceContext1 = context
-            .cast()
-            .map_err(|_| Error::Unsupported("Direct3D 11.1 context (ID3D11DeviceContext1)".into()))?;
+        let context: ID3D11DeviceContext1 = context.cast().map_err(|_| {
+            Error::Unsupported("Direct3D 11.1 context (ID3D11DeviceContext1)".into())
+        })?;
         let mut opts = D3D11_FEATURE_DATA_D3D11_OPTIONS::default();
         // SAFETY: `opts` is the structure this feature fills, with its exact size.
         unsafe {
@@ -441,7 +443,9 @@ fn pick_adapter(factory: &IDXGIFactory2, choice: AdapterChoice) -> Result<IDXGIA
             }
             software.ok_or_else(|| not_found("no adapter at all"))
         }
-        AdapterChoice::HighPerformance => by_preference(factory, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE),
+        AdapterChoice::HighPerformance => {
+            by_preference(factory, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)
+        }
         AdapterChoice::MinimumPower => by_preference(factory, DXGI_GPU_PREFERENCE_MINIMUM_POWER),
         AdapterChoice::Luid(luid) => {
             let f4: IDXGIFactory4 = factory.cast().ctx("IDXGIFactory4")?;

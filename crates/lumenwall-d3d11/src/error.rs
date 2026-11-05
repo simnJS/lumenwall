@@ -164,7 +164,12 @@ mod tests {
     fn out_of_memory_is_not_a_device_loss() {
         for code in [hresult::E_OUTOFMEMORY, hresult::D3DERR_OUTOFVIDEOMEMORY] {
             let e = Error::from_hresult("CreateTexture2D", code);
-            assert!(matches!(e, Error::OutOfMemory { call: "CreateTexture2D" }));
+            assert!(matches!(
+                e,
+                Error::OutOfMemory {
+                    call: "CreateTexture2D"
+                }
+            ));
             assert!(!e.is_device_lost());
         }
         let e = Error::from_hresult("CreateBuffer", hresult::E_INVALIDARG);

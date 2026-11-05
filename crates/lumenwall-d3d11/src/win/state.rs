@@ -62,7 +62,11 @@ pub(crate) fn sampler_desc(key: SamplerKey) -> D3D11_SAMPLER_DESC {
         AddressV: a,
         AddressW: a,
         MipLODBias: 0.0,
-        MaxAnisotropy: if anisotropic { u32::from(key.anisotropy.min(16)) } else { 1 },
+        MaxAnisotropy: if anisotropic {
+            u32::from(key.anisotropy.min(16))
+        } else {
+            1
+        },
         ComparisonFunc: D3D11_COMPARISON_NEVER,
         // Transparent black, the wgpu path's border colour.
         BorderColor: [0.0; 4],
@@ -93,8 +97,12 @@ impl StateCache {
         }
         let mut s = None;
         // SAFETY: valid descriptor, live out-parameter.
-        unsafe { device.raw().CreateSamplerState(&sampler_desc(key), Some(&mut s)) }
-            .map_err(|e| device.error("CreateSamplerState", &e))?;
+        unsafe {
+            device
+                .raw()
+                .CreateSamplerState(&sampler_desc(key), Some(&mut s))
+        }
+        .map_err(|e| device.error("CreateSamplerState", &e))?;
         let s = out(s, "CreateSamplerState")?;
         self.samplers.insert(key, s.clone());
         Ok(s)

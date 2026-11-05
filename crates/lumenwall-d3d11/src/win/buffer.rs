@@ -20,7 +20,11 @@ use super::device::Device;
 use crate::error::{Error, Result, out};
 use crate::layout::{ConstantLayout, ConstantRegion};
 
-fn create_buffer(device: &Device, desc: &D3D11_BUFFER_DESC, init: Option<&[u8]>) -> Result<ID3D11Buffer> {
+fn create_buffer(
+    device: &Device,
+    desc: &D3D11_BUFFER_DESC,
+    init: Option<&[u8]>,
+) -> Result<ID3D11Buffer> {
     let data = init.map(|d| D3D11_SUBRESOURCE_DATA {
         pSysMem: d.as_ptr().cast(),
         SysMemPitch: 0,
@@ -129,8 +133,20 @@ impl ConstantArena {
         // counts are multiples of 16 constants by construction of `ConstantRegion`.
         unsafe {
             let ctx = device.context();
-            ctx.VSSetConstantBuffers1(slot, 1, Some(buffers.as_ptr()), Some(first.as_ptr()), Some(count.as_ptr()));
-            ctx.PSSetConstantBuffers1(slot, 1, Some(buffers.as_ptr()), Some(first.as_ptr()), Some(count.as_ptr()));
+            ctx.VSSetConstantBuffers1(
+                slot,
+                1,
+                Some(buffers.as_ptr()),
+                Some(first.as_ptr()),
+                Some(count.as_ptr()),
+            );
+            ctx.PSSetConstantBuffers1(
+                slot,
+                1,
+                Some(buffers.as_ptr()),
+                Some(first.as_ptr()),
+                Some(count.as_ptr()),
+            );
         }
     }
 
@@ -175,7 +191,8 @@ impl StaticBuffer {
         } else {
             bytes
         };
-        let len = u32::try_from(data.len()).map_err(|_| Error::InvalidData("buffer over 4 GiB".into()))?;
+        let len = u32::try_from(data.len())
+            .map_err(|_| Error::InvalidData("buffer over 4 GiB".into()))?;
         let bind = match kind {
             StaticBufferKind::Vertex => D3D11_BIND_VERTEX_BUFFER,
             StaticBufferKind::Index => D3D11_BIND_INDEX_BUFFER,
@@ -204,9 +221,17 @@ impl StaticBuffer {
     /// Binds this index buffer (16- or 32-bit indices) from `offset` bytes.
     pub fn bind_indices(&self, device: &Device, wide: bool, offset: u32) {
         debug_assert_eq!(self.kind, StaticBufferKind::Index);
-        let format = if wide { DXGI_FORMAT_R32_UINT } else { DXGI_FORMAT_R16_UINT };
+        let format = if wide {
+            DXGI_FORMAT_R32_UINT
+        } else {
+            DXGI_FORMAT_R16_UINT
+        };
         // SAFETY: an index buffer of this device.
-        unsafe { device.context().IASetIndexBuffer(&self.buffer, format, offset) };
+        unsafe {
+            device
+                .context()
+                .IASetIndexBuffer(&self.buffer, format, offset)
+        };
     }
 
     #[must_use]

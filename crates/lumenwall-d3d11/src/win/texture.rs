@@ -6,8 +6,8 @@ use std::ffi::c_void;
 
 use lumenwall_formats::tex::GpuFormat;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-    D3D11_TEXTURE3D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE, ID3D11Resource,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE3D_DESC,
+    D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE, ID3D11Resource,
     ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11Texture3D,
 };
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -134,7 +134,9 @@ impl Texture {
                         Some(&mut t),
                     )
                     .map_err(|e| device.error("CreateTexture2D", &e))?;
-                    out(t, "CreateTexture2D")?.cast().map_err(|e| device.error("cast", &e))?
+                    out(t, "CreateTexture2D")?
+                        .cast()
+                        .map_err(|e| device.error("cast", &e))?
                 }
                 Dimension::D3 => {
                     let mut t: Option<ID3D11Texture3D> = None;
@@ -154,7 +156,9 @@ impl Texture {
                         Some(&mut t),
                     )
                     .map_err(|e| device.error("CreateTexture3D", &e))?;
-                    out(t, "CreateTexture3D")?.cast().map_err(|e| device.error("cast", &e))?
+                    out(t, "CreateTexture3D")?
+                        .cast()
+                        .map_err(|e| device.error("cast", &e))?
                 }
             }
         };

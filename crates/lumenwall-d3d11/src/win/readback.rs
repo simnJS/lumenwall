@@ -41,21 +41,25 @@ pub struct Subresource {
 }
 
 /// Mip level `mip` of a single-sample 2D texture or volume.
-pub fn read_subresource(device: &Device, resource: &ID3D11Resource, mip: u32) -> Result<Subresource> {
+pub fn read_subresource(
+    device: &Device,
+    resource: &ID3D11Resource,
+    mip: u32,
+) -> Result<Subresource> {
     // SAFETY: plain query of a live resource.
     let kind = unsafe { resource.GetType() };
     let raw = device.raw();
     // A staging copy of the whole resource (copying one BC level into a texture of its own size
     // would break the "multiple of 4" rule of BC level 0).
-    let (staging, format, size) = if kind
-        == D3D11_RESOURCE_DIMENSION_TEXTURE2D
-    {
+    let (staging, format, size) = if kind == D3D11_RESOURCE_DIMENSION_TEXTURE2D {
         let t: ID3D11Texture2D = resource.cast().map_err(|e| device.error("cast", &e))?;
         let mut d = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: live out-parameter.
         unsafe { t.GetDesc(&mut d) };
         if d.SampleDesc.Count > 1 {
-            return Err(Error::Unsupported("reading a multisampled texture (resolve it first)".into()));
+            return Err(Error::Unsupported(
+                "reading a multisampled texture (resolve it first)".into(),
+            ));
         }
         if mip >= d.MipLevels {
             return Err(Error::InvalidData(format!("mip {mip} of {}", d.MipLevels)));
@@ -73,7 +77,9 @@ pub fn read_subresource(device: &Device, resource: &ID3D11Resource, mip: u32) ->
         // SAFETY: valid staging descriptor, live out-parameter.
         unsafe { raw.CreateTexture2D(&desc, None, Some(&mut s)) }
             .map_err(|e| device.error("CreateTexture2D", &e))?;
-        let s: ID3D11Resource = out(s, "CreateTexture2D")?.cast().map_err(|e| device.error("cast", &e))?;
+        let s: ID3D11Resource = out(s, "CreateTexture2D")?
+            .cast()
+            .map_err(|e| device.error("cast", &e))?;
         (s, d.Format, size)
     } else if kind == D3D11_RESOURCE_DIMENSION_TEXTURE3D {
         let t: ID3D11Texture3D = resource.cast().map_err(|e| device.error("cast", &e))?;
@@ -99,13 +105,17 @@ pub fn read_subresource(device: &Device, resource: &ID3D11Resource, mip: u32) ->
         // SAFETY: valid staging descriptor, live out-parameter.
         unsafe { raw.CreateTexture3D(&desc, None, Some(&mut s)) }
             .map_err(|e| device.error("CreateTexture3D", &e))?;
-        let s: ID3D11Resource = out(s, "CreateTexture3D")?.cast().map_err(|e| device.error("cast", &e))?;
+        let s: ID3D11Resource = out(s, "CreateTexture3D")?
+            .cast()
+            .map_err(|e| device.error("cast", &e))?;
         (s, d.Format, size)
     } else {
-        return Err(Error::Unsupported("reading back a buffer or 1D texture".into()));
+        return Err(Error::Unsupported(
+            "reading back a buffer or 1D texture".into(),
+        ));
     };
-    let (block, block_bytes) =
-        block_info(format).ok_or_else(|| Error::Unsupported(format!("reading format {}", format.0)))?;
+    let (block, block_bytes) = block_info(format)
+        .ok_or_else(|| Error::Unsupported(format!("reading format {}", format.0)))?;
     let row_bytes = size.0.div_ceil(block) * block_bytes;
     let rows = size.1.div_ceil(block);
     let ctx = device.context();
@@ -132,7 +142,10 @@ pub fn read_subresource(device: &Device, resource: &ID3D11Resource, mip: u32) ->
 }
 
 /// Level 0 of an RGBA8 or BGRA8 texture as RGBA8 rows (swap chain buffers are BGRA8).
-pub fn read_texture_rgba8(device: &Device, texture: &ID3D11Texture2D) -> Result<(u32, u32, Vec<u8>)> {
+pub fn read_texture_rgba8(
+    device: &Device,
+    texture: &ID3D11Texture2D,
+) -> Result<(u32, u32, Vec<u8>)> {
     let resource: ID3D11Resource = texture.cast().map_err(|e| device.error("cast", &e))?;
     let Subresource {
         mut data,
@@ -146,7 +159,12 @@ pub fn read_texture_rgba8(device: &Device, texture: &ID3D11Texture2D) -> Result<
                 px.swap(0, 2);
             }
         }
-        f => return Err(Error::Unsupported(format!("RGBA8 readback of format {}", f.0))),
+        f => {
+            return Err(Error::Unsupported(format!(
+                "RGBA8 readback of format {}",
+                f.0
+            )));
+        }
     }
     Ok((w, h, data))
 }

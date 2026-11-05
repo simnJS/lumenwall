@@ -178,19 +178,38 @@ mod tests {
     fn spec_blend_table() {
         let t = BlendKey::translucent();
         let (c, a) = t.blend.unwrap();
-        assert_eq!((c.src, c.dst, c.op), (BlendFactor::SrcAlpha, BlendFactor::InvSrcAlpha, BlendOp::Add));
+        assert_eq!(
+            (c.src, c.dst, c.op),
+            (
+                BlendFactor::SrcAlpha,
+                BlendFactor::InvSrcAlpha,
+                BlendOp::Add
+            )
+        );
         assert_eq!(c, a);
         let (c, _) = BlendKey::additive().blend.unwrap();
         assert_eq!((c.src, c.dst), (BlendFactor::SrcAlpha, BlendFactor::One));
         assert_eq!(BlendKey::OPAQUE.blend, None);
-        assert_eq!(BlendKey::OPAQUE.with_write_mask(write_mask::RGB).write_mask, 7);
+        assert_eq!(
+            BlendKey::OPAQUE.with_write_mask(write_mask::RGB).write_mask,
+            7
+        );
         assert_eq!(BlendKey::OPAQUE.with_write_mask(0xFF).write_mask, 15);
     }
 
     #[test]
     fn sampler_anisotropy_rule() {
-        assert_eq!(SamplerKey::new(AddressMode::Repeat, false, true, false).anisotropy, 8);
-        assert_eq!(SamplerKey::new(AddressMode::Repeat, true, true, false).anisotropy, 1);
-        assert_eq!(SamplerKey::new(AddressMode::Repeat, false, true, true).anisotropy, 1);
+        assert_eq!(
+            SamplerKey::new(AddressMode::Repeat, false, true, false).anisotropy,
+            8
+        );
+        assert_eq!(
+            SamplerKey::new(AddressMode::Repeat, true, true, false).anisotropy,
+            1
+        );
+        assert_eq!(
+            SamplerKey::new(AddressMode::Repeat, false, true, true).anisotropy,
+            1
+        );
     }
 }

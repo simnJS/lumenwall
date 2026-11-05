@@ -148,7 +148,11 @@ pub fn pitches(format: GpuFormat, width: u32, height: u32) -> (u32, u32) {
 
 /// Checks an upload against Direct3D 11's rules: level sizes `max(1, base >> k)`, exact byte
 /// counts, BC level 0 a multiple of 4, size limits of feature level 11_0.
-pub fn validate_upload(format: GpuFormat, dimension: Dimension, levels: &[MipLevel<'_>]) -> Result<()> {
+pub fn validate_upload(
+    format: GpuFormat,
+    dimension: Dimension,
+    levels: &[MipLevel<'_>],
+) -> Result<()> {
     let bad = |m: String| Err(Error::InvalidData(m));
     let Some(base) = levels.first() else {
         return bad("no mip level".into());
@@ -168,7 +172,9 @@ pub fn validate_upload(format: GpuFormat, dimension: Dimension, levels: &[MipLev
         _ => {}
     }
     if format.is_block_compressed() && (w % 4 != 0 || h % 4 != 0) {
-        return bad(format!("block-compressed level 0 of {w}×{h} is not a multiple of 4"));
+        return bad(format!(
+            "block-compressed level 0 of {w}×{h} is not a multiple of 4"
+        ));
     }
     let max_levels = 32 - w.max(h).max(d).leading_zeros();
     if levels.len() as u32 > max_levels {
@@ -213,9 +219,27 @@ mod tests {
         let a = l.alloc(4).unwrap();
         let b = l.alloc(256).unwrap();
         let c = l.alloc(257).unwrap();
-        assert_eq!(a, ConstantRegion { offset: 0, size: 256 });
-        assert_eq!(b, ConstantRegion { offset: 256, size: 256 });
-        assert_eq!(c, ConstantRegion { offset: 512, size: 512 });
+        assert_eq!(
+            a,
+            ConstantRegion {
+                offset: 0,
+                size: 256
+            }
+        );
+        assert_eq!(
+            b,
+            ConstantRegion {
+                offset: 256,
+                size: 256
+            }
+        );
+        assert_eq!(
+            c,
+            ConstantRegion {
+                offset: 512,
+                size: 512
+            }
+        );
         assert_eq!((c.first_constant(), c.num_constants()), (32, 32));
         assert_eq!(l.len(), 1024);
         assert_eq!(c.range(), 512..1024);
@@ -239,12 +263,37 @@ mod tests {
         let l1 = vec![0u8; 4 * 4 * 4];
         let l2 = vec![0u8; 2 * 2 * 4];
         let l3 = vec![0u8; 4];
-        let mip = |w, h, d, data: &'static [u8]| MipLevel { width: w, height: h, depth: d, data };
+        let mip = |w, h, d, data: &'static [u8]| MipLevel {
+            width: w,
+            height: h,
+            depth: d,
+            data,
+        };
         let levels = [
-            MipLevel { width: 8, height: 8, depth: 1, data: &l0 },
-            MipLevel { width: 4, height: 4, depth: 1, data: &l1 },
-            MipLevel { width: 2, height: 2, depth: 1, data: &l2 },
-            MipLevel { width: 1, height: 1, depth: 1, data: &l3 },
+            MipLevel {
+                width: 8,
+                height: 8,
+                depth: 1,
+                data: &l0,
+            },
+            MipLevel {
+                width: 4,
+                height: 4,
+                depth: 1,
+                data: &l1,
+            },
+            MipLevel {
+                width: 2,
+                height: 2,
+                depth: 1,
+                data: &l2,
+            },
+            MipLevel {
+                width: 1,
+                height: 1,
+                depth: 1,
+                data: &l3,
+            },
         ];
         validate_upload(GpuFormat::Rgba8Unorm, Dimension::D2, &levels).unwrap();
         assert!(validate_upload(GpuFormat::Rgba8Unorm, Dimension::D2, &levels[1..2]).is_ok());
@@ -261,19 +310,49 @@ mod tests {
         let bc1 = [0u8; 8];
         let bc2 = [0u8; 8];
         let bc = [
-            MipLevel { width: 8, height: 8, depth: 1, data: &bc0 },
-            MipLevel { width: 4, height: 4, depth: 1, data: &bc1 },
-            MipLevel { width: 2, height: 2, depth: 1, data: &bc2 },
+            MipLevel {
+                width: 8,
+                height: 8,
+                depth: 1,
+                data: &bc0,
+            },
+            MipLevel {
+                width: 4,
+                height: 4,
+                depth: 1,
+                data: &bc1,
+            },
+            MipLevel {
+                width: 2,
+                height: 2,
+                depth: 1,
+                data: &bc2,
+            },
         ];
         validate_upload(GpuFormat::Bc1RgbaUnorm, Dimension::D2, &bc).unwrap();
-        let odd = [MipLevel { width: 6, height: 8, depth: 1, data: &[0u8; 2 * 2 * 8] }];
+        let odd = [MipLevel {
+            width: 6,
+            height: 8,
+            depth: 1,
+            data: &[0u8; 2 * 2 * 8],
+        }];
         assert!(validate_upload(GpuFormat::Bc1RgbaUnorm, Dimension::D2, &odd).is_err());
         // Volumes: depth halves too; 2D refuses depth.
         let v0 = vec![0u8; 4 * 4 * 4 * 4];
         let v1 = vec![0u8; 2 * 2 * 2 * 4];
         let vol = [
-            MipLevel { width: 4, height: 4, depth: 4, data: &v0 },
-            MipLevel { width: 2, height: 2, depth: 2, data: &v1 },
+            MipLevel {
+                width: 4,
+                height: 4,
+                depth: 4,
+                data: &v0,
+            },
+            MipLevel {
+                width: 2,
+                height: 2,
+                depth: 2,
+                data: &v1,
+            },
         ];
         validate_upload(GpuFormat::Rgba8Unorm, Dimension::D3, &vol).unwrap();
         assert!(validate_upload(GpuFormat::Rgba8Unorm, Dimension::D2, &vol).is_err());

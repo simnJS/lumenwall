@@ -7,9 +7,7 @@
 use std::time::{Duration, Instant};
 
 use lumenwall_d3d11::layout::{CONSTANT_WINDOW_ALIGN, Dimension, MipLevel};
-use lumenwall_d3d11::windows::Win32::Graphics::Direct3D::{
-    D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-};
+use lumenwall_d3d11::windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use lumenwall_d3d11::windows::Win32::Graphics::Direct3D11::ID3D11Resource;
 use lumenwall_d3d11::windows::core::Interface;
 use lumenwall_d3d11::*;
@@ -28,7 +26,11 @@ fn device() -> Device {
     .expect("Direct3D 11 device")
 }
 
-fn program(device: &Device, wgsl: &str, cache: Option<&BytecodeCache>) -> (ShaderProgram, CacheOutcome) {
+fn program(
+    device: &Device,
+    wgsl: &str,
+    cache: Option<&BytecodeCache>,
+) -> (ShaderProgram, CacheOutcome) {
     let module = naga::front::wgsl::parse_str(wgsl).expect("test WGSL");
     let hlsl = hlsl::translate(&module, "vs_main", "fs_main").expect("HLSL");
     compile_program(device, &hlsl, cache, None, CompileOptions::default()).expect("program")
@@ -43,7 +45,11 @@ fn unorm(v: u8) -> f32 {
 fn device_on_warp_or_hardware() {
     let d = device();
     let caps = d.caps();
-    assert!(caps.feature_level >= 0xb000, "feature level {:#x}", caps.feature_level);
+    assert!(
+        caps.feature_level >= 0xb000,
+        "feature level {:#x}",
+        caps.feature_level
+    );
     assert!(caps.constant_buffer_offsetting);
     assert!(!d.info().name.is_empty());
     d.check_lost().unwrap();
@@ -58,7 +64,10 @@ fn clear_present_readback_and_resize() {
     let d = device();
     let window = OffscreenWindow::new(64, 48).unwrap();
     let mut swap = SwapChain::for_hwnd(&d, window.hwnd(), (64, 48)).unwrap();
-    for (size, rgba) in [((64, 48), [51u8, 102, 204, 255]), ((80, 40), [204, 153, 51, 255])] {
+    for (size, rgba) in [
+        ((64, 48), [51u8, 102, 204, 255]),
+        ((80, 40), [204, 153, 51, 255]),
+    ] {
         if size != swap.size() {
             window.resize(size.0, size.1).unwrap();
             swap.resize(&d, size).unwrap();
@@ -78,7 +87,10 @@ fn clear_present_readback_and_resize() {
             &pixels[..4]
         );
         let status = swap.present(&d).unwrap();
-        assert!(matches!(status, PresentStatus::Presented | PresentStatus::Occluded));
+        assert!(matches!(
+            status,
+            PresentStatus::Presented | PresentStatus::Occluded
+        ));
         window.pump();
     }
     d.trim().unwrap();
@@ -86,7 +98,9 @@ fn clear_present_readback_and_resize() {
 
 /// Bytes `0, 1, 2…` (wrapping), seeded so levels differ.
 fn pattern(len: usize, seed: u8) -> Vec<u8> {
-    (0..len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect()
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed))
+        .collect()
 }
 
 #[test]
@@ -107,7 +121,9 @@ fn every_texel_format_round_trips_with_mips_and_volumes() {
     ];
     for format in formats {
         // 16×8 with every level down to 1×1 (BC levels below 4×4 are still one block).
-        let sizes: Vec<(u32, u32)> = (0..5).map(|k| ((16u32 >> k).max(1), (8u32 >> k).max(1))).collect();
+        let sizes: Vec<(u32, u32)> = (0..5)
+            .map(|k| ((16u32 >> k).max(1), (8u32 >> k).max(1)))
+            .collect();
         let data: Vec<Vec<u8>> = sizes
             .iter()
             .enumerate()
@@ -236,11 +252,19 @@ fn pipeline_binds_arena_windows_textures_samplers_and_defaults() {
     // color (0..16), offset (16..24), scale (24), probe (32..44), after (44).
     arena.write(pass, 0, &f32s(&[9.0, 9.0, 9.0, 9.0])).unwrap();
     arena.write(pass, 16, &f32s(&[0.0, 0.0, 1.0])).unwrap();
-    arena.write(pass, 32, &f32s(&[7.0, 7.0, 7.0, unorm(102)])).unwrap();
+    arena
+        .write(pass, 32, &f32s(&[7.0, 7.0, 7.0, unorm(102)]))
+        .unwrap();
     arena.write(frame, 0, &f32s(&[unorm(153)])).unwrap();
-    assert!(arena.write(pass, 250, &[0; 8]).is_err(), "writes stay in their window");
+    assert!(
+        arena.write(pass, 250, &[0; 8]).is_err(),
+        "writes stay in their window"
+    );
     assert!(arena.upload(&d).unwrap());
-    assert!(!arena.upload(&d).unwrap(), "nothing changed, nothing mapped");
+    assert!(
+        !arena.upload(&d).unwrap(),
+        "nothing changed, nothing mapped"
+    );
 
     // Vertices in a shared arena at a non-zero offset; unfed input from the defaults buffer.
     let mut vertices = LinearArena::new();
@@ -265,10 +289,16 @@ fn pipeline_binds_arena_windows_textures_samplers_and_defaults() {
     let elements = prog.complete_elements(&fed, 1);
     assert_eq!(elements.len(), 3);
     let layout_obj = create_input_layout(&d, &prog, &elements).unwrap();
-    assert!(create_input_layout(&d, &prog, &fed).is_err(), "a missing input is refused");
+    assert!(
+        create_input_layout(&d, &prog, &fed).is_err(),
+        "a missing input is refused"
+    );
 
     // 2×2 texture, red channel 200/100/50/25 from the top-left, alpha 255; nearest, clamp.
-    let texels: Vec<u8> = [200u8, 100, 50, 25].iter().flat_map(|&r| [r, 0, 0, 255]).collect();
+    let texels: Vec<u8> = [200u8, 100, 50, 25]
+        .iter()
+        .flat_map(|&r| [r, 0, 0, 255])
+        .collect();
     let tex = Texture::new(
         &d,
         GpuFormat::Rgba8Unorm,
@@ -361,7 +391,8 @@ impl Solid {
         // SAFETY: objects of this device.
         unsafe {
             d.context().IASetInputLayout(self.layout.as_ref());
-            d.context().IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            d.context()
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             d.context().Draw(vertices, 0);
         }
     }
@@ -375,7 +406,9 @@ fn msaa_resolve_gives_partial_coverage() {
     let mut layout = ConstantLayout::new();
     let w = layout.alloc(32).unwrap();
     let mut arena = ConstantArena::new(&d, &layout).unwrap();
-    arena.write(w, 0, &f32s(&[1.0, 1.0, 1.0, 1.0, 0.5])).unwrap();
+    arena
+        .write(w, 0, &f32s(&[1.0, 1.0, 1.0, 1.0, 0.5]))
+        .unwrap();
     arena.upload(&d).unwrap();
     let mut states = StateCache::new();
     let mut levels = Vec::new();
@@ -416,7 +449,13 @@ fn msaa_resolve_gives_partial_coverage() {
         levels[1]
     );
     assert!(matches!(
-        RenderTarget::new(&d, TargetDesc { samples: 3, ..TargetDesc::new((4, 4)) }),
+        RenderTarget::new(
+            &d,
+            TargetDesc {
+                samples: 3,
+                ..TargetDesc::new((4, 4))
+            }
+        ),
         Err(Error::Unsupported(_))
     ));
 }
@@ -424,20 +463,51 @@ fn msaa_resolve_gives_partial_coverage() {
 #[test]
 fn depth_test_keeps_the_nearest_whatever_the_order() {
     let d = device();
-    let full = solid(&d, &[-1.0, -1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0, 1.0, 0.0, 1.0, -1.0, 0.0]);
+    let full = solid(
+        &d,
+        &[
+            -1.0, -1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0, 1.0, 0.0, 1.0,
+            -1.0, 0.0,
+        ],
+    );
     let mut layout = ConstantLayout::new();
     let near = layout.alloc(32).unwrap();
     let far = layout.alloc(32).unwrap();
     let mut arena = ConstantArena::new(&d, &layout).unwrap();
-    arena.write(near, 0, &f32s(&[1.0, 0.0, 0.0, 1.0, 0.2])).unwrap();
-    arena.write(far, 0, &f32s(&[0.0, 1.0, 0.0, 1.0, 0.6])).unwrap();
+    arena
+        .write(near, 0, &f32s(&[1.0, 0.0, 0.0, 1.0, 0.2]))
+        .unwrap();
+    arena
+        .write(far, 0, &f32s(&[0.0, 1.0, 0.0, 1.0, 0.6]))
+        .unwrap();
     arena.upload(&d).unwrap();
     let mut states = StateCache::new();
-    let depth = states.depth(&d, DepthKey { test: true, write: true }).unwrap();
-    let raster = states
-        .raster(&d, RasterKey { depth_clip: true, ..RasterKey::default() })
+    let depth = states
+        .depth(
+            &d,
+            DepthKey {
+                test: true,
+                write: true,
+            },
+        )
         .unwrap();
-    let target = RenderTarget::new(&d, TargetDesc { depth: true, ..TargetDesc::new((4, 4)) }).unwrap();
+    let raster = states
+        .raster(
+            &d,
+            RasterKey {
+                depth_clip: true,
+                ..RasterKey::default()
+            },
+        )
+        .unwrap();
+    let target = RenderTarget::new(
+        &d,
+        TargetDesc {
+            depth: true,
+            ..TargetDesc::new((4, 4))
+        },
+    )
+    .unwrap();
     assert!(target.depth().is_some());
     for order in [[near, far], [far, near]] {
         target.bind(&d);
@@ -451,7 +521,11 @@ fn depth_test_keeps_the_nearest_whatever_the_order() {
             full.draw(&d, &arena, w, 6);
         }
         let (_, _, px) = read_texture_rgba8(&d, target.texture()).unwrap();
-        assert!(px.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]), "{:?}", &px[..4]);
+        assert!(
+            px.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]),
+            "{:?}",
+            &px[..4]
+        );
     }
 }
 
@@ -465,8 +539,18 @@ fn state_cache_returns_one_object_per_key() {
     assert_eq!(a.as_raw(), b.as_raw());
     assert_ne!(a.as_raw(), c.as_raw());
     let k = SamplerKey::new(AddressMode::Border, false, true, false);
-    assert_eq!(s.sampler(&d, k).unwrap().as_raw(), s.sampler(&d, k).unwrap().as_raw());
-    s.raster(&d, RasterKey { cull: Cull::Back, ..RasterKey::default() }).unwrap();
+    assert_eq!(
+        s.sampler(&d, k).unwrap().as_raw(),
+        s.sampler(&d, k).unwrap().as_raw()
+    );
+    s.raster(
+        &d,
+        RasterKey {
+            cull: Cull::Back,
+            ..RasterKey::default()
+        },
+    )
+    .unwrap();
     s.depth(&d, DepthKey::default()).unwrap();
     assert_eq!(s.counts(), (1, 2, 1, 1));
 }

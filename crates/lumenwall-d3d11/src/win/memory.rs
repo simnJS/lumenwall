@@ -3,8 +3,8 @@
 //! memory the GPU maps (what Task Manager shows as shared GPU memory on a discrete GPU).
 
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
-    DXGI_QUERY_VIDEO_MEMORY_INFO,
+    DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+    DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
 };
 
 use super::device::Device;

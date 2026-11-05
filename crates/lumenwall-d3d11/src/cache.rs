@@ -67,7 +67,12 @@ impl CacheKey {
     /// translation, transforms) changes the key. Costs the naga → HLSL step on every load
     /// (2–4 ms per scene, tools/d3d11-probe).
     #[must_use]
-    pub fn for_hlsl(source: &str, vertex_entry: &str, fragment_entry: &str, options: CompileOptions) -> Self {
+    pub fn for_hlsl(
+        source: &str,
+        vertex_entry: &str,
+        fragment_entry: &str,
+        options: CompileOptions,
+    ) -> Self {
         let mut h = Self::hasher(options);
         h.update(b"hlsl\0");
         for part in [source, vertex_entry, fragment_entry] {
@@ -143,9 +148,11 @@ impl BytecodeCache {
     pub fn store(&self, key: &CacheKey, code: &Bytecode) -> io::Result<()> {
         let data = encode(code)?;
         let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = self
-            .dir
-            .join(format!(".{}.{}.{n}.tmp", key.file_name(), std::process::id()));
+        let tmp = self.dir.join(format!(
+            ".{}.{}.{n}.tmp",
+            key.file_name(),
+            std::process::id()
+        ));
         fs::write(&tmp, &data)?;
         let r = fs::rename(&tmp, self.path(key));
         if r.is_err() {
@@ -167,7 +174,8 @@ impl BytecodeCache {
 }
 
 fn encode(code: &Bytecode) -> io::Result<Vec<u8>> {
-    let vs_len = u32::try_from(code.vs.len()).map_err(|_| io::Error::other("bytecode too large"))?;
+    let vs_len =
+        u32::try_from(code.vs.len()).map_err(|_| io::Error::other("bytecode too large"))?;
     let mut payload = Vec::with_capacity(4 + code.vs.len() + code.ps.len());
     payload.extend_from_slice(&vs_len.to_le_bytes());
     payload.extend_from_slice(&code.vs);
@@ -215,7 +223,12 @@ mod tests {
     fn round_trip_and_miss() {
         let dir = tempfile::tempdir().unwrap();
         let cache = BytecodeCache::new(dir.path().join("dxbc")).unwrap();
-        let key = CacheKey::for_hlsl("float4 main() : SV_Target { return 0; }", "vs", "ps", CompileOptions::default());
+        let key = CacheKey::for_hlsl(
+            "float4 main() : SV_Target { return 0; }",
+            "vs",
+            "ps",
+            CompileOptions::default(),
+        );
         assert_eq!(cache.load(&key), None);
         cache.store(&key, &code()).unwrap();
         assert_eq!(cache.load(&key), Some(code()));
@@ -271,7 +284,10 @@ mod tests {
             CacheKey::for_hlsl("ab", "c", "d", o),
             CacheKey::for_hlsl("a", "bc", "d", o)
         );
-        assert_ne!(base, CacheKey::for_hlsl("src", "vs", "ps", CompileOptions { flags: 0 }));
+        assert_ne!(
+            base,
+            CacheKey::for_hlsl("src", "vs", "ps", CompileOptions { flags: 0 })
+        );
         assert_ne!(
             CacheKey::for_identity(b"src", o),
             CacheKey::for_hlsl("src", "", "", o)

@@ -163,8 +163,12 @@ impl RenderTarget {
         let texture = texture2d(device, desc.size, format, 1, rt)?;
         let mut srv = None;
         // SAFETY: shader-resource bind flag set above.
-        unsafe { device.raw().CreateShaderResourceView(&texture, None, Some(&mut srv)) }
-            .map_err(|e| device.error("CreateShaderResourceView", &e))?;
+        unsafe {
+            device
+                .raw()
+                .CreateShaderResourceView(&texture, None, Some(&mut srv))
+        }
+        .map_err(|e| device.error("CreateShaderResourceView", &e))?;
         let rtv_single = rtv(device, &texture)?;
         let msaa = if desc.samples > 1 {
             let t = texture2d(
@@ -189,8 +193,12 @@ impl RenderTarget {
             )?;
             let mut dsv = None;
             // SAFETY: depth-stencil bind flag set above.
-            unsafe { device.raw().CreateDepthStencilView(&texture, None, Some(&mut dsv)) }
-                .map_err(|e| device.error("CreateDepthStencilView", &e))?;
+            unsafe {
+                device
+                    .raw()
+                    .CreateDepthStencilView(&texture, None, Some(&mut dsv))
+            }
+            .map_err(|e| device.error("CreateDepthStencilView", &e))?;
             Some(DepthBuffer {
                 texture,
                 dsv: out(dsv, "CreateDepthStencilView")?,
@@ -247,10 +255,9 @@ impl RenderTarget {
         let views = [Some(self.draw_view().clone())];
         // SAFETY: views of this device; the viewport is a plain value.
         unsafe {
-            device.context().OMSetRenderTargets(
-                Some(&views),
-                self.depth.as_ref().map(|d| &d.dsv),
-            );
+            device
+                .context()
+                .OMSetRenderTargets(Some(&views), self.depth.as_ref().map(|d| &d.dsv));
             device.context().RSSetViewports(Some(&[D3D11_VIEWPORT {
                 TopLeftX: 0.0,
                 TopLeftY: 0.0,
@@ -266,7 +273,9 @@ impl RenderTarget {
     pub fn clear(&self, device: &Device, color: [f32; 4]) {
         // SAFETY: views of this device.
         unsafe {
-            device.context().ClearRenderTargetView(self.draw_view(), &color);
+            device
+                .context()
+                .ClearRenderTargetView(self.draw_view(), &color);
             if let Some(d) = &self.depth {
                 device
                     .context()
@@ -281,9 +290,13 @@ impl RenderTarget {
         if let Some((msaa, _)) = &self.msaa {
             // SAFETY: same size and format, single-sample destination.
             unsafe {
-                device
-                    .context()
-                    .ResolveSubresource(&self.texture, 0, msaa, 0, self.desc.format.dxgi());
+                device.context().ResolveSubresource(
+                    &self.texture,
+                    0,
+                    msaa,
+                    0,
+                    self.desc.format.dxgi(),
+                );
             }
         }
     }

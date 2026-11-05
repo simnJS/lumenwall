@@ -222,34 +222,35 @@ pub fn vertex_inputs(module: &Module, entry: &str) -> Result<Vec<VertexInput>> {
         .find(|ep| ep.name == entry && ep.stage == ShaderStage::Vertex)
         .ok_or_else(|| Error::Shader(format!("no vertex entry point `{entry}`")))?;
     let mut out = Vec::new();
-    let mut push = |name: Option<&str>, ty: naga::Handle<naga::Type>, location: u32| -> Result<()> {
-        let (scalar, components) = match module.types[ty].inner {
-            TypeInner::Scalar(s) => (s, 1),
-            TypeInner::Vector { size, scalar } => (scalar, size as u32),
-            ref other => {
-                return Err(Error::Shader(format!(
-                    "vertex input at location {location} has type {other:?}"
-                )));
-            }
+    let mut push =
+        |name: Option<&str>, ty: naga::Handle<naga::Type>, location: u32| -> Result<()> {
+            let (scalar, components) = match module.types[ty].inner {
+                TypeInner::Scalar(s) => (s, 1),
+                TypeInner::Vector { size, scalar } => (scalar, size as u32),
+                ref other => {
+                    return Err(Error::Shader(format!(
+                        "vertex input at location {location} has type {other:?}"
+                    )));
+                }
+            };
+            let kind = match scalar.kind {
+                ScalarKind::Float => InputKind::Float,
+                ScalarKind::Sint => InputKind::Sint,
+                ScalarKind::Uint => InputKind::Uint,
+                k => {
+                    return Err(Error::Shader(format!(
+                        "vertex input at location {location} has scalar kind {k:?}"
+                    )));
+                }
+            };
+            out.push(VertexInput {
+                location,
+                name: name.unwrap_or_default().to_owned(),
+                kind,
+                components,
+            });
+            Ok(())
         };
-        let kind = match scalar.kind {
-            ScalarKind::Float => InputKind::Float,
-            ScalarKind::Sint => InputKind::Sint,
-            ScalarKind::Uint => InputKind::Uint,
-            k => {
-                return Err(Error::Shader(format!(
-                    "vertex input at location {location} has scalar kind {k:?}"
-                )));
-            }
-        };
-        out.push(VertexInput {
-            location,
-            name: name.unwrap_or_default().to_owned(),
-            kind,
-            components,
-        });
-        Ok(())
-    };
     for arg in &ep.function.arguments {
         match (&arg.binding, &module.types[arg.ty].inner) {
             (Some(Binding::Location { location, .. }), _) => {
@@ -373,7 +374,10 @@ struct VsIn { @location(0) a_Position: vec3<f32>, @location(1) a_TexCoord: vec2<
             s.lines()
                 .any(|l| l.starts_with(prefix) && l.ends_with(&format!(": register({register});")))
         };
-        assert!(declared("cbuffer pass_block", "b0") || s.contains("register(b0)"), "{s}");
+        assert!(
+            declared("cbuffer pass_block", "b0") || s.contains("register(b0)"),
+            "{s}"
+        );
         assert!(s.contains("register(b1)"), "{s}");
         assert!(declared("Texture2D<float4> g_Texture0", "t0"), "{s}");
         assert!(declared("Texture3D<float4> g_Texture3", "t3"), "{s}");
@@ -421,11 +425,24 @@ struct VsIn { @location(0) a_Position: vec3<f32>, @location(1) a_TexCoord: vec2<
     fn bindings_outside_the_contract_are_refused() {
         let src = SHADER.replace("@group(1) @binding(6)", "@group(2) @binding(6)");
         let e = translate(&module(&src), "vs_main", "fs_main").unwrap_err();
-        assert!(e.to_string().contains("outside the binding contract"), "{e}");
-        let src = SHADER.replace("@group(1) @binding(0) var g_Texture0", "@group(1) @binding(1) var g_Texture0")
-            .replace("@group(1) @binding(1) var g_Texture0Sampler", "@group(1) @binding(0) var g_Texture0Sampler");
+        assert!(
+            e.to_string().contains("outside the binding contract"),
+            "{e}"
+        );
+        let src = SHADER
+            .replace(
+                "@group(1) @binding(0) var g_Texture0",
+                "@group(1) @binding(1) var g_Texture0",
+            )
+            .replace(
+                "@group(1) @binding(1) var g_Texture0Sampler",
+                "@group(1) @binding(0) var g_Texture0Sampler",
+            );
         let e = translate(&module(&src), "vs_main", "fs_main").unwrap_err();
-        assert!(e.to_string().contains("outside the binding contract"), "{e}");
+        assert!(
+            e.to_string().contains("outside the binding contract"),
+            "{e}"
+        );
     }
 
     #[test]

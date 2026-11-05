@@ -25,9 +25,7 @@ fn blob_bytes(b: &ID3DBlob) -> &[u8] {
 
 /// Compiles one entry point (`vs_5_0`, `ps_5_0`).
 pub fn compile_hlsl(source: &str, entry: &str, profile: &str, flags: u32) -> Result<Vec<u8>> {
-    let c = |s: &str| {
-        std::ffi::CString::new(s).map_err(|_| Error::Shader(format!("NUL in {s:?}")))
-    };
+    let c = |s: &str| std::ffi::CString::new(s).map_err(|_| Error::Shader(format!("NUL in {s:?}")));
     let (entry_c, profile_c) = (c(entry)?, c(profile)?);
     let mut code = None;
     let mut errors = None;
@@ -94,7 +92,12 @@ pub fn compile_program(
     options: CompileOptions,
 ) -> Result<(ShaderProgram, CacheOutcome)> {
     let key = key.unwrap_or_else(|| {
-        CacheKey::for_hlsl(&program.source, &program.vertex_entry, &program.fragment_entry, options)
+        CacheKey::for_hlsl(
+            &program.source,
+            &program.vertex_entry,
+            &program.fragment_entry,
+            options,
+        )
     });
     let cached = cache.and_then(|c| c.load(&key));
     let (code, outcome) = match cached {
@@ -102,8 +105,18 @@ pub fn compile_program(
         None => {
             let t = Instant::now();
             let code = Bytecode {
-                vs: compile_hlsl(&program.source, &program.vertex_entry, CompileOptions::VERTEX_PROFILE, options.flags)?,
-                ps: compile_hlsl(&program.source, &program.fragment_entry, CompileOptions::PIXEL_PROFILE, options.flags)?,
+                vs: compile_hlsl(
+                    &program.source,
+                    &program.vertex_entry,
+                    CompileOptions::VERTEX_PROFILE,
+                    options.flags,
+                )?,
+                ps: compile_hlsl(
+                    &program.source,
+                    &program.fragment_entry,
+                    CompileOptions::PIXEL_PROFILE,
+                    options.flags,
+                )?,
             };
             tracing::debug!("D3DCompile: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
             match cache {
@@ -176,7 +189,11 @@ impl ShaderProgram {
     /// slot `defaults_slot` (bound with stride 0): an unfed input reads `(0, 0, 0, 1)`, as on
     /// the wgpu path.
     #[must_use]
-    pub fn complete_elements(&self, fed: &[VertexElement], defaults_slot: u32) -> Vec<VertexElement> {
+    pub fn complete_elements(
+        &self,
+        fed: &[VertexElement],
+        defaults_slot: u32,
+    ) -> Vec<VertexElement> {
         let mut out = fed.to_vec();
         for input in &self.inputs {
             if fed.iter().any(|e| e.location == input.location) {

@@ -56,7 +56,11 @@ mod win {
                 .open(&path)
                 .map_err(|e| format!("{} is held by another GPU user ({e})", path.display()))?;
             use std::io::Write;
-            let _ = writeln!(f, "Luna lumenwall-d3d11 clear_present pid {}", std::process::id());
+            let _ = writeln!(
+                f,
+                "Luna lumenwall-d3d11 clear_present pid {}",
+                std::process::id()
+            );
             Ok(Self(path))
         }
     }
@@ -82,9 +86,18 @@ mod win {
             // SAFETY: live out-parameters; static wide counter paths.
             unsafe {
                 if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0
-                    || PdhAddEnglishCounterW(query, w!("\\GPU Process Memory(*)\\Shared Usage"), 0, &mut shared) != 0
-                    || PdhAddEnglishCounterW(query, w!("\\GPU Process Memory(*)\\Dedicated Usage"), 0, &mut dedicated)
-                        != 0
+                    || PdhAddEnglishCounterW(
+                        query,
+                        w!("\\GPU Process Memory(*)\\Shared Usage"),
+                        0,
+                        &mut shared,
+                    ) != 0
+                    || PdhAddEnglishCounterW(
+                        query,
+                        w!("\\GPU Process Memory(*)\\Dedicated Usage"),
+                        0,
+                        &mut dedicated,
+                    ) != 0
                 {
                     return Err("PDH counters unavailable".into());
                 }
@@ -107,16 +120,24 @@ mod win {
         fn sum(&self, counter: PDH_HCOUNTER) -> u64 {
             let (mut size, mut count) = (0u32, 0u32);
             // SAFETY: first call asks for the size (PDH_MORE_DATA).
-            let status =
-                unsafe { PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut size, &mut count, None) };
+            let status = unsafe {
+                PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut size, &mut count, None)
+            };
             if status != 0x8000_07D2 {
                 return 0; // no instance of this process yet
             }
             let mut buf = vec![0u64; (size as usize).div_ceil(8)];
             let items = buf.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
             // SAFETY: `buf` holds `size` 8-aligned bytes as requested.
-            if unsafe { PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut size, &mut count, Some(items)) }
-                != 0
+            if unsafe {
+                PdhGetFormattedCounterArrayW(
+                    counter,
+                    PDH_FMT_LARGE,
+                    &mut size,
+                    &mut count,
+                    Some(items),
+                )
+            } != 0
             {
                 return 0;
             }
@@ -149,15 +170,26 @@ mod win {
             "| {name} | {:.2} | {:.2} | {} | {} |",
             shared as f64 / MIB,
             dedicated as f64 / MIB,
-            qvmi.map_or("–".into(), |m| format!("{:.2}", m.non_local.usage as f64 / MIB)),
-            qvmi.map_or("–".into(), |m| format!("{:.2}", m.local.usage as f64 / MIB)),
+            qvmi.map_or("–".into(), |m| format!(
+                "{:.2}",
+                m.non_local.usage as f64 / MIB
+            )),
+            qvmi.map_or("–".into(), |m| format!(
+                "{:.2}",
+                m.local.usage as f64 / MIB
+            )),
         );
     }
 
     fn colour(frame: u32) -> [u8; 4] {
         // Exact UNORM values (multiples of 51) that change every frame.
         let v = [0u8, 51, 102, 153, 204, 255];
-        [v[(frame % 6) as usize], v[((frame / 6) % 6) as usize], 102, 255]
+        [
+            v[(frame % 6) as usize],
+            v[((frame / 6) % 6) as usize],
+            102,
+            255,
+        ]
     }
 
     fn clear(device: &Device, swap: &SwapChain, rgba: [u8; 4]) {
@@ -170,10 +202,18 @@ mod win {
     }
 
     fn check(device: &Device, swap: &SwapChain, rgba: [u8; 4]) -> std::result::Result<(), String> {
-        let (w, h, px) = read_texture_rgba8(device, swap.back_buffer()).map_err(|e| e.to_string())?;
+        let (w, h, px) =
+            read_texture_rgba8(device, swap.back_buffer()).map_err(|e| e.to_string())?;
         let bad = px.as_chunks::<4>().0.iter().filter(|p| **p != rgba).count();
-        println!("readback {w}×{h}: {} pixels, {bad} differ from {rgba:?}", w * h);
-        if bad == 0 { Ok(()) } else { Err(format!("{bad} wrong pixels")) }
+        println!(
+            "readback {w}×{h}: {} pixels, {bad} differ from {rgba:?}",
+            w * h
+        );
+        if bad == 0 {
+            Ok(())
+        } else {
+            Err(format!("{bad} wrong pixels"))
+        }
     }
 
     pub fn run() -> std::result::Result<(), String> {
@@ -184,11 +224,19 @@ mod win {
         while let Some(a) = args.next() {
             match a.as_str() {
                 "--warp" => warp = true,
-                "--seconds" => seconds = args.next().and_then(|s| s.parse().ok()).ok_or("--seconds N")?,
+                "--seconds" => {
+                    seconds = args
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or("--seconds N")?
+                }
                 "--size" => {
                     let s = args.next().ok_or("--size WxH")?;
                     let (w, h) = s.split_once('x').ok_or("--size WxH")?;
-                    size = (w.parse().map_err(|_| "--size")?, h.parse().map_err(|_| "--size")?);
+                    size = (
+                        w.parse().map_err(|_| "--size")?,
+                        h.parse().map_err(|_| "--size")?,
+                    );
                 }
                 other => return Err(format!("unknown argument {other}")),
             }
@@ -199,12 +247,18 @@ mod win {
         let _lock = if warp { None } else { Some(GpuLock::take()?) };
         let counters = Counters::new()?;
 
-        println!("| Step | Shared (counters) MiB | Dedicated (counters) MiB | Non-local (QVMI) MiB | Local (QVMI) MiB |");
+        println!(
+            "| Step | Shared (counters) MiB | Dedicated (counters) MiB | Non-local (QVMI) MiB | Local (QVMI) MiB |"
+        );
         println!("|---|---|---|---|---|");
         stage("start", &counters, None);
         let t = Instant::now();
         let device = Device::new(&DeviceOptions {
-            adapter: if warp { AdapterChoice::Warp } else { AdapterChoice::Default },
+            adapter: if warp {
+                AdapterChoice::Warp
+            } else {
+                AdapterChoice::Default
+            },
             ..DeviceOptions::default()
         })
         .map_err(|e| e.to_string())?;
@@ -267,7 +321,10 @@ mod win {
             statuses[0],
             statuses[1],
             if gpu_samples > 0 {
-                format!("{:.3} ms over {gpu_samples} frames", gpu_total.as_secs_f64() * 1000.0 / f64::from(gpu_samples))
+                format!(
+                    "{:.3} ms over {gpu_samples} frames",
+                    gpu_total.as_secs_f64() * 1000.0 / f64::from(gpu_samples)
+                )
             } else {
                 "–".into()
             }
