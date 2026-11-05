@@ -14,7 +14,7 @@
 **Lumenwall affiche les scènes du Workshop de Wallpaper Engine en fond d’écran sous Linux et Windows, avec un moteur natif en Rust qui ne dessine une image que lorsque quelque chose change à l’écran, et rien du tout quand le bureau est caché.**
 
 > [!NOTE]
-> Lumenwall est en début de développement et n’a pas encore de version publiée. Les fonds d’écran de type scène, vidéo et web et l’application de bureau fonctionnent aujourd’hui sous Linux. Windows à l’exécution n’est pas terminé : voir [Fonctionnalités](#fonctionnalités).
+> Lumenwall est en début de développement et n’a pas encore de version publiée. Les fonds d’écran de type scène, vidéo et web et l’application de bureau fonctionnent sous Linux. Sous Windows, les fonds d’écran de type scène, vidéo et web fonctionnent sur la machine de développement ; l’application, l’installateur, la capture audio et la souris n’y sont pas encore testés : voir [Fonctionnalités](#fonctionnalités).
 
 ## Sommaire
 
@@ -72,13 +72,14 @@ Mesurez sur votre machine avec `LUMENWALL_STATS=1 lumenwall <id>` : i/s, temps 
 |---|---|---|
 | ✅ | Scènes | Images avec leurs chaînes d’effets et les shaders du fond d’écran, bloom, LUT de couleur, parallaxe de caméra, propriétés utilisateur (`--set-property`, rechargement à chaud) |
 | ✅ | Particules | Sprites, traînées, cordes, systèmes enfants |
-| ✅ | SceneScript | Scripts de propriétés, minuteries, événements, curseur. 🚧 La création de calques à l’exécution n’est pas encore prise en charge |
+| ✅ | SceneScript | Scripts de propriétés, minuteries, événements, curseur, calques créés à l’exécution (images, particules, sons), événements média (plus bas). 🚧 `play()`/`stop()` des calques de son ne font encore rien |
 | ✅ | Animation de marionnettes | Squelettes, couches d’animation, skinning sur GPU, attaches. 🚧 Ni physique, ni cinématique inverse, ni blend shapes |
 | ✅ | Calques de texte | La police du fond d’écran, textes scriptés comme les horloges. 🚧 Ni contour, ni ombre, ni fond |
 | ✅ | Son et effets réactifs à l’audio | Sons de la scène, spectre audio capturé depuis PulseAudio (ou le serveur Pulse de PipeWire), coupure automatique quand une autre application joue |
-| ✅ | Vidéo | Décodage matériel Vulkan Video sur le GPU de rendu, sans copie (≈ 2,5 % d’un cœur pour du H.264 4K60 à 30 i/s) ; replis NVDEC, VA-API, D3D11VA et logiciel ; son en boucle. 🚧 Vidéos dans les scènes, HDR, 10 bits sans copie |
-| ✅ | Web | Chromium (CEF) hors écran dans un processus séparé, images partagées avec le GPU (DMA-BUF, sans copie ; repli par mémoire partagée), API web de Wallpaper Engine (propriétés utilisateur, écouteur audio, pause), souris et clics, son de la page soumis à `--volume`/`--silent` ; une page qui ne change plus ne coûte aucune image, une page en pause est gelée (≈ 0,5 % d’un cœur). Inclus dans l’installateur Windows ; sous Linux, nécessite la compilation optionnelle de l’hôte ci-dessous. 🚧 Sous Windows, les images passent par la mémoire partagée (pas encore d’import Direct3D sans copie), pas de source pour l’intégration média, la coupure automatique ne s’applique pas à la page |
-| 🚧 | Listes de lecture | Les listes de lecture de Wallpaper Engine sont jouées par écran : minuterie, ordre, règles de pause, suivant/précédent dans l’application. Pas encore : les modes « Moment de la journée » et « Connexion », les transitions |
+| ✅ | Vidéo | Décodage matériel Vulkan Video sur le GPU de rendu, sans copie (≈ 2,5 % d’un cœur pour du H.264 4K60 à 30 i/s sous Linux, ≈ 3 % sous Windows) ; replis NVDEC, VA-API, D3D11VA et logiciel ; son en boucle. Sous Windows, les bibliothèques de FFmpeg sont dans l’installateur (la compilation minimale LGPL propre à Lumenwall, 10,9 Mo). 🚧 Vidéos dans les scènes, HDR, 10 bits sans copie |
+| ✅ | Web | Chromium (CEF) hors écran dans un processus séparé, images partagées avec le GPU (Linux : DMA-BUF ; Windows : textures partagées Direct3D 11 importées dans Vulkan ; repli par mémoire partagée), API web de Wallpaper Engine (propriétés utilisateur, écouteur audio, écouteurs média, pause), souris et clics, son de la page soumis à `--volume`/`--silent` ; une page qui ne change plus ne coûte aucune image, une page en pause est gelée (≈ 0,5 % d’un cœur sous Linux). Inclus dans l’installateur Windows ; sous Linux, nécessite la compilation optionnelle de l’hôte ci-dessous. 🚧 La coupure automatique ne s’applique pas à la page ; sous Windows, la souris et un lancement sur le bureau ne sont pas testés (seulement le rendu hors écran et l’hôte seul) |
+| ✅ | Listes de lecture | Les listes de lecture de Wallpaper Engine sont jouées par écran : minuterie, ordre, règles de pause, suivant/précédent dans la page Écrans de l’application. 🚧 Pas encore : les modes « Moment de la journée » et « Connexion » (non spécifiés), les transitions (une coupure franche) |
+| ✅ | Intégration média | Ce qui est en cours de lecture (titre, artiste, album, état, progression, pochette) parvient aux scripts de scène, aux textures de pochette `$mediaThumbnail` / `$mediaPreviousThumbnail` et aux `wallpaperRegisterMedia*Listener` des pages web : session média de Windows, MPRIS sous Linux (le code du bus Linux n’a pas encore été exécuté). Suivie seulement tant qu’un fond d’écran l’utilise. 🚧 Pas de contrôle de la lecture |
 | 🚧 | Un fond d’écran sur plusieurs écrans | Chaque écran affiche le fond d’écran entier |
 
 **Bureau**
@@ -88,18 +89,18 @@ Mesurez sur votre machine avec `LUMENWALL_STATS=1 lumenwall <id>` : i/s, temps 
 | ✅ | GNOME (session Wayland), sans extension | Fenêtres de bureau X11 via XWayland ; pause sous les fenêtres plein écran et couvrantes (mesuré sur GNOME 50.1) |
 | ✅ | X11 | Testé via XWayland seulement, pas encore sur une session Xorg native |
 | 🚧 | Wayland layer-shell : KDE Plasma, sway, Hyprland, niri, COSMIC | Implémenté, pas encore testé sur ces compositeurs |
-| ⏳ | Windows 10 et 11 | Compile et passe les tests en CI (DX12 sur l’adaptateur logiciel WARP) ; jamais lancé sur un vrai bureau Windows |
-| ✅ | Pause quand le bureau est caché | Plein écran et écrans couverts mesurés ; verrouillage et écran éteint implémentés, non vérifiés |
+| 🚧 | Windows 10 et 11 | Les fonds d’écran de type scène, vidéo et web fonctionnent sur la machine de développement (Windows 11, RTX 4080 SUPER, deux moniteurs, fond d’écran derrière les icônes, le moteur dans un processus à part pour que le démon reste à ≈ 2 Mio) ; la CI fait aussi des rendus sur l’adaptateur logiciel WARP. Pas encore testés : l’application et la zone de notification, un lancement de l’installateur, la capture audio et la coupure automatique (WASAPI), la souris sur les pages web, Windows 10, les autres points de la [liste de vérification de la plateforme](crates/lumenwall-platform/README.md#to-check-on-windows-11-24h2--25h2-and-once-on-windows-10). Connu : le pilote NVIDIA affiche son invite de superposition pour les processus de Lumenwall (non corrigé) |
+| ✅ | Pause quand le bureau est caché | Plein écran et écrans couverts mesurés ; verrouillage et écran éteint implémentés, non vérifiés. Option `pause-on-battery` (désactivée par défaut) : Windows et Linux, implémentée, le passage sur batterie lui-même n’est pas testé |
 | ✅ | Fichier de configuration rechargé à chaud | i/s et propriétés appliqués sans redémarrer |
-| ✅ | Application de bureau (`lumenwall-ui`) et zone de notification | Bibliothèque, écrans, réglages, édition des propriétés en direct, changement de fond d’écran à chaud via l’IPC du moteur, choix enregistrés dans la configuration. 🚧 Pas encore testée sous Windows |
+| ✅ | Application de bureau (`lumenwall-ui`) et zone de notification | Bibliothèque, écrans, listes de lecture, réglages (dont la pause sur batterie), édition des propriétés en direct, changement de fond d’écran à chaud via l’IPC du moteur, choix enregistrés dans la configuration. 🚧 Pas encore testée sous Windows |
 | ✅ | Navigateur du Workshop dans l’application | Recherche et filtres via l’API Web Steam avec votre propre clé ; l’abonnement passe par le client Steam ; les nouveaux abonnements apparaissent tout seuls |
-| 🚧 | Paquets | Le processus de publication produit un installateur Windows, un paquet Debian et un installateur Linux en une ligne, et l’application s’installe d’elle-même au premier lancement ([Installation](#installation)) ; aucune version publiée pour l’instant. Pas de paquet Flatpak ni AUR |
+| 🚧 | Paquets | Le processus de publication produit un installateur Windows en une fenêtre (`Lumenwall-Setup.exe`), un paquet Debian et un installateur Linux en une ligne, et l’application s’installe d’elle-même au premier lancement ([Installation](#installation)) ; aucune version publiée pour l’instant. Pas de paquet Flatpak ni AUR |
 
 ## Installation
 
 Il vous faut **Wallpaper Engine**, acheté et installé via Steam, avec les fonds d’écran voulus abonnés dans le Workshop. Lumenwall lit les éléments du Workshop et le dossier `assets` de Wallpaper Engine là où ils sont, et n’en distribue aucun fichier. Sous Linux, installez Wallpaper Engine avec Steam Play (Proton) activé pour lui ; Lumenwall ne le lance jamais. Lumenwall a besoin d’un pilote Vulkan sous Linux (Mesa ou NVIDIA) et de DirectX 12 sous Windows. Les versions publiées sont compilées pour x86-64 et paraissent sur la [page des versions](https://github.com/simnJS/lumenwall/releases) dès la première publication.
 
-**Windows.** Téléchargez **[Lumenwall-Setup.exe](https://github.com/simnJS/lumenwall/releases/latest/download/Lumenwall-Setup.exe)** et lancez-le. Il tient en une seule fenêtre : « Démarrer avec Windows » est coché par défaut et un raccourci sur le bureau est proposé en option ; Lumenwall s’ouvre à la fin. Il installe Lumenwall pour votre compte seulement, sans droits d’administrateur, dans `%LOCALAPPDATA%\Programs\Lumenwall`, avec un raccourci au menu Démarrer ; Lumenwall se met ensuite à jour tout seul, et Paramètres › Applications le désinstalle (vos réglages sont conservés). L’installateur, d’environ 180 Mo, contient tout ce dont Lumenwall a besoin sous Windows : le moteur et l’application, les bibliothèques LGPL de FFmpeg pour les fonds vidéo et le Chromium Embedded Framework (CEF 156, avec toutes ses langues d’interface) pour les fonds web ; une fois installé, il occupe environ 565 Mo. Leurs licences sont dans `THIRD-PARTY-NOTICES.html` et `licenses\` à côté des programmes. Une mise à jour depuis l’application télécharge plutôt le zip de la version (environ 251 Mo : le zip compresse moins que l’installateur) et ne réécrit que les fichiers qui ont changé. Si SmartScreen indique avoir protégé votre ordinateur, cliquez sur **Informations complémentaires › Exécuter quand même** : l’installateur n’a pas encore de signature de code, Windows ne connaît donc pas son éditeur. `SHA256SUMS` et sa signature, sur la page de la version, permettent de vérifier le fichier ([vérifier un téléchargement](docs/RELEASING.md#verify-a-download)). Le zip de la [dernière version](https://github.com/simnJS/lumenwall/releases/latest) fonctionne aussi : lancez `lumenwall-ui.exe` et laissez-le s’installer (plus bas).
+**Windows.** Téléchargez **[Lumenwall-Setup.exe](https://github.com/simnJS/lumenwall/releases/latest/download/Lumenwall-Setup.exe)** depuis la dernière version et lancez-le. Il tient en une seule fenêtre : « Démarrer avec Windows » (coché par défaut) et « Raccourci sur le bureau » (facultatif), puis Installer ; la langue suit celle de Windows (français ou anglais), et Lumenwall s’ouvre à la fin. Il installe Lumenwall pour votre compte seulement, sans droits d’administrateur, dans `%LOCALAPPDATA%\Programs\Lumenwall` (le dossier n’est pas un choix), avec un raccourci au menu Démarrer ; lancé sur une copie déjà installée, il la met à jour en arrêtant d’abord le moteur ou l’hôte web en cours. Lumenwall se met ensuite à jour tout seul, et Paramètres › Applications le désinstalle (vos réglages sont conservés). Il contient tout ce dont Lumenwall a besoin sous Windows : le moteur et l’application, les bibliothèques LGPL de FFmpeg pour les fonds vidéo (la compilation minimale propre à Lumenwall, 10,9 Mo) et le Chromium Embedded Framework (CEF 156, avec toutes ses langues d’interface, environ 404 Mo installé) pour les fonds web. **Tailles.** L’installateur pèse environ **145 Mo** à télécharger et Lumenwall occupe environ **448 Mo** une fois installé ; une mise à jour depuis l’application télécharge plutôt le zip de la version, environ 202 Mo (un zip compresse moins que l’installateur), et ne réécrit que les fichiers qui ont changé. Ce sont des estimations pour une version compilée avec le FFmpeg minimal, à confirmer sur la première ; la version 0.1.0, avec un FFmpeg généraliste, mesurait 565 Mo installée et un zip de 251 Mo ([`docs/RELEASING.md`](docs/RELEASING.md), « Sizes »). Leurs licences sont dans `THIRD-PARTY-NOTICES.html` et `licenses\` à côté des programmes. **SmartScreen :** l’installateur et les programmes n’ont pas encore de signature de code, Windows ne connaît donc pas leur éditeur et peut indiquer avoir protégé votre ordinateur ; cliquez sur **Informations complémentaires › Exécuter quand même**. `SHA256SUMS` et sa signature, sur la page de la version, permettent de vérifier le fichier ([vérifier un téléchargement](docs/RELEASING.md#verify-a-download)). Le zip de la [dernière version](https://github.com/simnJS/lumenwall/releases/latest) fonctionne aussi : lancez `lumenwall-ui.exe` et laissez-le s’installer (plus bas).
 
 **Linux, en une ligne** (pour votre compte seulement, sans sudo) :
 
@@ -161,9 +162,9 @@ LUMENWALL_STATS=1 lumenwall <id>                    # i/s, temps CPU/GPU par ima
 | `-b`, `--bg <id ou chemin>` | Fond d’écran de l’écran courant |
 | `--scaling stretch\|fit\|fill\|default` | Façon dont le fond d’écran remplit l’écran |
 | `-f`, `--fps <n>` | Limite d’images par seconde (30 par défaut) |
-| `-v`, `--volume <0–128>` / `-s`, `--silent` | Volume du son (15 par défaut) / muet |
+| `-v`, `--volume <0–128>` / `-s`, `--silent` | Volume du son (64 par défaut) / muet |
 | `--noautomute` | Garder le son quand une autre application en joue |
-| `--no-fullscreen-pause` | Continuer le rendu sous les fenêtres plein écran |
+| `--no-fullscreen-pause` | Continuer le rendu sous les fenêtres plein écran. La pause sur batterie est une clé de configuration (`pause-on-battery`) |
 | `--disable-particles`, `--disable-mouse`, `--disable-parallax` | Désactiver ces fonctions |
 | `--assets-dir <dossier>` | Dossier `assets` de Wallpaper Engine, s’il n’est pas trouvé automatiquement |
 | `--screenshot <fichier.png>` | Enregistrer une image après quelques images |
@@ -186,13 +187,13 @@ Oui. GNOME n’a pas de layer-shell : Lumenwall utilise des fenêtres de bureau
 Le moteur layer-shell est écrit mais n’a pas encore tourné sur ces compositeurs. Vos retours sont bienvenus (modèle de rapport de bug).
 
 **Et Windows ?**
-Lumenwall compile et passe ses tests sous Windows en CI, mais n’a jamais tourné sur un bureau Windows. La liste des points à vérifier est dans [`crates/lumenwall-platform/README.md`](crates/lumenwall-platform/README.md#to-check-on-windows-11-24h2--25h2-and-once-on-windows-10).
+Oui, en aperçu. Les fonds d’écran de type scène, vidéo et web fonctionnent sur la machine de développement (Windows 11, GPU NVIDIA, deux moniteurs) ; la CI compile et teste sous Windows avec l’adaptateur logiciel WARP. Pas encore testés : l’application de bureau sous Windows, un lancement de l’installateur, la capture audio, la souris sur les pages web et Windows 10. La liste des points à vérifier est dans [`crates/lumenwall-platform/README.md`](crates/lumenwall-platform/README.md#to-check-on-windows-11-24h2--25h2-and-once-on-windows-10). Téléchargements, tailles et avertissement SmartScreen : [Installation](#installation).
 
 **Combien ça coûte pendant que je joue ?**
 Une fenêtre plein écran met le rendu en pause : 0 image, 0,2 % d’un cœur mesuré (le fil du son). `--no-fullscreen-pause` désactive ce comportement.
 
 **Pourquoi l’application dit-elle que le moteur est arrêté ?**
-L’application de bureau parle au moteur par une socket locale, et la partie moteur de ce protocole n’est pas encore écrite. D’ici là, l’application est un aperçu qui fonctionne avec son démon de démonstration.
+L’application de bureau parle au moteur (`lumenwall`) par une socket locale (un tube nommé sous Windows). La partie moteur est implémentée : ce message signifie qu’aucun moteur ne tourne, ou qu’il n’a pas pu démarrer. `lumenwall-ui --background` le lance ; le journal est dans `%LOCALAPPDATA%\Lumenwall\logs` sous Windows.
 
 **Lumenwall est-il dérivé d’une autre réimplémentation de Wallpaper Engine ?**
 Non. Il est écrit à partir de spécifications de comportement selon un processus de salle blanche, ce qui permet la licence MIT OR Apache-2.0 ([`CLEANROOM.md`](CLEANROOM.md)).
@@ -214,8 +215,8 @@ flowchart TB
     engine --> script["lumenwall-script<br/>exécution de SceneScript"]
     engine --> audio["lumenwall-audio<br/>son, spectre"]
     engine --> platform["lumenwall-platform<br/>surfaces Wayland, X11, Windows"]
-    engine -. "pas encore branché" .-> video["lumenwall-video"]
-    engine -. "pas encore branché" .-> web["lumenwall-web<br/>hôte CEF"]
+    engine --> video["lumenwall-video<br/>décodage FFmpeg"]
+    engine --> web["lumenwall-web<br/>processus hôte CEF"]
 ```
 
 Le README de chaque crate liste les spécifications dont elle est issue, ses mesures et ses écarts par rapport au comportement de référence ([`docs/PARITY-POLICY.md`](docs/PARITY-POLICY.md)).
