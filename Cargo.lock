@@ -2886,6 +2886,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumenwall-d3d11"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lumenwall-formats",
+ "naga 30.0.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "lumenwall-engine"
 version = "0.1.0"
 dependencies = [
