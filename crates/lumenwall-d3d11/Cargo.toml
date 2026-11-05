@@ -1,0 +1,42 @@
+[package]
+name = "lumenwall-d3d11"
+description = "Direct3D 11 renderer backend for Windows: device, flip-model swap chains, HLSL shaders, resources."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The pure parts (HLSL generation from naga, the bytecode cache, layouts and the error type) build
+# and are tested on every platform; everything that calls Direct3D 11 or DXGI is `cfg(windows)`,
+# so on Linux the crate builds without any Windows API.
+[dependencies]
+# Same naga as wgpu 30 and lumenwall-shader; `hlsl-out` has no dependency of its own.
+naga = { version = "30.0.1", features = ["hlsl-out"] }
+blake3 = "1.8"
+thiserror.workspace = true
+tracing.workspace = true
+lumenwall-formats.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+# Test shaders are written in WGSL (lumenwall-shader enables `wgsl-in` already).
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
