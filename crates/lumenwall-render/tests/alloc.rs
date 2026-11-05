@@ -7,7 +7,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glam::{Vec2, Vec3};
-use lumenwall_render::backend::{Frame, Gpu, GraphCounts, SceneBackend, SceneDesc, SegmentTime};
+use lumenwall_render::backend::{
+    BackendCaps, Frame, Gpu, GraphCounts, SceneBackend, SceneDesc, SegmentTime,
+};
 use lumenwall_render::dynbuf::FrameInputs;
 use lumenwall_render::graph::{MeshLayout, Op, SceneBuilder, StreamLayout, TextureRef};
 use lumenwall_render::image::{ImageFrame, ImagePass, ImageSpec, add_image};
@@ -177,6 +179,13 @@ impl SceneBackend for Quiet {
     fn uniform_alignment(&self, _: Gpu<'_>) -> u32 {
         256
     }
+    fn caps(&self, _: Gpu<'_>) -> BackendCaps {
+        BackendCaps {
+            bc: true,
+            max_texture_2d: 16384,
+        }
+    }
+
     fn supports_samples(&self, _: Gpu<'_>, _: wgpu::TextureFormat, _: u32) -> bool {
         false
     }

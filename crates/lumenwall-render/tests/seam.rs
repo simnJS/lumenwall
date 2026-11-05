@@ -7,7 +7,7 @@ use std::any::Any;
 
 use glam::{Vec2, Vec3};
 use lumenwall_render::backend::{
-    BoundTexture, Frame, Gpu, GraphCounts, SceneBackend, SceneDesc, SegmentTime,
+    BackendCaps, BoundTexture, Frame, Gpu, GraphCounts, SceneBackend, SceneDesc, SegmentTime,
 };
 use lumenwall_render::dynbuf::FrameInputs;
 use lumenwall_render::graph::{Geometry, MeshLayout, Op, PassDesc, SceneBuilder, StreamLayout};
@@ -72,6 +72,13 @@ struct Recorder {
 impl SceneBackend for Recorder {
     fn uniform_alignment(&self, _: Gpu<'_>) -> u32 {
         256
+    }
+
+    fn caps(&self, _: Gpu<'_>) -> BackendCaps {
+        BackendCaps {
+            bc: true,
+            max_texture_2d: 16384,
+        }
     }
 
     fn supports_samples(&self, _: Gpu<'_>, _: wgpu::TextureFormat, samples: u32) -> bool {
@@ -199,6 +206,7 @@ fn recorder(scene: &lumenwall_render::RenderScene) -> &Recorder {
 fn a_scene_builds_and_renders_without_wgpu() {
     let mut b =
         SceneBuilder::with_backend(Gpu::Other, Box::new(Recorder::default()), (256.0, 256.0));
+    assert!(b.caps().bc, "the backend's caps reach the scene code");
     let st = b
         .targets
         .create_scene_targets(Gpu::Other, (256, 256), SamplerKey::CLAMP_LINEAR);

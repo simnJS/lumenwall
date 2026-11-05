@@ -49,8 +49,8 @@ pub mod wgpu_scene;
 pub mod yuv;
 
 pub use backend::{
-    BoundTexture, Frame, Gpu, MeshInfo, PassState, ResolvedSlot, SceneBackend, SceneDesc,
-    StreamState,
+    BackendCaps, BoundTexture, Frame, Gpu, MeshInfo, PassState, ResolvedSlot, SceneBackend,
+    SceneDesc, StreamState,
 };
 pub use blend::{BlendMode, CullMode, WriteMask};
 pub use compose::{ClampMode, ComposeSettings, Compositor, OutputComposer, ScalingMode};

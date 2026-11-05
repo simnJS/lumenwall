@@ -14,7 +14,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::backend::{Frame, Gpu, MeshInfo, PassState, SceneBackend, StreamState};
+use crate::backend::{BackendCaps, Frame, Gpu, MeshInfo, PassState, SceneBackend, StreamState};
 pub use crate::backend::{FrameCommands, GraphCounts, SceneDesc, SegmentTime};
 use crate::blend::WriteMask;
 use crate::context::GpuContext;
@@ -336,6 +336,12 @@ impl<'c> SceneBuilder<'c> {
         self.gpu
             .wgpu()
             .expect("SceneBuilder::context on a scene that is not built on wgpu")
+    }
+
+    /// Texture formats and sizes the scene's device takes (BC uploads, the largest texture).
+    #[must_use]
+    pub fn caps(&self) -> BackendCaps {
+        self.owner.get_ref().caps(self.gpu)
     }
 
     /// The device the scene is built on (what the render target pool's calls take).
@@ -1477,6 +1483,12 @@ impl RenderScene {
         // The backend uploaded the dirty uniforms.
         self.state.dynamic.shadow_mut().clear_dirty();
         r
+    }
+
+    /// Texture formats and sizes the scene's device takes.
+    #[must_use]
+    pub fn caps<'g>(&self, gpu: impl Into<Gpu<'g>>) -> BackendCaps {
+        self.backend.caps(gpu.into())
     }
 
     /// RGBA8 rows of a render target of the scene, tightly packed (screenshots, tests).

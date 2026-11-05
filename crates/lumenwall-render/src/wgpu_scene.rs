@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::backend::{
-    BoundTexture, Frame, Gpu, GraphCounts, PassState, SceneBackend, SceneDesc, SegmentTime,
-    StreamState,
+    BackendCaps, BoundTexture, Frame, Gpu, GraphCounts, PassState, SceneBackend, SceneDesc,
+    SegmentTime, StreamState,
 };
 use crate::blend::{BlendMode, CullMode, WriteMask};
 use crate::context::{GpuContext, MemoryToken};
@@ -1734,6 +1734,19 @@ impl SceneBackend for WgpuScene {
         gpu.wgpu().map_or(256, |ctx| {
             ctx.device().limits().min_uniform_buffer_offset_alignment
         })
+    }
+
+    fn caps(&self, gpu: Gpu<'_>) -> BackendCaps {
+        gpu.wgpu().map_or(
+            BackendCaps {
+                bc: false,
+                max_texture_2d: 2048,
+            },
+            |ctx| BackendCaps {
+                bc: ctx.supports_bc(),
+                max_texture_2d: ctx.device().limits().max_texture_dimension_2d,
+            },
+        )
     }
 
     fn supports_samples(&self, gpu: Gpu<'_>, format: wgpu::TextureFormat, samples: u32) -> bool {

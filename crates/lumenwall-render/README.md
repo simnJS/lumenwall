@@ -73,7 +73,7 @@ stream data and draw counts, hazard scratches, dirty and settle flags, `needs_re
 | `rebind` / `replan` | targets reallocated or resized, unshared / operations or enabled flags changed |
 | `render(&mut Frame, &SceneDesc)` | once per scene per frame, no allocation: uploads the dirty range and the pending stream vertices (the front clears them after the call), records the frame |
 | `read_target`, `profile`, `counts` | screenshots and tests, tools, debug counters |
-| `uniform_alignment`, `supports_samples`, `quality_changed` | builder set-up |
+| `uniform_alignment`, `supports_samples`, `caps`, `quality_changed` | builder set-up; `caps` (BC uploads, largest texture) is what the scene code asks through `SceneBuilder::caps` instead of the wgpu context |
 
 `SceneDesc` is the export: every call gets the front's whole state borrowed (targets with the aliasing
 plan, depth targets, texture infos, shader interfaces, `PassState`s, operations, the region, indices

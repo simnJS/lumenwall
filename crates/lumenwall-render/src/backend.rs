@@ -319,6 +319,15 @@ pub struct SegmentTime {
     pub ms: f64,
 }
 
+/// What a backend's device can do, as the scene code asks it (texture formats and sizes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendCaps {
+    /// BC1/BC2/BC3 textures upload as they are (otherwise the caller decodes them to RGBA8).
+    pub bc: bool,
+    /// Largest width or height of a 2D texture or render target.
+    pub max_texture_2d: u32,
+}
+
 /// Debug counters of a compiled graph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GraphCounts {
@@ -349,6 +358,9 @@ pub trait SceneBackend: Any {
 
     /// Whether render targets of `format` can be drawn with `samples` samples per pixel.
     fn supports_samples(&self, gpu: Gpu<'_>, format: wgpu::TextureFormat, samples: u32) -> bool;
+
+    /// Texture formats and sizes the device takes.
+    fn caps(&self, gpu: Gpu<'_>) -> BackendCaps;
 
     /// The quality settings, the targets' format or their sample counts changed (before build).
     fn quality_changed(
