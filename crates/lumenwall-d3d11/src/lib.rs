@@ -24,6 +24,7 @@ pub mod cache;
 pub mod error;
 pub mod hlsl;
 pub mod layout;
+pub mod plan;
 pub mod state;
 
 #[cfg(windows)]
@@ -32,7 +33,9 @@ mod win;
 pub use cache::{Bytecode, BytecodeCache, CacheKey, CompileOptions};
 pub use error::{Error, LostReason, Result};
 pub use hlsl::{HlslProgram, InputKind, Register, Resources, VertexInput};
-pub use layout::{ConstantLayout, ConstantRegion, Dimension, LinearArena, MipLevel};
+pub use layout::{
+    ConstantLayout, ConstantRegion, Dimension, LinearArena, MipLevel, TargetFormat, VertexFormat,
+};
 pub use state::{AddressMode, BlendKey, Cull, DepthKey, RasterKey, SamplerKey};
 
 #[cfg(windows)]

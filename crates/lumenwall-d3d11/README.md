@@ -54,6 +54,9 @@ calls Direct3D is `cfg(windows)`: on Linux the crate builds without any Windows 
 | `GpuTimer` | Timestamp queries over three slots, read with `DONOTFLUSH`. Never waits: a slot still in flight skips the measurement. |
 | `read_subresource`, `read_texture_rgba8` | Staging copy, `Map(READ)`, tightly packed rows (BCn, volumes, BGRA→RGBA). The staging texture is released before returning. |
 | `OffscreenWindow` | A window below the monitors, shown but never activated (tests, measurements). |
+| `plan` (all platforms) | The scene plan: the plain-data contract between the bridge (task 5) and the scene executor (task 3). `ScenePlan`, `TargetPlan`, `PassPlan`, `SlotPlan`, `GeometryPlan`, `OpPlan`, `StreamPlan`, `MeshLayoutPlan`, `FrameInput`; the image vertex and skin layouts; `ScenePlan::validate`. |
+| `external` | `DecodedFrame` (a D3D11VA texture-array slice, NV12 or P010) and `plane_views` (luma and chroma SRVs). `Device::open_shared_texture` (NT handles, `OpenSharedResource1`). `Device::set_multithread_protected` (FFmpeg's decoder thread). |
+| `scene`, `output` (stubs) | The interfaces of tasks 3 and 4 (signatures in "Split proposal"). Every operation returns `Error::Unsupported` until those tasks implement them; nothing in this crate calls them. |
 
 `examples/clear_present.rs` clears, presents and reads back on an off-screen window. It reads the
 process's GPU memory after each step: the `GPU Process Memory` counters (what Task Manager shows) and
@@ -85,7 +88,7 @@ at Idle priority, paced at 30 fps, for at most 60 s.
 - GPU time of a 2560×1440 clear: 0.17–0.44 ms per frame at idle clocks.
 
 The GPU tests (`tests/gpu.rs`, below) also pass on this adapter, run with
-`LUMENWALL_D3D11_TEST_ADAPTER=hardware` under the lock (11 of 11).
+`LUMENWALL_D3D11_TEST_ADAPTER=hardware` under the lock (13 of 13).
 
 ## How the renderer is used today (usage map)
 
@@ -279,12 +282,14 @@ All in the foundation:
 - **`plan` (all platforms, plain data)**: the contract between the bridge (task 5, producer) and
   the scene executor (task 3, consumer).
   - `ScenePlan { targets: Vec<TargetPlan>, passes: Vec<PassPlan>, ops: Vec<OpPlan>, constants_len,
-    frame_block: Option<ConstantRegion>, vertex_bytes, indices, skins, streams: Vec<StreamPlan>,
-    meshes: Vec<MeshPlan> }`.
-  - `TargetPlan` { size, nominal size, format, samples, depth, `shares` (aliasing), sampler }.
-  - `PassPlan` { label, program, target, blend / raster / depth keys, uniform window, slots `[Option<SlotPlan>; 8]`,
-    slot-0 variants, `GeometryPlan`, hazard scratch, `clear_first` }.
-  - `OpPlan::{Clear, Copy, Draw}`.
+    frame_block: Option<ConstantRegion>, vertex_bytes, indices, skins, streams: Vec<StreamPlan> }`.
+    Textures, programs and meshes (`MeshLayoutPlan` + bytes) are uploaded through the builder first:
+    their indices are what the plan refers to. `ScenePlan::validate` checks every index and window.
+  - `TargetPlan` { label, size, format, samples, depth, `shares` (aliasing) }.
+  - `PassPlan` { label, program, target, blend / raster / depth keys, uniform window, slots
+    `[Option<SlotPlan>; 8]` (source + resolved sampler key), slot-0 variants, `GeometryPlan`, hazard
+    scratch, `clear_first` }.
+  - `OpPlan::{Clear, Copy, Draw}`, in the scheduled frame order.
   - Attributes are matched to program inputs **by name**, as on the wgpu path.
   - Uniform windows are byte ranges of the front's shadow buffer, 256-byte aligned like wgpu's
     dynamic offsets. The executor mirrors the shadow into its `ConstantArena` byte for byte.
@@ -300,10 +305,11 @@ All in the foundation:
 - **Module stubs** for tasks 3 and 4: `src/win/scene/mod.rs` and `src/win/output/mod.rs`, already
   declared by the foundation. Their signatures, below, return `Error::Unsupported` until the task
   implements them. The owning task may change them; task 5 codes against what lands.
-  - Task 3: `SceneBuilder::{new, add_texture, add_program, build}`, `Scene::{render, extend,
-    set_ops}`.
-  - Task 4: `Compositor::{new, encode}`, `ComposeParams`, `HeadlessOutput`, `YuvConverter`,
-    `ExternalCopy`.
+  - Task 3 (`lumenwall_d3d11::scene`): `SceneBuilder::{new, add_texture, add_program, add_mesh,
+    build}`, `Scene::{render, extend, set_ops, target_srv, target_texture}`.
+  - Task 4 (`lumenwall_d3d11::output`): `Compositor::{new, encode}` + `ComposeParams`,
+    `HeadlessOutput::{new, target, read_rgba8}`, `YuvConverter::{new, convert}` + `YuvParams`,
+    `ExternalCopy::{new, copy}`.
 
 ### 2/n: Backend-neutral seam in lumenwall-render
 
@@ -435,15 +441,17 @@ All in the foundation:
 
 ## Tests
 
-- **Unit, all platforms (17)**:
+- **Unit, all platforms (20)**:
   - error classification;
+  - scene plan validation (every index, window, alias, geometry, op and stream checked), layouts
+    matching `lumenwall-render`'s vertex and skin records;
   - binding contract registers, HLSL translation (every resource, inputs, struct members, renamed
     names), refused bindings, missing entry point, sampler rewrite (both kinds, renamed index
     arrays, leftover heap refused);
   - cache round trip, corrupt / truncated / foreign / other-version files, key sensitivity;
   - constant windows, linear arenas, upload rules (levels, bytes, BC, volumes);
   - blend table, anisotropy rule, default attribute bytes.
-- **GPU (`tests/gpu.rs`, 11)**. WARP by default, so the workspace check never uses the GPU;
+- **GPU (`tests/gpu.rs`, 13)**. WARP by default, so the workspace check never uses the GPU;
   `LUMENWALL_D3D11_TEST_ADAPTER=hardware` runs them on the default adapter. They cover:
   - the device;
   - clear → readback → present → resize on an off-screen window;
@@ -457,7 +465,9 @@ All in the foundation:
   - state deduplication;
   - the GPU timer;
   - bytecode cache hit / compile / uncached;
-  - dynamic buffer bounds.
+  - dynamic buffer bounds;
+  - a texture shared as an NT handle by a second device, opened and read back byte-exact;
+  - plane views of a two-slice NV12 array, multithread protection on and off.
 
 ## Open questions
 

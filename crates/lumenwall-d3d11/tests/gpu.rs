@@ -602,3 +602,131 @@ fn dynamic_buffer_rewrites_and_bounds() {
     // The buffers are live objects of the device.
     let _: ID3D11Resource = b.buffer().cast().unwrap();
 }
+
+#[test]
+fn shared_texture_opens_on_a_second_device() {
+    use lumenwall_d3d11::windows::Win32::Foundation::CloseHandle;
+    use lumenwall_d3d11::windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_SHARED,
+        D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT,
+    };
+    use lumenwall_d3d11::windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+    };
+    use lumenwall_d3d11::windows::Win32::Graphics::Dxgi::{
+        DXGI_SHARED_RESOURCE_READ, DXGI_SHARED_RESOURCE_WRITE, IDXGIResource1,
+    };
+    use lumenwall_d3d11::windows::core::PCWSTR;
+
+    let (a, b) = (device(), device());
+    let pixels = pattern(4 * 4 * 4, 9);
+    let init = D3D11_SUBRESOURCE_DATA {
+        pSysMem: pixels.as_ptr().cast(),
+        SysMemPitch: 16,
+        SysMemSlicePitch: 0,
+    };
+    let mut t = None;
+    // SAFETY: valid descriptor and initial data (`pixels` outlives the call).
+    unsafe {
+        a.raw().CreateTexture2D(
+            &D3D11_TEXTURE2D_DESC {
+                Width: 4,
+                Height: 4,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: (D3D11_RESOURCE_MISC_SHARED.0 | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0)
+                    as u32,
+            },
+            Some(&init),
+            Some(&mut t),
+        )
+    }
+    .unwrap();
+    let shared: IDXGIResource1 = t.unwrap().cast().unwrap();
+    // SAFETY: default security, no name; the handle is closed below.
+    let handle = unsafe {
+        shared.CreateSharedHandle(
+            None,
+            DXGI_SHARED_RESOURCE_READ.0 | DXGI_SHARED_RESOURCE_WRITE.0,
+            PCWSTR::null(),
+        )
+    }
+    .unwrap();
+    a.flush();
+    assert!(a.wait_idle(Duration::from_secs(10)).unwrap());
+    let opened = b.open_shared_texture(handle).unwrap();
+    let back = read_subresource(&b, &opened.cast().unwrap(), 0).unwrap();
+    assert_eq!(back.data, pixels);
+    // SAFETY: the handle was created above and is closed once.
+    unsafe { CloseHandle(handle) }.unwrap();
+    assert!(
+        b.open_shared_texture(lumenwall_d3d11::windows::Win32::Foundation::HANDLE::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn decoded_frame_planes_and_multithread_protection() {
+    use lumenwall_d3d11::windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_SHADER_RESOURCE, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT,
+    };
+    use lumenwall_d3d11::windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT_NV12, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_SAMPLE_DESC,
+    };
+
+    let d = device();
+    assert!(!d.set_multithread_protected(true).unwrap());
+    assert!(d.set_multithread_protected(false).unwrap());
+    // A two-slice NV12 array, as FFmpeg's D3D11VA pool makes it (with the shader-resource flag).
+    let mut t = None;
+    // SAFETY: valid descriptor without initial data.
+    unsafe {
+        d.raw().CreateTexture2D(
+            &D3D11_TEXTURE2D_DESC {
+                Width: 64,
+                Height: 32,
+                MipLevels: 1,
+                ArraySize: 2,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            },
+            None,
+            Some(&mut t),
+        )
+    }
+    .unwrap();
+    let frame = DecodedFrame {
+        texture: t.unwrap(),
+        slice: 1,
+        format: PlaneFormat::Nv12,
+        size: (64, 32),
+    };
+    let (luma, chroma) = plane_views(&d, &frame).unwrap();
+    let mut desc = D3D11_SHADER_RESOURCE_VIEW_DESC::default();
+    // SAFETY: live out-parameter; the union member read is the one `plane_views` wrote.
+    unsafe {
+        luma.GetDesc(&mut desc);
+        assert_eq!(desc.Format, DXGI_FORMAT_R8_UNORM);
+        assert_eq!(desc.Anonymous.Texture2DArray.FirstArraySlice, 1);
+        chroma.GetDesc(&mut desc);
+        assert_eq!(desc.Format, DXGI_FORMAT_R8G8_UNORM);
+        assert_eq!(desc.Anonymous.Texture2DArray.ArraySize, 1);
+    }
+}

@@ -16,6 +16,7 @@ use super::device::Device;
 use crate::cache::{Bytecode, BytecodeCache, CacheKey, CompileOptions};
 use crate::error::{Error, Result, out};
 use crate::hlsl::{HlslProgram, InputKind, Resources, VertexInput};
+use crate::layout::VertexFormat;
 
 fn blob_bytes(b: &ID3DBlob) -> &[u8] {
     // SAFETY: a blob owns `GetBufferSize` readable bytes at `GetBufferPointer` for its lifetime,
@@ -227,28 +228,6 @@ pub const DEFAULT_ATTRIBUTES: [u8; 32] = {
     b[28] = 1;
     b
 };
-
-/// Format of a vertex attribute in a buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum VertexFormat {
-    Float32,
-    Float32x2,
-    Float32x3,
-    Float32x4,
-    Sint32,
-    Sint32x2,
-    Sint32x3,
-    Sint32x4,
-    Uint32,
-    Uint32x2,
-    Uint32x3,
-    Uint32x4,
-    Unorm8x4,
-    Uint8x4,
-    Unorm16x2,
-    Unorm16x4,
-    Uint16x4,
-}
 
 impl VertexFormat {
     #[must_use]

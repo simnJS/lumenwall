@@ -115,6 +115,75 @@ impl LinearArena {
     }
 }
 
+/// Colour format of a render target.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TargetFormat {
+    /// Every target of the wgpu path today (`RT_FORMAT`).
+    #[default]
+    Rgba8Unorm,
+    /// HDR targets (`QualitySettings::hdr`, bloom of HDR scenes).
+    Rgba16Float,
+    /// `fbos` declaring one or two channels.
+    R8Unorm,
+    Rg8Unorm,
+}
+
+impl TargetFormat {
+    #[must_use]
+    pub fn bytes_per_pixel(self) -> u64 {
+        match self {
+            Self::Rgba8Unorm => 4,
+            Self::Rgba16Float => 8,
+            Self::R8Unorm => 1,
+            Self::Rg8Unorm => 2,
+        }
+    }
+}
+
+/// Format of a vertex attribute in a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VertexFormat {
+    Float32,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Sint32,
+    Sint32x2,
+    Sint32x3,
+    Sint32x4,
+    Uint32,
+    Uint32x2,
+    Uint32x3,
+    Uint32x4,
+    Unorm8x4,
+    Uint8x4,
+    Unorm16x2,
+    Unorm16x4,
+    Uint16x4,
+}
+
+impl VertexFormat {
+    /// Bytes of one attribute.
+    #[must_use]
+    pub fn size(self) -> u32 {
+        match self {
+            Self::Float32
+            | Self::Sint32
+            | Self::Uint32
+            | Self::Unorm8x4
+            | Self::Uint8x4
+            | Self::Unorm16x2 => 4,
+            Self::Float32x2
+            | Self::Sint32x2
+            | Self::Uint32x2
+            | Self::Unorm16x4
+            | Self::Uint16x4 => 8,
+            Self::Float32x3 | Self::Sint32x3 | Self::Uint32x3 => 12,
+            Self::Float32x4 | Self::Sint32x4 | Self::Uint32x4 => 16,
+        }
+    }
+}
+
 /// 2D texture or volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dimension {

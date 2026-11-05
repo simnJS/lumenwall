@@ -8,6 +8,7 @@
 mod buffer;
 mod compile;
 mod device;
+mod external;
 mod memory;
 mod query;
 mod readback;
@@ -17,18 +18,24 @@ mod target;
 mod texture;
 mod window;
 
+/// Output passes (task D3D11 4/n owns this folder).
+pub mod output;
+/// Scene executor (task D3D11 3/n owns this folder).
+pub mod scene;
+
 pub use buffer::{ConstantArena, DynamicBuffer, StaticBuffer, StaticBufferKind};
 pub use compile::{
-    CacheOutcome, DEFAULT_ATTRIBUTES, ShaderProgram, VertexElement, VertexFormat, compile_hlsl,
-    compile_program, create_input_layout,
+    CacheOutcome, DEFAULT_ATTRIBUTES, ShaderProgram, VertexElement, compile_hlsl, compile_program,
+    create_input_layout,
 };
 pub use device::{AdapterChoice, AdapterInfo, Caps, Device, DeviceOptions, Luid};
+pub use external::{DecodedFrame, PlaneFormat, plane_views};
 pub use memory::{GpuMemory, SegmentMemory};
 pub use query::GpuTimer;
 pub use readback::{Subresource, read_subresource, read_texture_rgba8};
 pub use state::StateCache;
 pub use swapchain::{PresentStatus, SwapChain};
-pub use target::{DepthBuffer, RenderTarget, TargetDesc, TargetFormat};
+pub use target::{DepthBuffer, RenderTarget, TargetDesc};
 pub use texture::{Texture, dxgi_format};
 pub use window::OffscreenWindow;
 

@@ -16,19 +16,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 
 use super::device::Device;
 use crate::error::{Error, Result, out};
-
-/// Colour format of a target.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum TargetFormat {
-    /// Every target of the wgpu path today (`RT_FORMAT`).
-    #[default]
-    Rgba8Unorm,
-    /// HDR targets (bloom and HDR scenes, spec 04 Q23 when it lands).
-    Rgba16Float,
-    /// `fbos` declaring one or two channels.
-    R8Unorm,
-    Rg8Unorm,
-}
+use crate::layout::TargetFormat;
 
 impl TargetFormat {
     #[must_use]
@@ -38,16 +26,6 @@ impl TargetFormat {
             Self::Rgba16Float => DXGI_FORMAT_R16G16B16A16_FLOAT,
             Self::R8Unorm => DXGI_FORMAT_R8_UNORM,
             Self::Rg8Unorm => DXGI_FORMAT_R8G8_UNORM,
-        }
-    }
-
-    #[must_use]
-    pub fn bytes_per_pixel(self) -> u64 {
-        match self {
-            Self::Rgba8Unorm => 4,
-            Self::Rgba16Float => 8,
-            Self::R8Unorm => 1,
-            Self::Rg8Unorm => 2,
         }
     }
 }
