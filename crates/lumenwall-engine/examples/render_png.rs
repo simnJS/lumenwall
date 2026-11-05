@@ -18,6 +18,10 @@
 //!   --scaling MODE     stretch | fit | fill | default (default: default)
 //!   --hwdec MODE       video decoding: auto | nvdec-copy | no (default: auto)
 //!   --no-particles     particle systems are not created
+//!   --msaa M           anti-aliasing: off | x2 | x4 | x8 (default: off)
+//!   --texture-resolution R  full | half | quarter (default: full)
+//!   --hdr H            off | scene (default: off)
+//!   --native-resolution  render chains and effects at the scene's own size
 //!   --pointer X,Y      pointer in output pixels from the top-left (default: mouse disabled)
 //!   --click a,b,c      frames during which the left button is held
 //!   --audio synthetic  feed a synthetic moving spectrum (nothing is played)
@@ -90,6 +94,12 @@ fn main() {
             "--software" => opts.software = true,
             "--pace" => opts.pace = val().parse().ok(),
             "--no-particles" => opts.particles = false,
+            "--msaa" => opts.quality.msaa = val().parse().expect("--msaa"),
+            "--texture-resolution" => {
+                opts.quality.texture_resolution = val().parse().expect("--texture-resolution");
+            }
+            "--hdr" => opts.quality.hdr = val().parse().expect("--hdr"),
+            "--native-resolution" => opts.quality.native_resolution = true,
             "--click" => {
                 opts.clicks = val()
                     .split(',')

@@ -378,3 +378,54 @@ fn the_app_toggle_works_over_ipc() {
     assert!(state.paused);
     assert_eq!(state.pause_reason, Some(PauseReason::Battery));
 }
+
+#[test]
+fn quality_settings_are_written_reload_the_engine_and_bad_values_are_refused() {
+    let rig = Rig::new("fps = 24\n", None);
+    let h = rig.handler();
+    let before = h.settings().unwrap();
+    // The defaults are reported as such.
+    assert_eq!(before.msaa.as_deref(), Some("off"));
+    assert_eq!(before.texture_resolution.as_deref(), Some("full"));
+    assert_eq!(before.hdr.as_deref(), Some("off"));
+    assert_eq!(before.native_resolution, Some(false));
+
+    let reloads = rig.reloads();
+    h.set_settings(Settings {
+        msaa: Some("x4".into()),
+        texture_resolution: Some("half".into()),
+        hdr: Some("scene".into()),
+        native_resolution: Some(true),
+        ..before.clone()
+    })
+    .unwrap();
+    let after = h.settings().unwrap();
+    assert_eq!(after.msaa.as_deref(), Some("x4"));
+    assert_eq!(after.texture_resolution.as_deref(), Some("half"));
+    assert_eq!(after.hdr.as_deref(), Some("scene"));
+    assert_eq!(after.native_resolution, Some(true));
+    let file = rig.file();
+    assert!(file.contains("msaa = \"x4\""), "{file}");
+    assert!(file.contains("texture-resolution = \"half\""), "{file}");
+    assert!(file.contains("native-resolution = true"), "{file}");
+    assert!(rig.reloads() > reloads, "the wallpapers are reloaded");
+
+    // A bad value is refused and nothing changes.
+    let err = h.set_settings(Settings {
+        msaa: Some("x3".into()),
+        ..after.clone()
+    });
+    assert!(err.is_err());
+    assert_eq!(h.settings().unwrap().msaa.as_deref(), Some("x4"));
+
+    // A request that leaves the quality out changes nothing.
+    h.set_settings(Settings {
+        msaa: None,
+        texture_resolution: None,
+        hdr: None,
+        native_resolution: None,
+        ..after
+    })
+    .unwrap();
+    assert_eq!(h.settings().unwrap().msaa.as_deref(), Some("x4"));
+}

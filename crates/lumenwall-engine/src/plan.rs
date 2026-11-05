@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use lumenwall_render::{ClampMode, ScalingMode};
+use lumenwall_render::{ClampMode, QualitySettings, ScalingMode};
+
+use crate::scene::EngineSettings;
 
 /// Output mode (spec 07 §4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +115,10 @@ pub struct EnginePlan {
     pub mouse: bool,
     pub parallax: bool,
     pub particles: bool,
+    /// Quality settings (`--msaa`, `--texture-resolution`, `--hdr`, `--native-resolution`).
+    /// The development environment variables (`LUMENWALL_MSAA`, ...) override them setting by
+    /// setting, see [`EnginePlan::engine_settings`].
+    pub quality: QualitySettings,
     /// `--assets-dir`.
     pub assets_dir: Option<PathBuf>,
     /// `--set-property` overrides by exact key.
@@ -122,6 +128,44 @@ pub struct EnginePlan {
     pub list_properties: bool,
     pub dump_structure: bool,
     pub debug: DebugPlan,
+}
+
+impl EnginePlan {
+    /// The settings scenes are built with: the plan's quality, with each development variable
+    /// that is set and valid (`LUMENWALL_MSAA`, `LUMENWALL_TEXTURE_RESOLUTION`,
+    /// `LUMENWALL_HDR`, `LUMENWALL_FULL_SIZE_CHAINS`) overriding its setting.
+    #[must_use]
+    pub fn engine_settings(&self) -> EngineSettings {
+        self.engine_settings_with(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::engine_settings`] over any variable lookup.
+    #[must_use]
+    pub fn engine_settings_with(&self, get: impl Fn(&str) -> Option<String>) -> EngineSettings {
+        quality_with_overrides(self.quality, get)
+    }
+}
+
+/// `quality` as engine settings, each development variable that is set and valid overriding
+/// its setting.
+#[must_use]
+pub fn quality_with_overrides(
+    mut q: QualitySettings,
+    get: impl Fn(&str) -> Option<String>,
+) -> EngineSettings {
+    if let Some(v) = get("LUMENWALL_MSAA").and_then(|v| v.parse().ok()) {
+        q.msaa = v;
+    }
+    if let Some(v) = get("LUMENWALL_TEXTURE_RESOLUTION").and_then(|v| v.parse().ok()) {
+        q.texture_resolution = v;
+    }
+    if let Some(v) = get("LUMENWALL_HDR").and_then(|v| v.parse().ok()) {
+        q.hdr = v;
+    }
+    if let Some(v) = get("LUMENWALL_FULL_SIZE_CHAINS") {
+        q.native_resolution = v != "0";
+    }
+    EngineSettings { quality: q }
 }
 
 impl Default for EnginePlan {
@@ -138,6 +182,7 @@ impl Default for EnginePlan {
             mouse: true,
             parallax: true,
             particles: true,
+            quality: QualitySettings::default(),
             assets_dir: None,
             properties: BTreeMap::new(),
             screenshot: None,
@@ -167,7 +212,7 @@ pub enum EngineControl {
     /// rebound, audio, fps, pause and surfaces updated, only where the plan differs. Either
     /// the whole plan applies, or `done` receives the error and the engine is unchanged.
     /// `assets_dir`, `hwdec`, input, particles and debug switches apply to the wallpapers
-    /// loaded afterwards; `screenshot`, `list_properties` and `dump_structure` are ignored.
+    /// loaded afterwards (a change of quality settings rebuilds every wallpaper); `screenshot`, `list_properties` and `dump_structure` are ignored.
     Reload {
         plan: Box<EnginePlan>,
         done: Option<ReloadDone>,
@@ -183,4 +228,43 @@ pub enum Stopped {
     Requested,
     /// Window closed or display connection lost.
     Driver,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lumenwall_render::{HdrMode, Msaa, TextureResolution};
+
+    #[test]
+    fn the_default_plan_asks_for_the_cheapest_quality() {
+        let settings = EnginePlan::default().engine_settings_with(|_| None);
+        assert!(settings.quality.is_default());
+    }
+
+    #[test]
+    fn plan_quality_is_used_and_development_variables_override_it() {
+        let plan = EnginePlan {
+            quality: QualitySettings {
+                msaa: Msaa::X4,
+                texture_resolution: TextureResolution::Half,
+                hdr: HdrMode::Scene,
+                native_resolution: true,
+            },
+            ..EnginePlan::default()
+        };
+        assert_eq!(plan.engine_settings_with(|_| None).quality, plan.quality);
+        let q = plan
+            .engine_settings_with(|name| match name {
+                "LUMENWALL_MSAA" => Some("x2".into()),
+                "LUMENWALL_TEXTURE_RESOLUTION" => Some("bogus".into()),
+                "LUMENWALL_FULL_SIZE_CHAINS" => Some("0".into()),
+                _ => None,
+            })
+            .quality;
+        assert_eq!(q.msaa, Msaa::X2);
+        // An unreadable variable keeps the plan's value.
+        assert_eq!(q.texture_resolution, TextureResolution::Half);
+        assert_eq!(q.hdr, HdrMode::Scene);
+        assert!(!q.native_resolution);
+    }
 }

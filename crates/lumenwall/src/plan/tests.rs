@@ -138,6 +138,8 @@ fn defaults_of_spec_07_2_4() {
         }
     );
     assert!(p.particles);
+    // The defaults cost nothing more than before the quality settings existed.
+    assert!(p.quality.is_default());
     assert_eq!(p.assets_dir, None);
     assert!(p.properties.is_empty());
     assert_eq!(p.screenshot, None);
@@ -892,4 +894,47 @@ fn wallpaper_levels() {
         &config,
     );
     assert_eq!(p.engine_volume(), 50);
+}
+
+#[test]
+fn quality_comes_from_the_file_and_the_command_line_wins() {
+    use lumenwall_engine::{HdrMode, Msaa, QualitySettings, TextureResolution};
+    let config = r#"
+        msaa = "x2"
+        texture-resolution = "half"
+        hdr = "scene"
+        native-resolution = true
+    "#;
+    let p = plan_cfg(&["X"], config);
+    assert_eq!(
+        p.quality,
+        QualitySettings {
+            msaa: Msaa::X2,
+            texture_resolution: TextureResolution::Half,
+            hdr: HdrMode::Scene,
+            native_resolution: true,
+        }
+    );
+    let p = plan_cfg(
+        &[
+            "X",
+            "--msaa",
+            "x8",
+            "--texture-resolution",
+            "quarter",
+            "--hdr",
+            "off",
+        ],
+        config,
+    );
+    assert_eq!(p.quality.msaa, Msaa::X8);
+    assert_eq!(p.quality.texture_resolution, TextureResolution::Quarter);
+    assert_eq!(p.quality.hdr, HdrMode::Off);
+    assert!(p.quality.native_resolution);
+    let p = plan(&["X", "--native-resolution"]);
+    assert!(p.quality.native_resolution && p.quality.msaa == Msaa::Off);
+    assert_eq!(
+        diff(&plan(&["X"]), &plan(&["X", "--msaa", "x4"])),
+        [PlanChange::Quality]
+    );
 }

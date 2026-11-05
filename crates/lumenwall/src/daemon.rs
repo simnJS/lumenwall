@@ -591,6 +591,10 @@ impl Daemon {
             volume: volume_fraction(plan.audio.volume),
             autostart: autostart_enabled(),
             gpu_release_delay_s: Some(plan.gpu_release_delay),
+            msaa: Some(plan.quality.msaa.to_string()),
+            texture_resolution: Some(plan.quality.texture_resolution.to_string()),
+            hdr: Some(plan.quality.hdr.to_string()),
+            native_resolution: Some(plan.quality.native_resolution),
         }
     }
 
@@ -924,6 +928,32 @@ impl Daemon {
                 && new.gpu_release_delay_s != current.gpu_release_delay_s
             {
                 t.insert("gpu-release-delay", value(i64::from(delay)));
+            }
+            // Quality: a value left out is unchanged; an unknown text is refused by the
+            // configuration parse below, and the command line no longer overrides what the
+            // user just chose.
+            if let Some(v) = new.msaa.as_ref().filter(|_| new.msaa != current.msaa) {
+                t.insert("msaa", value(v.as_str()));
+                d.cli.settings.msaa = None;
+            }
+            if let Some(v) = new
+                .texture_resolution
+                .as_ref()
+                .filter(|_| new.texture_resolution != current.texture_resolution)
+            {
+                t.insert("texture-resolution", value(v.as_str()));
+                d.cli.settings.texture_resolution = None;
+            }
+            if let Some(v) = new.hdr.as_ref().filter(|_| new.hdr != current.hdr) {
+                t.insert("hdr", value(v.as_str()));
+                d.cli.settings.hdr = None;
+            }
+            if let Some(v) = new
+                .native_resolution
+                .filter(|_| new.native_resolution != current.native_resolution)
+            {
+                t.insert("native-resolution", value(v));
+                d.cli.settings.native_resolution = false;
             }
             if new.muted != current.muted || (new.volume - current.volume).abs() > 1e-3 {
                 t.insert("silent", value(new.muted));

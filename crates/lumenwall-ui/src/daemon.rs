@@ -94,7 +94,7 @@ pub struct DaemonLink {
 pub enum DaemonEvent {
     /// The worker is running; commands go to this sender.
     Ready(Sender<Cmd>),
-    Msg(Msg),
+    Msg(Box<Msg>),
 }
 
 impl std::fmt::Debug for Cmd {
@@ -127,7 +127,7 @@ pub fn subscription(endpoint: lumenwall_ipc::Endpoint) -> iced::Subscription<Dae
             }
             let _ = output.send(DaemonEvent::Ready(cmd_tx)).await;
             while let Some(msg) = ui_rx.next().await {
-                if output.send(DaemonEvent::Msg(msg)).await.is_err() {
+                if output.send(DaemonEvent::Msg(Box::new(msg))).await.is_err() {
                     break;
                 }
             }
@@ -163,7 +163,7 @@ impl DaemonLink {
                 self.cmd = Some(tx);
                 self.send(Cmd::Connect);
             }
-            DaemonEvent::Msg(msg) => self.apply_msg(msg),
+            DaemonEvent::Msg(msg) => self.apply_msg(*msg),
         }
     }
 

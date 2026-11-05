@@ -47,7 +47,7 @@ use crate::monitor::{
     Change, EngineMonitor, EngineReport, OutputReport, PauseCause, TargetReport, TargetState,
 };
 use crate::plan::{EngineControl, EnginePlan, OutputMode, Stopped, TargetPlan};
-use crate::scene::{FrameState, SceneOptions, SceneRuntime, ScreenState, build_scene};
+use crate::scene::{FrameState, SceneOptions, SceneRuntime, ScreenState, build_scene_with};
 use crate::shaders::default_provider;
 use crate::video::{VideoSlot, notify_from};
 use crate::wallpaper::Wallpaper;
@@ -1088,6 +1088,7 @@ impl Local {
         // Options that shape how a wallpaper is read or built: nothing can be reused.
         let rebuild_all = new.assets_dir != old.assets_dir
             || new.particles != old.particles
+            || new.quality != old.quality
             || new.parallax != old.parallax
             || new.debug != old.debug;
         let rebuild_video = new.hwdec != old.hwdec;
@@ -2081,7 +2082,8 @@ fn build_renderer(
         .map(|o| o.physical_size)
         .fold(size, |a, b| if b.0 * b.1 > a.0 * a.1 { b } else { a });
     let display = (!crate::scene::scene_size_target_forced()).then_some((largest, tplan.scaling));
-    let runtime = build_scene(
+    let settings = plan.engine_settings();
+    let runtime = build_scene_with(
         &r.ctx,
         &mut wp.project,
         &wp.vfs,
@@ -2094,7 +2096,19 @@ fn build_renderer(
             debug: plan.debug.clone(),
             display,
         },
+        &settings,
     )?;
+    let q = settings.quality;
+    if !q.is_default() {
+        tracing::info!(
+            "scene '{}' quality: msaa {}, textures {}, hdr {}, native resolution {}",
+            wp.project.title,
+            q.msaa,
+            q.texture_resolution,
+            q.hdr,
+            q.native_resolution
+        );
+    }
     let s = runtime.stats;
     tracing::info!(
         "scene '{}' {}x{} loaded in {:.0} ms: {} image(s), {} pass(es), {} particle system(s), {} texture(s) ({:.1} MiB), {} stand-in shader(s), {} object(s) skipped; GPU memory tracked {:.1} MiB",

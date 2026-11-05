@@ -81,6 +81,10 @@ fn schema_is_consistent() {
         ("screenshot-delay", None, true),
         ("assets-dir", None, true),
         ("disable-particles", None, false),
+        ("msaa", None, true),
+        ("texture-resolution", None, true),
+        ("hdr", None, true),
+        ("native-resolution", None, false),
         ("disable-mouse", None, false),
         ("disable-parallax", None, false),
         ("list-properties", Some('l'), false),
@@ -1099,4 +1103,32 @@ fn full_combination() {
     assert_eq!(cli.settings.hwdec, Some(HwDecode::No));
     assert_eq!(cli.settings.volume, Some(40));
     assert!(cli.settings.disable_mouse);
+}
+
+#[test]
+fn quality_options() {
+    use lumenwall_engine::{HdrMode, Msaa, TextureResolution};
+    let cli = ok(&[
+        "--msaa",
+        "x4",
+        "--texture-resolution",
+        "half",
+        "--hdr",
+        "scene",
+        "--native-resolution",
+    ]);
+    let s = &cli.settings;
+    assert_eq!(s.msaa, Some(Msaa::X4));
+    assert_eq!(s.texture_resolution, Some(TextureResolution::Half));
+    assert_eq!(s.hdr, Some(HdrMode::Scene));
+    assert!(s.native_resolution);
+    let none = ok(&[]);
+    assert_eq!(none.settings.msaa, None);
+    assert!(!none.settings.native_resolution);
+    assert_eq!(invalid_for(&err(&["--msaa", "x3"])), "--msaa");
+    assert_eq!(
+        invalid_for(&err(&["--texture-resolution", "tiny"])),
+        "--texture-resolution"
+    );
+    assert_eq!(invalid_for(&err(&["--hdr", "yes please"])), "--hdr");
 }

@@ -13,6 +13,10 @@
 //! fullscreen-pause-ignore-appids = ["mpv"]
 //! gpu-release-delay = 300         # seconds paused before the GPU is released; 0 = never
 //! pause-on-battery = true         # pause every output while on battery (default false)
+//! msaa = "x4"                     # anti-aliasing: off, x2, x4, x8 (default off)
+//! texture-resolution = "half"     # full, half, quarter (default full)
+//! hdr = "scene"                   # off, scene (default off)
+//! native-resolution = true        # render at the scene's own size (default false)
 //!
 //! [properties]
 //! bloom = true                    # booleans become "1"/"0"
@@ -39,7 +43,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use lumenwall_engine::{HdrMode, Msaa, TextureResolution};
+use serde::{Deserialize, Deserializer};
 
 use crate::cli::ConfigChoice;
 use crate::settings::{
@@ -77,6 +82,17 @@ pub struct Config {
     pub mouse: Option<bool>,
     pub parallax: Option<bool>,
     pub particles: Option<bool>,
+    /// Anti-aliasing: `off`, `x2`, `x4`, `x8` (default `off`).
+    #[serde(deserialize_with = "from_text")]
+    pub msaa: Option<Msaa>,
+    /// Texture size: `full`, `half`, `quarter` (default `full`).
+    #[serde(deserialize_with = "from_text")]
+    pub texture_resolution: Option<TextureResolution>,
+    /// HDR targets for the scenes that ask for them: `off`, `scene` (default `off`).
+    #[serde(deserialize_with = "from_text")]
+    pub hdr: Option<HdrMode>,
+    /// Render image chains and effects at the scene's own size (default false).
+    pub native_resolution: Option<bool>,
     pub assets_dir: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub screenshot_delay: Option<i64>,
@@ -94,6 +110,18 @@ pub struct Config {
     #[serde(rename = "span")]
     pub spans: Vec<SpanConfig>,
     pub log: LogConfig,
+}
+
+/// Reads an optional value through its `FromStr`, so a bad value is rejected with the type's own
+/// message ("unknown msaa 'x3' (off, x2, x4, x8)").
+fn from_text<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: std::str::FromStr<Err = String>,
+{
+    Option::<String>::deserialize(d)?
+        .map(|s| s.parse().map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 /// A property value; TOML scalars are converted to the text the command line would pass.
@@ -379,6 +407,10 @@ mod tests {
             mouse = false
             parallax = false
             particles = false
+            msaa = "x4"
+            texture-resolution = "half"
+            hdr = "scene"
+            native-resolution = true
             assets-dir = "/we/assets"
             screenshot = "/tmp/shot.png"
             screenshot-delay = 9
@@ -420,6 +452,10 @@ mod tests {
         assert_eq!(config.scaling, Some(Scaling::Fill));
         assert_eq!(config.hwdec, Some(HwDecode::NvdecCopy));
         assert_eq!(config.pause_on_battery, Some(true));
+        assert_eq!(config.msaa, Some(Msaa::X4));
+        assert_eq!(config.texture_resolution, Some(TextureResolution::Half));
+        assert_eq!(config.hdr, Some(HdrMode::Scene));
+        assert_eq!(config.native_resolution, Some(true));
         assert_eq!(config.properties["bloom"].to_text(), "1");
         assert_eq!(config.properties["off"].to_text(), "0");
         assert_eq!(config.properties["count"].to_text(), "3");
@@ -455,6 +491,10 @@ mod tests {
             ("gpu-release-delay = -5", "gpu-release-delay"),
             ("gpu-release-delay = 5000000000", "gpu-release-delay"),
             ("scaling = \"Fill\"", "unknown variant"),
+            ("msaa = \"x3\"", "unknown anti-aliasing"),
+            ("texture-resolution = \"eighth\"", "texture"),
+            ("hdr = \"always\"", "unknown hdr mode"),
+            ("native-resolution = \"yes\"", "invalid type"),
             ("wallpaper = \"\"", "cannot be empty"),
             ("[window]\nwidth = 0\nheight = 10", "positive"),
             (

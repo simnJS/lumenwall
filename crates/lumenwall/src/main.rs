@@ -163,6 +163,7 @@ fn engine_plan(plan: &ExecutionPlan) -> EnginePlan {
         mouse: plan.input.mouse,
         parallax: plan.input.parallax,
         particles: plan.particles,
+        quality: plan.quality,
         assets_dir: plan.assets_dir.clone(),
         properties: plan.properties.clone(),
         screenshot: plan

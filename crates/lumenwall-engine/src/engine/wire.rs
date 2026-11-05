@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lumenwall_render::{ClampMode, ScalingMode};
+use lumenwall_render::{ClampMode, QualitySettings, ScalingMode};
 use serde_json::{Map, Value, json};
 
 use crate::monitor::{
@@ -171,6 +171,15 @@ fn path_json(p: &std::path::Path) -> Value {
     }
 }
 
+fn quality_from(v: &Value) -> R<QualitySettings> {
+    Ok(QualitySettings {
+        msaa: as_str(v, "msaa")?.parse()?,
+        texture_resolution: as_str(v, "texture_resolution")?.parse()?,
+        hdr: as_str(v, "hdr")?.parse()?,
+        native_resolution: as_bool(v, "native_resolution")?,
+    })
+}
+
 fn path_from(v: &Value) -> R<PathBuf> {
     if let Some(s) = v.as_str() {
         return Ok(PathBuf::from(s));
@@ -300,6 +309,12 @@ pub(super) fn plan_json(p: &EnginePlan) -> Value {
         "mouse": p.mouse,
         "parallax": p.parallax,
         "particles": p.particles,
+        "quality": {
+            "msaa": p.quality.msaa.to_string(),
+            "texture_resolution": p.quality.texture_resolution.to_string(),
+            "hdr": p.quality.hdr.to_string(),
+            "native_resolution": p.quality.native_resolution,
+        },
         "assets_dir": p.assets_dir.as_deref().map(path_json),
         "properties": p.properties,
         "screenshot": p.screenshot.as_ref().map(|(path, delay)| json!({
@@ -391,6 +406,7 @@ pub(super) fn plan_from(v: &Value) -> R<EnginePlan> {
         mouse: as_bool(v, "mouse")?,
         parallax: as_bool(v, "parallax")?,
         particles: as_bool(v, "particles")?,
+        quality: quality_from(field(v, "quality")?)?,
         assets_dir: opt(v, "assets_dir").map(path_from).transpose()?,
         properties,
         screenshot: match opt(v, "screenshot") {
@@ -795,6 +811,7 @@ impl FromHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lumenwall_render::{HdrMode, Msaa, TextureResolution};
 
     fn full_plan() -> EnginePlan {
         let mut properties = BTreeMap::new();
@@ -841,6 +858,12 @@ mod tests {
             mouse: false,
             parallax: false,
             particles: false,
+            quality: QualitySettings {
+                msaa: Msaa::X4,
+                texture_resolution: TextureResolution::Half,
+                hdr: HdrMode::Scene,
+                native_resolution: true,
+            },
             assets_dir: Some(PathBuf::from("assets")),
             properties,
             screenshot: Some((PathBuf::from("shot.png"), 5)),

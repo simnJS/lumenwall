@@ -175,6 +175,8 @@ pub struct ExecutionPlan {
     pub pause_on_battery: bool,
     pub input: InputPlan,
     pub particles: bool,
+    /// Quality settings handed to the engine.
+    pub quality: lumenwall_engine::QualitySettings,
     pub assets_dir: Option<PathBuf>,
     /// Property overrides by exact key (§3.6).
     pub properties: BTreeMap<String, String>,
@@ -573,6 +575,15 @@ pub fn build_with(
             parallax: !s.disable_parallax && file.parallax.unwrap_or(true),
         },
         particles: !s.disable_particles && file.particles.unwrap_or(true),
+        quality: lumenwall_engine::QualitySettings {
+            msaa: s.msaa.or(file.msaa).unwrap_or_default(),
+            texture_resolution: s
+                .texture_resolution
+                .or(file.texture_resolution)
+                .unwrap_or_default(),
+            hdr: s.hdr.or(file.hdr).unwrap_or_default(),
+            native_resolution: s.native_resolution || file.native_resolution.unwrap_or(false),
+        },
         assets_dir: s.assets_dir.clone().or_else(|| file.assets_dir.clone()),
         properties,
         screenshot,
@@ -604,6 +615,7 @@ pub enum PlanChange {
     BatteryPause,
     Input,
     Particles,
+    Quality,
     AssetsDir,
     Properties,
     Screenshot,
@@ -663,6 +675,7 @@ pub fn diff(old: &ExecutionPlan, new: &ExecutionPlan) -> Vec<PlanChange> {
         ),
         (old.input != new.input, PlanChange::Input),
         (old.particles != new.particles, PlanChange::Particles),
+        (old.quality != new.quality, PlanChange::Quality),
         (old.assets_dir != new.assets_dir, PlanChange::AssetsDir),
         (old.properties != new.properties, PlanChange::Properties),
         (old.screenshot != new.screenshot, PlanChange::Screenshot),
