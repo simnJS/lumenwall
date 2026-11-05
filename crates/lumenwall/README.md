@@ -42,9 +42,11 @@ signals (SIGINT/SIGTERM, console events) ─────────────
 | `daemon` | IPC daemon (`lumenwall-ipc` `Handler`): reads from engine snapshots, client choices written atomically to the configuration file (`toml_edit`, comments kept) and applied live, statistics sampled only while subscribed; `daemon/playlists`: one runner per playlist target and the thread that changes items ([Playlists](#playlists)) |
 | `app` | Lifecycle (§1.1 order), exit codes, single instance |
 
-`main.rs` plugs placeholder services until the other crates are wired: paths resolve as is,
-Workshop IDs, the Wallpaper Engine installation lookup and the engine report "not integrated
-yet" (exit code 1).
+`main.rs` plugs the real services: `lumenwall-engine`'s resolver (Workshop IDs, the Wallpaper
+Engine installation lookup), `WeConfigCatalog` for playlists and `lumenwall_engine::Engine`. On
+Windows the engine runs in a process of its own that the daemon starts with the first wallpaper
+and ends with the last (`lumenwall-engine` README, "Engine process (Windows)"); the first
+argument `--lumenwall-engine-host` of `lumenwall.exe` selects that role and is not a user option.
 
 ## Command-line options
 
@@ -66,7 +68,7 @@ marked *target* apply to the output or span group named by the last `-r`/`--scre
 | `--fps` | `-f` | integer ≥ 1 | 30 | Frame-rate cap |
 | `--hwdec` | | `auto` `nvdec-copy` `no` | `auto` | Hardware video decoding |
 | `--no-fullscreen-pause` | | | pause on | Keep rendering under fullscreen windows |
-| `--fullscreen-pause-only-active` | | | off | Wayland: only active fullscreen windows pause |
+| `--fullscreen-pause-only-active` | | | off | Wayland and Windows: only the active (foreground) fullscreen window pauses |
 | `--fullscreen-pause-ignore-appid` | | text | — | Ignore app_ids containing it; empty values ignored. Repeatable |
 | `--volume` | `-v` | integer | 64 | Clamped to 0..=128 (gain = volume / 128); see [Sound](#sound). Exclusive with `--silent` |
 | `--silent` | `-s` | | off | Mute wallpapers |
@@ -114,6 +116,7 @@ audio-processing = true
 fullscreen-pause = true
 fullscreen-pause-only-active = false
 fullscreen-pause-ignore-appids = ["mpv"]
+pause-on-battery = false           # true: pause every output while the computer runs on battery
 gpu-release-delay = 300            # seconds every output stays paused before the GPU device,
                                    # video memory and driver threads are released; 0 = never
 scaling = "default"                # global default
@@ -168,6 +171,10 @@ Merge with the command line (command line first):
 - **Scalars**: command line, then file, then defaults. Flags (`--silent`, `--noautomute`…)
   can only force their setting; `--volume` turns a configured `silent` off.
 - **Lists**: `--fullscreen-pause-ignore-appid` replaces the file's list.
+- **Pause on battery**: file only (`pause-on-battery`, or the app's Settings switch), see
+  [Pause on battery](#pause-on-battery).
+- **Media**: no key and no option. The now-playing session is followed only while a wallpaper
+  uses it (see [Media](#media)).
 - **Properties**: merged by key, command line wins.
 - **Per-wallpaper sound**: file only (`[wallpaper-audio]`); a path to a Workshop item folder
   is read as its ID.
@@ -206,6 +213,26 @@ input, particles, hwdec, layer, assets, properties, screenshot). An invalid file
 and the running settings stay; a removed file means defaults. The log level is reloaded;
 log file settings apply at next start. The directory must exist at startup to be watched.
 
+## Pause on battery
+
+`pause-on-battery = true` (off by default, like Wallpaper Engine's default of keeping running; the
+Settings page of the app writes it) pauses every output while the computer runs on battery and
+resumes on mains. The daemon follows the power source only while the setting is on: Windows
+`PowerSettingRegisterNotification` (`GUID_ACDC_POWER_SOURCE`, a callback without window or thread
+of ours; battery and UPS both count as battery), Linux UPower (`OnBattery` on the system bus). It
+combines with the client pause (the state's pause reason is `battery`), counts as a pause for the
+playlists and never reloads the engine, so a released GPU stays released (`PlanChange::BatteryPause`
+is the daemon's alone). Tested with a fake power source (`daemon/battery_tests.rs`); the switch to
+battery itself was not tested (the test machine is a desktop on mains).
+
+## Media
+
+The now-playing session (Windows media session, MPRIS on Linux) needs no setting: the engine
+follows it only while a scene's scripts handle media events, a scene samples `$mediaThumbnail` /
+`$mediaPreviousThumbnail`, or a web page registered a media listener, and the daemon's own code follows none
+(`lumenwall-engine` README, "Media integration"; `lumenwall-audio` README). Artwork is never
+downloaded from the network.
+
 ## Playlists
 
 Wallpaper Engine playlists (its `config.json`, spec 07 §17) run in the daemon, one per target
@@ -221,8 +248,9 @@ Wallpaper Engine playlists (its `config.json`, spec 07 §17) run in the daemon, 
   Other modes never change by themselves (§17.3); next and previous still work.
 - **Order.** `"order": "random"` shuffles each round; anything else (`sorted`, `sequential`)
   plays in the playlist's order and loops.
-- **Pauses.** Unless `updateonpause`, time spent paused does not count: the user pause, or every
-  output of the target paused (fullscreen window, locked session, hidden or covered). While all
+- **Pauses.** Unless `updateonpause`, time spent paused does not count: the user pause, the pause
+  on battery, or every output of the target paused (fullscreen window, locked session, hidden or
+  covered). While all
   playing playlists wait for a pause to end, the thread has no deadline at all. With
   `updateonpause`, items change while paused.
 - **Failures.** An item whose `project.json` lacks `type` or `file`, or that the engine cannot
@@ -239,7 +267,8 @@ Wallpaper Engine playlists (its `config.json`, spec 07 §17) run in the daemon, 
 
 ## IPC daemon (Lumenwall extension)
 
-- `lumenwall` serves `lumenwall-ipc` on `$XDG_RUNTIME_DIR/lumenwall/ipc.sock` (`LUMENWALL_IPC_ENDPOINT` overrides).
+- `lumenwall` serves `lumenwall-ipc` on `$XDG_RUNTIME_DIR/lumenwall/ipc.sock` (Windows: the named pipe
+  `\\.\pipe\lumenwall-ipc-<user>`); `LUMENWALL_IPC_ENDPOINT` overrides.
   Single instance: a second `lumenwall` sends its wallpaper (`apply`) or playlist (`apply_playlist`)
   to the running one, or prints "Lumenwall is already running"; exit 0.
 - Playlists: `list_playlists` (read again from Wallpaper Engine's `config.json` on each request),
@@ -248,9 +277,9 @@ Wallpaper Engine playlists (its `config.json`, spec 07 §17) run in the daemon, 
 - `lumenwall` with no argument and no configured wallpaper starts idle (no surface, no GPU device)
   and waits for a client (deviation: the reference exits with "no wallpaper").
 - Client choices (wallpaper per output or for all, scaling, saved properties, fps, fullscreen
-  pause, automute, mute, volume, per-wallpaper sound, GPU release delay `gpu_release_delay_s`)
+  pause, pause on battery, automute, mute, volume, per-wallpaper sound, GPU release delay `gpu_release_delay_s`)
   go into the configuration file (`wallpaper`, `scaling`, `[[screen]]`, `[properties]`, `fps`,
-  `silent`, `volume`, `[wallpaper-audio]`, `gpu-release-delay`…), written atomically, and replace the command-line values they concern
+  `silent`, `volume`, `[wallpaper-audio]`, `gpu-release-delay`, `pause-on-battery`…), written atomically, and replace the command-line values they concern
   for the rest of the session. Pause and property previews are
   not saved. Property overrides stay keyed by name (shared by wallpapers with the same name).
 - Reads never wake the engine; statistics (fps, CPU ms/frame, GPU busy %, process CPU, RSS,
@@ -283,6 +312,15 @@ Wallpaper Engine playlists (its `config.json`, spec 07 §17) run in the daemon, 
 - A value with `/`, `\` or a drive prefix (`C:`) is a path; Workshop IDs otherwise.
 - Without a console there are no console control events: session end and window close are
   window messages that the platform layer must report as `StopReason::Driver`.
+- Status: scene, video and web wallpapers run on the development machine (Windows 11, NVIDIA GPU,
+  two monitors); see the root README. The daemon at rest is about 2 MiB private because the
+  engine lives in its own process (`lumenwall-engine` README, "Measurements"). Not tested: Windows 10
+  and the rest of the [platform checklist](../lumenwall-platform/README.md#to-check-on-windows-11-24h2--25h2-and-once-on-windows-10).
+- Installed by `Lumenwall-Setup.exe` (per user, `%LOCALAPPDATA%\Programs\Lumenwall`, "Démarrer avec
+  Windows" is the `Run` value `Lumenwall` = `lumenwall-ui.exe --background`). The installer is about
+  145 MB and the installed folder about 448 MB (estimates for the minimal FFmpeg build, to be
+  confirmed on the first release made that way: `docs/RELEASING.md`, "Sizes"); the installer is
+  not code-signed, so SmartScreen warns.
 
 ## Integration points (traits)
 

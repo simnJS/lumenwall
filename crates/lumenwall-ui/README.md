@@ -68,6 +68,18 @@ Update checks ask `api.github.com` at most every 12 hours (at start or when the 
 
 Each tile of the Screens page lists the Wallpaper Engine playlists the daemon reads (fetched again when the page opens, so playlists made in Wallpaper Engine meanwhile show up); choosing one plays it on that screen (`apply_playlist`, saved by the daemon). A screen that plays a playlist shows its name, the item shown ("3 of 7"), how it changes (every N minutes, random order, or only with Next), and Previous / Next / Stop the playlist (Stop keeps the wallpaper shown, through `apply`). A daemon without playlists gets no controls; one that cannot read Wallpaper Engine's settings says why.
 
+## Pause on battery
+
+The Settings page has a "Pause on battery" switch next to the other pause rules (`pause_on_battery` in the IPC settings, saved by the daemon as `pause-on-battery`; off by default). While the computer runs on battery the status bar says "Paused: on battery". The daemon does the work (`crates/lumenwall` README, "Pause on battery").
+
+## Media and the album cover
+
+The app has no player and shows nothing about the music playing. What is playing (title, artist, album, state, timeline and the cover) reaches the wallpapers themselves: scene scripts, the `$mediaThumbnail` / `$mediaPreviousThumbnail` textures that scenes such as 3372348904 sample, and web pages' media listeners. The engine follows the system's media session, only while a wallpaper uses it (`lumenwall-engine` README, "Media integration"); the app has no setting for it.
+
+## Windows
+
+The app is built for Windows (icon and version resources from `build.rs`, `tray-icon` for the tray, the installation items of the table above through the registry and Start menu shortcuts), and `Lumenwall-Setup.exe` opens it at the end of the install. It is **not yet tested** on a Windows desktop: no run of the installation dialog, the tray or the Screens page (playlists included) is recorded; the `setup::windows` tests use a fake registry and fake shortcuts. The wallpapers it applies (scene, video, web) do run on Windows through the daemon (root README, Features).
+
 ## Sound
 
 The status bar holds the global volume. The details panel's Customize section adds a level and a mute button for the selected wallpaper (global × wallpaper, saved by the daemon in `[wallpaper-audio]`), shown only when the wallpaper can make sound (a scene with sound objects, a video with an audio track or that could not be read, any web wallpaper) and the daemon keeps such levels (`state.wallpaper_audio`). Slider steps queued while dragging are merged: only the latest position is sent.
