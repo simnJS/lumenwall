@@ -392,7 +392,8 @@ pub struct DynamicBufferBuilder {
 }
 
 impl DynamicBufferBuilder {
-    /// `align` = `min_uniform_buffer_offset_alignment` of the device.
+    /// `align` = the backend's uniform offset alignment (`SceneBackend::uniform_alignment`;
+    /// `min_uniform_buffer_offset_alignment` on wgpu).
     #[must_use]
     pub fn new(align: u32) -> Self {
         let align = align.max(16);

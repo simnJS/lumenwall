@@ -8,6 +8,11 @@
 //! A scene builder's pool is *deferred*: targets get their GPU memory when the scene is built
 //! ([`RenderTargetPool::materialize`]), so that transient targets whose frame lifetimes never
 //! overlap can share one texture (render-graph aliasing, decided by `graph`).
+//!
+//! Calls that may allocate take a [`Gpu`] (any `&GpuContext` converts). Without a wgpu context (a
+//! scene on another backend, which allocates its own memory from the plan) the pool only plans:
+//! names, sizes, flexible sizes and shares; [`RenderTarget::texture`] and [`RenderTarget::view`]
+//! are then unavailable.
 
 use std::collections::{HashMap, HashSet};
 
@@ -75,6 +80,11 @@ impl RenderTarget {
             .expect("render target used before its scene was built")
     }
 
+    /// The wgpu texture (pools on wgpu only).
+    ///
+    /// # Panics
+    ///
+    /// Before the scene is built, or in a pool that plans for another backend.
     #[must_use]
     pub fn texture(&self) -> &wgpu::Texture {
         &self.gpu().0
