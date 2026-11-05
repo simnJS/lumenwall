@@ -343,6 +343,22 @@ fn newer_peers_are_tolerated() {
     let settings: Settings = serde_json::from_str(r#"{"gpu_release_delay_s":0}"#).unwrap();
     assert_eq!(settings.gpu_release_delay_s, Some(0));
 
+    // Quality settings: absent from older peers, left out when unknown, round-trip when set.
+    assert_eq!(settings.msaa, None);
+    assert!(
+        !text.contains("msaa") && !text.contains("native_resolution"),
+        "{text}"
+    );
+    let q = Settings {
+        msaa: Some("x4".into()),
+        texture_resolution: Some("half".into()),
+        hdr: Some("scene".into()),
+        native_resolution: Some(true),
+        ..Settings::default()
+    };
+    let back: Settings = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+    assert_eq!(back, q);
+
     let err: RemoteError = serde_json::from_str(r#"{"code":"quota_exceeded"}"#).unwrap();
     assert_eq!(err.code, ErrorCode::Unknown);
 

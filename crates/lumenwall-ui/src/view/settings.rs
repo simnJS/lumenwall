@@ -22,6 +22,7 @@ impl App {
         let body = column![
             header,
             self.engine_section(t),
+            self.quality_section(t),
             self.audio_section(t),
             self.startup_section(t),
             self.install_section(t),
@@ -140,6 +141,83 @@ impl App {
                     None,
                     s.pause_on_lock,
                     Some(with(|s, b| s.pause_on_lock = b))
+                ),
+            ]
+            .spacing(sp::M),
+        )
+    }
+
+    fn quality_section(&self, t: &'static Tokens) -> Element<'_, Message> {
+        let Some(s) = self.daemon.settings.clone() else {
+            return space().into();
+        };
+        // A daemon without the setting leaves it out: the default applies.
+        let msaa = s.msaa.clone().unwrap_or_else(|| "off".into());
+        let tex = s
+            .texture_resolution
+            .clone()
+            .unwrap_or_else(|| "full".into());
+        let hdr = s.hdr.clone().unwrap_or_else(|| "off".into());
+        let native = s.native_resolution.unwrap_or(false);
+        let choices = |current: &str,
+                       options: &[(&'static str, &'static str)],
+                       set: fn(&mut Settings, String)| {
+            row(options.iter().map(|&(value, caption)| {
+                let mut n = s.clone();
+                set(&mut n, value.to_owned());
+                chip(caption, current == value, Message::EngineSettings(n))
+            }))
+            .spacing(sp::XS)
+        };
+        let msaa_row = choices(
+            &msaa,
+            &[
+                ("off", self.t(K::QualityOff)),
+                ("x2", "2×"),
+                ("x4", "4×"),
+                ("x8", "8×"),
+            ],
+            |s, v| s.msaa = Some(v),
+        );
+        let tex_row = choices(
+            &tex,
+            &[
+                ("full", self.t(K::QualityFull)),
+                ("half", self.t(K::QualityHalf)),
+                ("quarter", self.t(K::QualityQuarter)),
+            ],
+            |s, v| s.texture_resolution = Some(v),
+        );
+        let hdr_row = choices(
+            &hdr,
+            &[
+                ("off", self.t(K::QualityOff)),
+                ("scene", self.t(K::HdrScene)),
+            ],
+            |s, v| s.hdr = Some(v),
+        );
+        let with_native = {
+            let s = s.clone();
+            move |b: bool| {
+                let mut n = s.clone();
+                n.native_resolution = Some(b);
+                Message::EngineSettings(n)
+            }
+        };
+        widgets::section(
+            t,
+            self.t(K::SecQuality),
+            column![
+                label(self.t(K::QualityHint), size::CAPTION, t.muted),
+                setting_row(t, self.t(K::Antialiasing), None, msaa_row),
+                setting_row(t, self.t(K::TextureResolution), None, tex_row),
+                setting_row(t, self.t(K::Hdr), Some(self.t(K::HdrHint)), hdr_row),
+                self.toggle_row(
+                    t,
+                    self.t(K::NativeResolution),
+                    Some(self.t(K::NativeResolutionHint)),
+                    native,
+                    Some(with_native)
                 ),
             ]
             .spacing(sp::M),

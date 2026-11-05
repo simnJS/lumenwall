@@ -262,6 +262,20 @@ strings! {
     PauseFullscreen => "Pause when an app is fullscreen", "Mettre en pause quand une application est en plein écran";
     PauseBattery => "Pause on battery", "Mettre en pause sur batterie";
     PauseLock => "Pause when the session is locked", "Mettre en pause quand la session est verrouillée";
+    SecQuality => "Quality", "Qualité";
+    QualityHint => "Higher quality costs GPU time and memory. The defaults are the lightest; changes reload the wallpapers.",
+        "Une qualité plus élevée coûte du temps GPU et de la mémoire. Les valeurs par défaut sont les plus légères ; un changement recharge les fonds d'écran.";
+    Antialiasing => "Anti-aliasing", "Anticrénelage";
+    TextureResolution => "Texture resolution", "Résolution des textures";
+    Hdr => "HDR", "HDR";
+    HdrHint => "16-bit colour for the wallpapers that ask for it.", "Couleurs 16 bits pour les fonds qui le demandent.";
+    NativeResolution => "Render at the scene's native resolution", "Rendre à la résolution native de la scène";
+    NativeResolutionHint => "Sharper effects, more GPU time and memory.", "Effets plus nets, plus de temps GPU et de mémoire.";
+    QualityOff => "Off", "Désactivé";
+    QualityFull => "Full", "Pleine";
+    QualityHalf => "Half", "Moitié";
+    QualityQuarter => "Quarter", "Quart";
+    HdrScene => "As the scene asks", "Selon la scène";
     SecAudio => "Sound", "Son";
     Muted => "Muted", "Son coupé";
     Automute => "Mute while another app plays media", "Couper le son pendant la lecture d'un média";

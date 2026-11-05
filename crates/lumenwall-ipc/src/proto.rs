@@ -514,6 +514,20 @@ pub struct Settings {
     /// without the setting leaves it out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_release_delay_s: Option<u32>,
+    /// Anti-aliasing of the scenes: `off`, `x2`, `x4`, `x8`. `None` in a request leaves it
+    /// unchanged; a daemon without the setting leaves it out (the default, `off`, applies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msaa: Option<String>,
+    /// Texture size: `full`, `half`, `quarter`. `None`: unchanged / not supported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub texture_resolution: Option<String>,
+    /// HDR targets for the scenes that ask for them: `off`, `scene`. `None`: unchanged /
+    /// not supported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<String>,
+    /// Render image chains and effects at the scene's own size. `None`: unchanged / not supported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_resolution: Option<bool>,
 }
 
 impl Default for Settings {
@@ -530,6 +544,10 @@ impl Default for Settings {
             volume: 0.5,
             autostart: false,
             gpu_release_delay_s: None,
+            msaa: None,
+            texture_resolution: None,
+            hdr: None,
+            native_resolution: None,
         }
     }
 }
