@@ -1,7 +1,8 @@
-//! One GPU buffer for everything that may change at run time: the per-frame
+//! One region for everything that may change at run time: the per-frame
 //! globals block, every pass uniform block (bound with dynamic offsets) and
-//! the image vertices. A CPU shadow copy tracks the dirty byte range, and a
-//! frame uploads it with a single `write_buffer` (none when nothing changed).
+//! the image vertices. The region is a CPU shadow ([`DynamicRegion`], backend-neutral)
+//! that tracks the dirty byte range; a frame uploads that range once into the backend's
+//! GPU copy (none when nothing changed).
 //!
 //! Writes go through precomputed [`UniformSlot`]s (absolute byte offset +
 //! type): no name lookup and no allocation per frame.
@@ -368,6 +369,17 @@ impl Shadow {
     pub fn is_dirty(&self) -> bool {
         self.dirty.is_some()
     }
+
+    /// Byte range `start..end` written since the last upload, if any.
+    #[must_use]
+    pub fn dirty_range(&self) -> Option<(u32, u32)> {
+        self.dirty
+    }
+
+    /// The dirty range reached the GPU.
+    pub(crate) fn clear_dirty(&mut self) {
+        self.dirty = None;
+    }
 }
 
 /// Load-time builder of the dynamic buffer layout.
@@ -380,7 +392,8 @@ pub struct DynamicBufferBuilder {
 }
 
 impl DynamicBufferBuilder {
-    /// `align` = `min_uniform_buffer_offset_alignment` of the device.
+    /// `align` = the backend's uniform offset alignment (`SceneBackend::uniform_alignment`;
+    /// `min_uniform_buffer_offset_alignment` on wgpu).
     #[must_use]
     pub fn new(align: u32) -> Self {
         let align = align.max(16);
@@ -426,8 +439,10 @@ impl DynamicBufferBuilder {
         self.max_block
     }
 
-    /// Create the GPU buffer and upload the initial content.
-    pub fn build(mut self, ctx: &crate::context::GpuContext) -> DynamicBuffer {
+    /// Lays out the whole region (uniform blocks, then the vertices) for the backend to
+    /// create its GPU copy from ([`DynamicRegion::bytes`]).
+    #[must_use]
+    pub fn finish(mut self) -> DynamicRegion {
         let blocks_end = self.shadow.bytes.len() as u32;
         // Any block offset + binding size must stay inside the buffer.
         let uniform_end = (blocks_end + self.max_block).next_multiple_of(VERTEX_SIZE * 4);
@@ -438,20 +453,7 @@ impl DynamicBufferBuilder {
             .extend_from_slice(bytemuck::cast_slice(&self.vertices));
         let total = (self.shadow.bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
         self.shadow.bytes.resize(total as usize, 0);
-        let buffer = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lumenwall.dynamic"),
-            size: total,
-            usage: wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        ctx.queue().write_buffer(&buffer, 0, &self.shadow.bytes);
-        ctx.note_resources(1);
-        self.shadow.dirty = None;
-        DynamicBuffer {
-            memory: ctx.memory().track(total),
-            buffer,
+        DynamicRegion {
             shadow: self.shadow,
             binding_size: self.max_block,
             vertex_offset,
@@ -464,10 +466,15 @@ impl DynamicBufferBuilder {
     }
 }
 
-/// The run-time dynamic buffer.
+/// The run-time dynamic region (backend-neutral): frame globals, pass uniform blocks and
+/// vertices in one CPU shadow, which every backend mirrors into its GPU copy (one buffer on
+/// wgpu, a constant arena and a vertex buffer on Direct3D 11).
+///
+/// A frame uploads [`Shadow::dirty_range`]; the front clears it once the backend has
+/// rendered. After load, blocks and vertices added by extensions may outgrow the GPU copy:
+/// [`Self::grew`] then tells the backend to reallocate it with the whole shadow.
 #[derive(Debug)]
-pub struct DynamicBuffer {
-    buffer: wgpu::Buffer,
+pub struct DynamicRegion {
     shadow: Shadow,
     binding_size: u32,
     vertex_offset: u32,
@@ -476,22 +483,20 @@ pub struct DynamicBuffer {
     /// Vertices in use from `vertex_offset`.
     vertex_count: u32,
     align: u32,
-    /// The shadow outgrew the GPU buffer: [`Self::sync`] reallocates it.
+    /// The shadow outgrew the GPU copy since the last build or extension.
     grown: bool,
-    /// The uniform binding size changed: the uniform bind group must be recreated.
+    /// The uniform binding size changed since the last build or extension.
     rebind: bool,
-    #[allow(dead_code)]
-    memory: crate::context::MemoryToken,
 }
 
 /// Smallest growth of a region of the dynamic buffer after load, in bytes (amortises the
 /// reallocations when layers are created one by one).
 const MIN_GROWTH: u32 = 64 * 1024;
 
-impl DynamicBuffer {
+impl DynamicRegion {
     /// Reserves a pass uniform block after load (layers created at run time). The block is
     /// zeroed. Grows the uniform region (moving the vertices, whose ranges are relative) with
-    /// headroom when needed; the GPU buffer follows at the next [`Self::sync`].
+    /// headroom when needed; the GPU copy follows at the extension's end ([`Self::grew`]).
     pub fn alloc_uniform(&mut self, size: u32) -> UniformBlock {
         let size = size.max(16).next_multiple_of(16);
         let offset = self.uniform_end.next_multiple_of(self.align);
@@ -516,7 +521,7 @@ impl DynamicBuffer {
     }
 
     /// Appends vertices after load (layers created at run time), growing the vertex region
-    /// geometrically; the GPU buffer follows at the next [`Self::sync`].
+    /// geometrically; the GPU copy follows at the extension's end ([`Self::grew`]).
     pub fn alloc_vertices(&mut self, v: &[Vertex]) -> VertexRange {
         let first = self.vertex_count;
         let n = v.len() as u32;
@@ -550,37 +555,29 @@ impl DynamicBuffer {
         self.grown = true;
     }
 
-    /// Applies the growth of [`Self::alloc_uniform`] / [`Self::alloc_vertices`] to the GPU:
-    /// a new buffer holding the whole shadow when it outgrew the old one. Returns `true` when
-    /// the buffer or the uniform binding size changed (bind groups and bundles referencing
-    /// the buffer must then be recreated).
-    pub fn sync(&mut self, ctx: &crate::context::GpuContext) -> bool {
-        let reallocated = self.grown;
-        if self.grown {
-            let total = self.shadow.bytes.len() as u64;
-            let buffer = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("lumenwall.dynamic"),
-                size: total,
-                usage: wgpu::BufferUsages::UNIFORM
-                    | wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            ctx.queue().write_buffer(&buffer, 0, &self.shadow.bytes);
-            ctx.note_resources(1);
-            self.shadow.dirty = None;
-            self.buffer = buffer;
-            self.memory = ctx.memory().track(total);
-            self.grown = false;
-        }
-        let changed = reallocated || self.rebind;
-        self.rebind = false;
-        changed
+    /// The shadow outgrew the GPU copy since the scene was built or last extended: the backend
+    /// reallocates its copy and uploads the whole shadow ([`Self::bytes`]); the front then
+    /// clears the dirty range.
+    #[must_use]
+    pub fn grew(&self) -> bool {
+        self.grown
     }
 
+    /// The uniform binding size ([`Self::binding_size`]) grew since the scene was built or
+    /// last extended: bindings of the uniform blocks must be recreated.
     #[must_use]
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        &self.buffer
+    pub fn binding_grew(&self) -> bool {
+        self.rebind
+    }
+
+    /// The backend followed [`Self::grew`] / [`Self::binding_grew`] (or created its copy).
+    pub(crate) fn clear_growth(&mut self) {
+        if self.grown {
+            // The whole shadow went to the GPU with the reallocation.
+            self.shadow.dirty = None;
+        }
+        self.grown = false;
+        self.rebind = false;
     }
 
     pub fn shadow_mut(&mut self) -> &mut Shadow {
@@ -592,14 +589,35 @@ impl DynamicBuffer {
         &self.shadow
     }
 
+    /// The whole region: frame globals at 0, pass blocks at their offsets, the vertices from
+    /// [`Self::vertex_offset`].
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.shadow.bytes
+    }
+
+    /// Size of the uniform binding shared by every pass block (the largest block).
     #[must_use]
     pub fn binding_size(&self) -> u32 {
         self.binding_size
     }
 
+    /// Byte offset of vertex 0.
     #[must_use]
     pub fn vertex_offset(&self) -> u32 {
         self.vertex_offset
+    }
+
+    /// Vertices in use from [`Self::vertex_offset`].
+    #[must_use]
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    /// Alignment of the pass blocks (the backend's uniform offset alignment, at least 16).
+    #[must_use]
+    pub fn alignment(&self) -> u32 {
+        self.align
     }
 
     /// Rewrite vertices (image moved by a script, etc.).
@@ -631,45 +649,10 @@ impl DynamicBuffer {
         changed
     }
 
-    /// Records the upload of the dirty range into `encoder` through `belt` (a recycled staging
-    /// buffer: no buffer is created per frame, unlike `Queue::write_buffer`). Returns whether
-    /// anything changed.
-    pub fn flush_into(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        belt: &mut wgpu::util::StagingBelt,
-    ) -> bool {
-        let Some((start, end)) = self.shadow.dirty.take() else {
-            return false;
-        };
-        let start = start & !3;
-        let end = end.next_multiple_of(4).min(self.shadow.bytes.len() as u32);
-        if let Some(size) = wgpu::BufferSize::new(u64::from(end - start)) {
-            belt.write_buffer(encoder, &self.buffer, u64::from(start), size)
-                .copy_from_slice(&self.shadow.bytes[start as usize..end as usize]);
-        }
-        true
-    }
-
-    /// Bytes of the GPU buffer (upload chunk sizing).
+    /// Bytes of the region (upload chunk sizing).
     #[must_use]
     pub fn byte_len(&self) -> u64 {
         self.shadow.bytes.len() as u64
-    }
-
-    /// Upload the dirty range: at most one `write_buffer` per frame.
-    pub fn flush(&mut self, queue: &wgpu::Queue) -> bool {
-        let Some((start, end)) = self.shadow.dirty.take() else {
-            return false;
-        };
-        let start = start & !3;
-        let end = end.next_multiple_of(4).min(self.shadow.bytes.len() as u32);
-        queue.write_buffer(
-            &self.buffer,
-            u64::from(start),
-            &self.shadow.bytes[start as usize..end as usize],
-        );
-        true
     }
 }
 

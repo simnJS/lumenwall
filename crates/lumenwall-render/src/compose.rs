@@ -170,15 +170,72 @@ pub struct ComposeSettings {
     pub flip_vertical: bool,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-struct ComposeParams {
-    uv: [f32; 4],
-    /// x: 1 = transparent border outside `[0, 1]`.
-    mode: [f32; 4],
+impl ComposeSettings {
+    /// The UV window of an output of `output` pixels showing a wallpaper of `wallpaper`
+    /// pixels: [`uv_range`] with the scaling mode, then [`flip_vertical`] when asked.
+    #[must_use]
+    pub fn range(&self, output: (u32, u32), wallpaper: (u32, u32)) -> UvRange {
+        let r = uv_range(self.scaling, output.0, output.1, wallpaper.0, wallpaper.1);
+        if self.flip_vertical {
+            flip_vertical(r)
+        } else {
+            r
+        }
+    }
 }
 
-const COMPOSE_WGSL: &str = include_str!("shaders/compose.wgsl");
+/// Uniform block of the composition shader (`params`, `@group(0) @binding(2)`, 32 bytes): what
+/// a backend uploads for an output.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ComposeParams {
+    /// `(u0, u1, v0, v1)` of the window.
+    pub uv: [f32; 4],
+    /// x: 1 = transparent border outside `[0, 1]`.
+    pub mode: [f32; 4],
+}
+
+impl ComposeParams {
+    /// Parameters of an output showing `range` with the clamp mode `clamp`.
+    #[must_use]
+    pub fn new(range: UvRange, clamp: ClampMode) -> Self {
+        Self {
+            uv: [range.u0, range.u1, range.v0, range.v1],
+            mode: [
+                if clamp == ClampMode::Border { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+                0.0,
+            ],
+        }
+    }
+}
+
+/// Sampler of `_rt_FullFrameBuffer` in the composition: linear, no mipmaps; repeat for
+/// [`ClampMode::Repeat`], clamp to edge otherwise (the border is emulated in the shader:
+/// identical result, no device feature needed).
+#[must_use]
+pub fn compose_sampler(clamp: ClampMode) -> SamplerKey {
+    SamplerKey {
+        address: match clamp {
+            ClampMode::Repeat => AddressMode::Repeat,
+            ClampMode::Clamp | ClampMode::Border => AddressMode::Clamp,
+        },
+        nearest: false,
+        mipmaps: false,
+    }
+}
+
+/// The composition shader (WGSL, written in wgpu's clip space: no clip fix). Group 0: the
+/// source (`texture_2d<f32>`) at binding 0, its sampler ([`compose_sampler`]) at 1,
+/// [`ComposeParams`] at 2. Entry points [`COMPOSE_VERTEX_ENTRY`] and
+/// [`COMPOSE_FRAGMENT_ENTRY`]: three vertices, no vertex buffer, blending off, the viewport set
+/// to the output region; alpha written as 1.
+pub const COMPOSE_WGSL: &str = include_str!("shaders/compose.wgsl");
+/// Vertex entry point of [`COMPOSE_WGSL`].
+pub const COMPOSE_VERTEX_ENTRY: &str = "vs_main";
+/// Fragment entry point of [`COMPOSE_WGSL`].
+pub const COMPOSE_FRAGMENT_ENTRY: &str = "fs_main";
 
 /// Shared composition pipelines (one per surface format).
 pub struct Compositor {
@@ -253,7 +310,7 @@ impl Compositor {
                 layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &self.module,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(COMPOSE_VERTEX_ENTRY),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[],
                 },
@@ -262,7 +319,7 @@ impl Compositor {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &self.module,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(COMPOSE_FRAGMENT_ENTRY),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -313,16 +370,7 @@ impl Compositor {
         uniform: &wgpu::Buffer,
         clamp: ClampMode,
     ) -> wgpu::BindGroup {
-        // Border is emulated in the shader (identical result, no device feature needed).
-        let address = match clamp {
-            ClampMode::Repeat => AddressMode::Repeat,
-            ClampMode::Clamp | ClampMode::Border => AddressMode::Clamp,
-        };
-        let sampler = ctx.sampler(SamplerKey {
-            address,
-            nearest: false,
-            mipmaps: false,
-        });
+        let sampler = ctx.sampler(compose_sampler(clamp));
         ctx.note_resources(1);
         ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lumenwall.compose.bg"),
@@ -424,18 +472,7 @@ impl OutputComposer {
         let key = (output.0, output.1, wallpaper.0, wallpaper.1);
         if self.sizes != Some(key) {
             self.sizes = Some(key);
-            let r = uv_range(
-                self.settings.scaling,
-                output.0,
-                output.1,
-                wallpaper.0,
-                wallpaper.1,
-            );
-            self.range = if self.settings.flip_vertical {
-                flip_vertical(r)
-            } else {
-                r
-            };
+            self.range = self.settings.range(output, wallpaper);
         }
         self.upload(ctx);
         self.range
@@ -453,19 +490,7 @@ impl OutputComposer {
     }
 
     fn upload(&mut self, ctx: &GpuContext) {
-        let params = ComposeParams {
-            uv: [self.range.u0, self.range.u1, self.range.v0, self.range.v1],
-            mode: [
-                if self.settings.clamp == ClampMode::Border {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-                0.0,
-            ],
-        };
+        let params = ComposeParams::new(self.range, self.settings.clamp);
         if self.written != Some(params) {
             ctx.queue()
                 .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&params));
@@ -487,6 +512,52 @@ impl OutputComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shader other backends translate parses, validates and declares the parameter block
+    /// [`ComposeParams`] lays out.
+    #[test]
+    fn shader_matches_its_parameters() {
+        let module = naga::front::wgsl::parse_str(COMPOSE_WGSL).unwrap();
+        crate::shader::validate(&module, "compose").unwrap();
+        for entry in [COMPOSE_VERTEX_ENTRY, COMPOSE_FRAGMENT_ENTRY] {
+            assert!(module.entry_points.iter().any(|e| e.name == entry));
+        }
+        let (_, params) = module
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.space == naga::AddressSpace::Uniform)
+            .unwrap();
+        assert_eq!(params.binding.as_ref().map(|b| b.binding), Some(2));
+        assert_eq!(
+            module.types[params.ty].inner.size(module.to_ctx()) as usize,
+            std::mem::size_of::<ComposeParams>()
+        );
+        let uv = UvRange {
+            u0: 0.25,
+            u1: 0.75,
+            v0: 0.0,
+            v1: 1.0,
+        };
+        assert_eq!(
+            ComposeParams::new(uv, ClampMode::Border),
+            ComposeParams {
+                uv: [0.25, 0.75, 0.0, 1.0],
+                mode: [1.0, 0.0, 0.0, 0.0],
+            }
+        );
+        assert_eq!(
+            compose_sampler(ClampMode::Border).address,
+            AddressMode::Clamp
+        );
+        let s = ComposeSettings {
+            flip_vertical: true,
+            ..ComposeSettings::default()
+        };
+        assert_eq!(
+            s.range((1920, 1080), (1920, 1080)),
+            flip_vertical(uv_range(ScalingMode::Default, 1920, 1080, 1920, 1080))
+        );
+    }
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4

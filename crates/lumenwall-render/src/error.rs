@@ -40,6 +40,14 @@ pub enum RenderError {
     Png(#[from] png::EncodingError),
     #[error("GPU readback failed: {0}")]
     Readback(String),
+    /// The scene's backend cannot do this (another backend may: the caller falls back).
+    #[error("unsupported by this backend: {0}")]
+    Unsupported(String),
+    /// The backend's device was removed or reset: drop everything made on it and start again.
+    #[error("GPU device lost: {0}")]
+    DeviceLost(String),
+    #[error("out of GPU memory")]
+    OutOfMemory,
 }
 
 pub type Result<T, E = RenderError> = std::result::Result<T, E>;

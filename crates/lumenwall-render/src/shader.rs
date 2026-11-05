@@ -524,8 +524,39 @@ impl PassShader {
     }
 }
 
-/// Reflect, fix, validate and create the GPU module.
-pub fn compile(ctx: &GpuContext, mut desc: ShaderDesc) -> Result<PassShader> {
+/// Version of the transforms [`prepare`] applies to a module (the clip-space fix): part of
+/// the cache key of anything compiled from a [`PreparedShader`] (Direct3D 11 bytecode).
+pub const CLIP_FIX_VERSION: u32 = 1;
+
+/// A pass shader ready for any backend: reflected, clip-space fix applied, validated by naga.
+/// What every backend compiles (wgpu takes the naga module, Direct3D 11 translates it to
+/// HLSL): one source of truth.
+#[derive(Clone, Debug)]
+pub struct PreparedShader {
+    pub label: String,
+    /// The final module: the clip-space fix is applied when the source used the upstream
+    /// convention ([`ShaderDesc::upstream_clip_space`]).
+    pub module: Module,
+    /// naga's validation of [`Self::module`] (what naga's back ends take with it).
+    pub info: naga::valid::ModuleInfo,
+    pub vertex_entry: String,
+    pub fragment_entry: String,
+    /// The binding contract of the pass, reflected before the fix.
+    pub interface: ShaderInterface,
+    /// The clip-space fix was applied ([`CLIP_FIX_VERSION`]).
+    pub clip_fixed: bool,
+}
+
+impl PreparedShader {
+    /// Reflect, check the entry points, apply the clip-space fix, validate.
+    pub fn new(desc: ShaderDesc) -> Result<Self> {
+        prepare(desc)
+    }
+}
+
+/// Reflect, check the entry points, apply the clip-space fix and validate: the
+/// backend-neutral steps of a pass shader.
+pub fn prepare(mut desc: ShaderDesc) -> Result<PreparedShader> {
     let interface = reflect(&desc.module, &desc.vertex_entry, &desc.label)?;
     if !desc
         .module
@@ -541,27 +572,45 @@ pub fn compile(ctx: &GpuContext, mut desc: ShaderDesc) -> Result<PassShader> {
     if desc.upstream_clip_space {
         apply_clip_space_fix(&mut desc.module, &desc.vertex_entry)?;
     }
-    validate(&desc.module, &desc.label)?;
+    let info = validate(&desc.module, &desc.label)?;
+    Ok(PreparedShader {
+        label: desc.label,
+        module: desc.module,
+        info,
+        vertex_entry: desc.vertex_entry,
+        fragment_entry: desc.fragment_entry,
+        interface,
+        clip_fixed: desc.upstream_clip_space,
+    })
+}
+
+/// Reflect, fix, validate and create the GPU module (wgpu).
+pub fn compile(ctx: &GpuContext, desc: ShaderDesc) -> Result<PassShader> {
+    compile_prepared(ctx, prepare(desc)?)
+}
+
+/// Create the wgpu module of a prepared shader.
+pub fn compile_prepared(ctx: &GpuContext, shader: PreparedShader) -> Result<PassShader> {
     let scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
     let module = ctx
         .device()
         .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&desc.label),
-            source: wgpu::ShaderSource::Naga(Cow::Owned(desc.module)),
+            label: Some(&shader.label),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(shader.module)),
         });
     if let Some(e) = pollster::block_on(scope.pop()) {
         return Err(RenderError::Validation {
-            label: desc.label,
+            label: shader.label,
             message: e.to_string(),
         });
     }
     ctx.note_resources(1);
     Ok(PassShader {
         module,
-        vertex_entry: desc.vertex_entry,
-        fragment_entry: desc.fragment_entry,
-        interface,
-        label: desc.label,
+        vertex_entry: shader.vertex_entry,
+        fragment_entry: shader.fragment_entry,
+        interface: shader.interface,
+        label: shader.label,
     })
 }
 

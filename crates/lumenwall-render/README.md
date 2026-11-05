@@ -1,6 +1,6 @@
 # lumenwall-render
 
-GPU foundation of the Lumenwall scene renderer (wgpu 30): device and outputs, texture uploads, named render targets, the pass graph, image chains, bloom, final composition, headless readback and debug counters.
+GPU foundation of the Lumenwall scene renderer: a backend-neutral scene front (descriptors, render target plan, pass graph state, image chains, bloom) and its wgpu 30 backend (device and outputs, texture uploads, the compiled graph with direct Vulkan recording, final composition, headless readback and debug counters). Other backends (Direct3D 11) plug in behind the same front (below, "Backend seam").
 
 ## Sources (clean room)
 
@@ -21,21 +21,24 @@ No upstream code, fork or snippet was consulted.
 |---|---|
 | `context` | `GpuInstance` (surfaces from raw-window-handle 0.6) → `GpuContext`: Vulkan on Linux, Vulkan then DX12 on Windows (adapter ranking `adapter_rank`), one device for every output, allocator blocks of 4–8 MiB (`MemoryHints::Manual`: resources above 8 MiB get memory of their exact size; on NVIDIA/Windows every reserved byte is also committed private memory; `LUMENWALL_GPU_BLOCKS`), `LUMENWALL_GPU_BACKEND=vulkan|dx12` for measurements, optional features `TEXTURE_COMPRESSION_BC`, `ADDRESS_MODE_CLAMP_TO_BORDER`, `DEPTH_CLIP_CONTROL`, `PIPELINE_CACHE`, timestamps, `VULKAN_EXTERNAL_MEMORY_DMA_BUF` (Unix) and `VULKAN_EXTERNAL_MEMORY_WIN32` (Windows): they unlock wgpu-hal's import of web frames (DMA-BUF, D3D11 shared textures); the extensions are enabled by wgpu whenever the driver has them, so they cost nothing. On-disk `PipelineCache` (Vulkan), shared sampler cache, GPU memory and resource counters, uncaptured GPU errors logged instead of aborting. |
 | `surface` | `OutputSurface`: `PresentMode::Mailbox` on Windows when offered (FIFO elsewhere and as the fallback; `LUMENWALL_PRESENT_MODE`), opaque alpha, two swap-chain images on Windows (frame latency 1; `LUMENWALL_FRAME_LATENCY`), never sRGB (non-sRGB view of an sRGB-only swap chain), occlusion/timeout → skip the frame, lost/outdated → reconfigure. |
-| `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; `VolumeUpload` (3D, uncompressed, all mips) → volume `GpuTexture` (`is_volume`, `depth`); sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. |
-| `targets` | `RenderTargetPool`: RGBA8 UNORM targets, deferred allocation in scene builders (`materialize` at build), nominal size reported to shaders for targets rendered at the displayed resolution (`create_scaled`, `RenderTarget::resolution`), render-graph aliasing of transient targets (`plan_aliasing`: same size, or flexible targets up to 1.5× larger), scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. |
+| `texture` | `TextureUpload` (RGBA8, RG8, R8, BC1/BC2/BC3 raw, all mips) → `GpuTexture`; `VolumeUpload` (3D, uncompressed, all mips) → volume `GpuTexture` (`is_volume`, `depth`); sampler keys from TEX flags (§16.1); `supports_bc()`; in-place `write_level0` for video frames. `TextureInfo` (sizes, format, sampling: what the front keeps of an upload on any backend), `DEFAULT_TEXTURE_SAMPLER`. |
+| `targets` | `RenderTargetPool`: RGBA8 UNORM targets, deferred allocation in scene builders (`materialize` at build), nominal size reported to shaders for targets rendered at the displayed resolution (`create_scaled`, `RenderTarget::resolution`), render-graph aliasing of transient targets (`plan_aliasing`: same size, or flexible targets up to 1.5× larger), scoped names (effect → image → scene, §12.1), aliases, `scaled_size` / `divided_size`, scene targets (§4.3), composites A/B (§8.9), bloom targets, shared scratch copies for read/write hazards (§24.6), resize / sampler changes. Every call that may allocate takes a `Gpu` (`&GpuContext` converts): without a wgpu context (another backend) the pool only plans: sizes, flexible sizes, shares. |
 | `blend` | WE `blending` → `wgpu::BlendState` (§14), RGB-only write mask, culling, `FrontFace::Cw` (verified by test). |
-| `shader` | Pass binding contract (2D and 3D texture slots), reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation, GPU module creation under an error scope. |
-| `dynbuf` | One buffer for frame globals + every pass uniform block (dynamic offsets) + image vertices; CPU shadow with change detection and one `write_buffer` per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. Writes follow nested layouts (arrays of matrices such as `mat4x3 g_Bones[N]`: 16-byte columns, 64-byte elements). |
-| `graph` | `SceneBuilder` → `RenderScene`: pipelines deduplicated, bind group layouts per (slots, volume slots), bind groups per slot-0 variant (animated textures), automatic hazard copies (only for slots the shader samples), consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, frame reordering when the owner marked transient targets (`schedule`: chains first, scene draws together, conflicting operations kept in order, 8 MiB budget of targets kept alive), per-frame uploads through a `StagingBelt`, `profile_frame` (GPU time per render pass, tools), `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. After load: `extend` (passes added with the scene's shaders, pipelines and layouts) and `set_ops` (new frame order; only bundles of changed runs are re-recorded). On Vulkan the frame is recorded directly (`hal`): no bundles, `encode_frame` hands back the scene's command buffers for one submission. |
+| `shader` | Pass binding contract (2D and 3D texture slots), reflection from the naga IR, the clip-space correction `(x, −y, (z+w)/2, w)` appended to every `return` of the vertex entry point (§24.2), naga validation (`prepare` → `PreparedShader`: the backend-neutral steps, `CLIP_FIX_VERSION` for cache keys), wgpu module creation under an error scope (`compile_prepared`, `compile`). |
+| `dynbuf` | One region for frame globals + every pass uniform block (dynamic offsets) + image vertices: `DynamicRegion`, a backend-neutral CPU shadow with change detection (`Shadow::dirty_range`), growth after load (`grew`, `binding_grew`), mirrored into one GPU buffer by the wgpu backend with one upload per frame; patch lists copy `g_Time`, pointer, audio spectra into pass blocks without any name lookup. Writes follow nested layouts (arrays of matrices such as `mat4x3 g_Bones[N]`: 16-byte columns, 64-byte elements). |
+| `desc` | The descriptors, device-free plain data (wgpu enums only as data): `PassDesc`, `Op`, `Geometry`, `SlotBinding`, `TextureRef`, `MeshLayout`, `StreamLayout`, `DepthState`, ids with `index()`, `Extension`. |
+| `backend` | The seam: `SceneBackend` (object-safe trait), `SceneDesc` (the front's state, borrowed), `PassState`, `StreamState`, `MeshInfo`, `SceneDesc::pass_slots` (what each texture slot binds, by the front's rules), `Gpu`, `Frame`, `FrameCommands`, `SegmentTime`, `GraphCounts`. |
+| `graph` | Backend-neutral front: `SceneBuilder` → `RenderScene` with the frame operations, frame reordering, render-graph aliasing plan, hazard scratches, uniform defaults and patch lists, slot-0 variants, enabled flags, dirty and settle flags; `SceneBuilder::new(&GpuContext, …)` builds on wgpu, `with_backend` on any backend. |
+| `wgpu_scene` | The wgpu backend (`WgpuScene`): pipelines deduplicated, bind group layouts per (slots, volume slots), bind groups per slot-0 variant (animated textures), automatic hazard copies (only for slots the shader samples), consecutive draws on one target merged into one render pass (clear merged too), frozen passes pre-recorded in render bundles, frame reordering when the owner marked transient targets (`schedule`: chains first, scene draws together, conflicting operations kept in order, 8 MiB budget of targets kept alive) (planned by the front), per-frame uploads through a `StagingBelt`, `profile_frame` (GPU time per render pass, tools), `needs_redraw()` dirty flag, `set_enabled` (visibility), `set_variant`. After load: `extend` (passes added with the scene's shaders, pipelines and layouts) and `set_ops` (new frame order; only bundles of changed runs are re-recorded). On Vulkan the frame is recorded directly (`hal`): no bundles, `encode_frame` hands back the scene's command buffers for one submission. |
 | `hal` | Direct Vulkan recording of a scene through wgpu-hal (below, "Direct Vulkan recording"): pipelines, layouts, bind groups and samplers created through wgpu-hal from the descriptors of the wgpu path, the frame planned once (`plan_barriers`: image transitions from the resting states) and replayed into one Vulkan command buffer, adoption of new textures, lifetimes of in-flight frames; `Recording`, `WgpuReason`, `choose` (path decision), automatic fallback to wgpu per scene. |
 | `chain` | §9.8/§10/§11.6: destinations, inputs, `previous`, A/B ping-pong, geometry case, matrix kind, blend transfer (the only place it is applied, see "Blending contract"), RGB-only last pass (pure, unit tested with the spec examples). |
 | `image` | `add_image` (chain plan → passes, geometry, static matrices) and `ImageHandle::update` (rect, alignment, rotation pivot, `M_ecran` with parallax, scene geometry) every frame. |
 | `math` | `ortho`, `lookAt`, camera `P = ortho · T(eye)`, auto projection, pointer, parallax, hierarchy, alignment, rect, rotation, `M_copie`, `uMax/vMax`, quads in the spec vertex order, text matrix. |
-| `compose` | `uv_range` (stretch/fill/fit/default with the exact truncations), span (`bounding_box`, `span_range`), vertical flip, `Compositor`/`OutputComposer` (one fullscreen triangle, blending off, alpha 1, clamp/border/repeat). |
+| `compose` | `uv_range` (stretch/fill/fit/default with the exact truncations), span (`bounding_box`, `span_range`), vertical flip, `Compositor`/`OutputComposer` (one fullscreen triangle, blending off, alpha 1, clamp/border/repeat). The shader and its parameters apart from the pipeline, for other backends: `COMPOSE_WGSL`, entry points, `ComposeParams::new`, `compose_sampler`, `ComposeSettings::range`. |
 | `bloom` | §17 as five generic passes; `BloomShaders` takes the translated WE asset shaders (what `lumenwall-engine` feeds), `BloomShaders::internal()` provides WGSL stand-ins (tests, installs without the WE shaders). |
 | `headless` | `HeadlessOutput`, `read_texture_rgba8` (puts a sampled texture back in its sampled state afterwards), `write_png`. |
 | `stats` | `GpuTimer` (timestamps, 3-slot async readback, never stalls), `FrameStats`, `allocator_bytes`. |
-| `yuv` | Video frames: `YuvConverter` (8-bit UNORM planes sampled, 9–16-bit `R16Uint`/`Rg16Uint` planes filtered in the shader), `YuvPlanes` (uploaded planes) or `source_from_views` (zero-copy planes), `conversion_matrix` (BT.601/709/2020/240M/FCC, limited/full range, bit depth, MSB/LSB alignment), chroma siting and decoder padding crop; one draw into an RGBA8 target. |
+| `yuv` | Video frames: `YuvConverter` (8-bit UNORM planes sampled, 9–16-bit `R16Uint`/`Rg16Uint` planes filtered in the shader), `YuvPlanes` (uploaded planes) or `source_from_views` (zero-copy planes), `conversion_matrix` (BT.601/709/2020/240M/FCC, limited/full range, bit depth, MSB/LSB alignment), chroma siting and decoder padding crop; one draw into an RGBA8 target. The shaders and parameters apart from the pipeline, for other backends: `YUV_FLOAT_WGSL`, `YUV_UINT_WGSL`, entry points, `YuvParams::new`. |
 | `video_device` | Optional device creation through wgpu-hal with Vulkan Video decode queues (`ContextOptions::video_decode`): decode/compute/transfer families other than wgpu's, `synchronization2`, decode extensions; `GpuContext::video_queues` for lumenwall-video's zero-copy decoder. |
 
 ### 3D additions (spec 09)
@@ -44,6 +47,64 @@ No upstream code, fork or snippet was consulted.
 - **Static meshes**: `SceneBuilder::add_mesh(label, MeshLayout, bytes, u16 indices)` uploads an interleaved vertex buffer once (`MeshLayout { stride, attributes: [MeshAttribute { name, format, offset }] }`, the `.mdl` bytes as stored) and `Geometry::Mesh(MeshId)` draws it whole. Shader inputs are fed by name, others read (0, 0, 0, 1); pipelines are shared between meshes of the same layout; mesh passes are bundled.
 - **Clip convention**: `ShaderDesc { upstream_clip_space: false }` for 3D passes (Wallpaper Engine/D3D convention, y up, depth [0, 1]: what wgpu expects), with `PassDesc::front_face` = `Ccw` (and `Cw` for the mirrored reflection pass). `math::perspective_we` is the projection of spec 09 §3.2.2; `math::perspective_upstream` = `Sc(1, −1, 1)·P_GL` gives the same pixels and depths to passes that keep the clip fix (images, particles).
 - **Images of a perspective scene**: `add_image_with_options(…, ImageOptions { clip_space: true })` feeds every pass clip-space geometry (`[-1, 1]²`, `z = 0`) and compensates the matrices (`M_copie` → identity, `M_ecran · S(W/2, H/2, 1)`), so shaders that ignore the matrices (`cloudsbg.vert`) cover the image and the others draw the same pixels (spec 09 §3.9).
+
+## Backend seam
+
+Design: `crates/lumenwall-d3d11/README.md` ("The seam", task 2/n). The engine builds scenes with the
+same descriptors whatever the backend; two backends compile them.
+
+**Front** (`graph`, `desc`, `targets`, `dynbuf`, `image`, `bloom`, `chain`, `quality`: no device
+involved). `SceneBuilder` collects passes and frame operations, the render target plan (names, scopes,
+sizes, transient marks; at build the frame reordering and the aliasing plan: `shares`, flexible sizes,
+`clear_first`), the dynamic region (frame globals, pass blocks with their defaults, vertices), the
+patch lists, indices and skin records, stream and mesh layouts, depth targets, quality settings.
+`RenderScene` keeps the CPU state: the region and its dirty range, slot-0 variants, enabled flags,
+stream data and draw counts, hazard scratches, dirty and settle flags, `needs_redraw`.
+
+**Trait** (`backend::SceneBackend`, object-safe, the front holds a `Box<dyn SceneBackend>`):
+
+| Call | When |
+|---|---|
+| `add_texture`, `add_volume_texture` → `TextureInfo` | at once (the caller drops its CPU copy); texture resolution is applied by the front |
+| `add_shader(PreparedShader)` | at once; reflection, clip fix and validation are done by the front (`shader::prepare`) |
+| `add_mesh`, `add_stream` | at once (a failure comes back from `build`) |
+| `build(&SceneDesc)` | once: the backend creates its copy of the region from `DynamicRegion::bytes` |
+| `extend(&SceneDesc, first)` | passes `first..` added after load; reallocates the region when it `grew` |
+| `rebind` / `replan` | targets reallocated or resized, unshared / operations or enabled flags changed |
+| `render(&mut Frame, &SceneDesc)` | once per scene per frame, no allocation: uploads the dirty range and the pending stream vertices (the front clears them after the call), records the frame |
+| `read_target`, `profile`, `counts` | screenshots and tests, tools, debug counters |
+| `uniform_alignment`, `supports_samples`, `caps`, `quality_changed` | builder set-up; `caps` (BC uploads, largest texture) is what the scene code asks through `SceneBuilder::caps` instead of the wgpu context |
+
+`SceneDesc` is the export: every call gets the front's whole state borrowed (targets with the aliasing
+plan, depth targets, texture infos, shader interfaces, `PassState`s, operations, the region, indices
+and skins at build, streams, meshes, `textures_written`). `SceneDesc::pass_slots` resolves what each
+texture slot binds (texture, target or its hazard scratch, default 2D or volume) and its sampler by the
+front's rules, so every backend binds the same. `Gpu` names the device of a call: `Gpu::Wgpu(&ctx)`
+(every `&GpuContext` parameter of the API converts) or `Gpu::Other` for a backend that holds its own;
+`Frame::Wgpu { ctx, encoder, commands }` or `Frame::Other(&mut dyn Any)`.
+
+**wgpu backend** (`wgpu_scene::WgpuScene`): the former wgpu half of `graph.rs`, unchanged in what it
+records: pipelines, bind groups, segments, render bundles, the staging belt and the direct Vulkan
+recording (`hal`). `SceneBuilder::new(&GpuContext, …)`, `RenderScene::encode_frame(&ctx, &mut
+encoder)`, `encode`, `render`, `texture(id) -> &GpuTexture`, `records_direct`, `wgpu_reason`,
+`direct_stats`, `last_direct_times` and `SceneBuilder::context` stay as the wgpu backend's
+convenience (`context` panics on another backend: use `gpu()` there). The render target pool keeps
+the wgpu textures (`RenderTarget::texture`/`view`) when it is built on wgpu.
+
+**Another backend** (Direct3D 11 through the engine's bridge, task 5): implement `SceneBackend`,
+build with `SceneBuilder::with_backend(Gpu::Other, Box::new(backend), size)`, create targets with
+`b.targets.create_*(b.gpu(), …)`, render with `scene.render_frame(&mut Frame::Other(&mut ()))`, read
+with `scene.read_target(Gpu::Other, rt)`; reach the backend with `scene.backend().as_any()`.
+`tests/seam.rs` does all of this without a GPU. For the passes shared with the outputs, the
+composition shader and its parameters (`compose::{COMPOSE_WGSL, ComposeParams, compose_sampler,
+ComposeSettings::range}`) and the YUV conversion shaders and matrices (`yuv::{YUV_FLOAT_WGSL,
+YUV_UINT_WGSL, YuvParams, conversion_matrix}`) are public apart from the wgpu pipelines: the same
+WGSL goes through naga → HLSL.
+
+**Run-time changes** (task 56013678: script-controlled effect visibility, text growth): visibility is
+`set_enabled` (one `replan`), new passes are `extend` (then `set_ops` places them, one `replan`
+before the next frame); both are front state the backend reads from `SceneDesc`, so a new kind of
+change adds a field to the front and, at most, a call to `replan` or `rebind`.
 
 ## Integration contract (render-ready input types)
 
@@ -328,6 +389,7 @@ Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes 
 - Unit (46): matrices, camera, pointer, parallax laws, hierarchy, alignment, rect, rotation sense, uv padding, quad order/winding, scaling modes with the spec examples and truncation effects, span, blend table, culling/masks, chain plans (spec examples), RT sizes and scopes, uniform layouts and patches, sampler flags, upload validation, surface formats, adapter ranking, naga reflection (2D/3D slots) and clip fix, volume upload validation.
 - GPU (`tests/gpu.rs`, 15, headless): orientation end to end, padding window, culling with `FrontFace::Cw`, translucent blend + RGB mask, A/B ping-pong, read/write hazard copy, unfed attributes, animated variants, bloom chain, volume LUT slot (3D texture grading, volume in a 2D slot), composition modes, BC1 upload, visibility toggle, pipeline cache on disk, steady state (no new GPU objects, `needs_redraw`, `g_Time`, GPU timer). They pass on the RTX 4080, RADV and llvmpipe (`LUMENWALL_TEST_SOFTWARE=1`); without any adapter they print "skipped".
 - Direct Vulkan path: `hal::plan` units (path decision, barrier plans: resting states at both ends, writes after writes, copies and shared images, an image used two ways refused, layouts) and `hal::tests` on the GPU (same pixels as the wgpu path with ping-pong composites and a hazard copy; Direct3D 12 records through wgpu; fallback at build and while running with injected failures; wgpu-hal objects: none per frame, bounded across visibility changes and resizes, texture writes with `mark_dirty`, readbacks between frames, all destroyed with the scene). `tests/gpu.rs` runs on whichever path the device takes (both with `LUMENWALL_DIRECT_VULKAN=0`).
-- `tests/alloc.rs`: zero allocation in the per-frame update path.
+- `tests/alloc.rs`: zero allocation in the per-frame update path, and in the front's frame (`RenderScene::render_frame`: the refresh check, the dirty bookkeeping and the one call into the backend) on a backend that records nothing.
+- `tests/seam.rs` (no GPU): a scene built, rendered, made invisible, extended and reordered on a backend that is not wgpu; the aliasing plan reaches it, its copy of the dynamic region kept from the dirty ranges equals the front's after every frame, slot-0 variants resolve through `SceneDesc::pass_slots`. `compose` and `yuv` units: the WGSL other backends translate parses, validates and declares the parameter blocks `ComposeParams` / `YuvParams` lay out.
 - `tests/gpu3d.rs`: F-3D-O of spec 09 (first row red ≈ 1 with a clip-space quad, top-left UV (0, 0) through the VP-1 camera), depth test across two meshes over two frames, back-face culling with `FrontFace::Ccw`. VP-1/VP-2 vectors in `math::tests`.
 - Examples: `headless` (writes a PNG), `chain_bench` (reference-shaped chain timing).
