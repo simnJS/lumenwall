@@ -1339,3 +1339,44 @@ fn every_host_object_kind_routes_to_the_host() {
         "TypeError"
     );
 }
+
+#[test]
+fn get_animation_without_argument_names_the_bound_property() {
+    let (mut e, mut h) = setup();
+    let material = ObjectRef::Material {
+        layer: 1,
+        effect: 0,
+        material: 0,
+    };
+    e.load_property_script(
+        &mut h,
+        &PropertyScript {
+            layer: 1,
+            property: "multiply@effect0.pass0",
+            object: Some(material),
+            source: r#"
+                export function mediaThumbnailChanged(event) {
+                    var anim = thisObject.getAnimation();
+                    anim.stop();
+                    anim.play();
+                }
+            "#,
+            binding: 1,
+            script_properties: &[],
+        },
+    )
+    .unwrap();
+    h.calls.clear();
+    e.media_thumbnail_changed(
+        &mut h,
+        &MediaThumbnail {
+            has_thumbnail: true,
+            ..MediaThumbnail::default()
+        },
+    );
+    assert!(h.calls.contains(&(
+        material,
+        "getAnimation".into(),
+        vec![Value::String("multiply@effect0.pass0".into())]
+    )));
+}

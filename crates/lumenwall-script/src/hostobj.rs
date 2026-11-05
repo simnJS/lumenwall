@@ -339,6 +339,16 @@ pub(crate) fn host_call<'js>(
     for i in 0..p.len() {
         args.push(from_js(ctx, sh, p.arg(i).expect("argument in range"))?);
     }
+    // we-doc: `thisObject.getAnimation()` in a property script is the timeline of the value the
+    // script is bound to. The host gets the script's property (`multiply@effect1.pass0`) as the
+    // name of the animated member.
+    if name == "getAnimation"
+        && args.is_empty()
+        && let Some(id) = sh.current.get()
+        && let Some(s) = sh.scripts.borrow().get(id.0 as usize)
+    {
+        args.push(crate::value::Value::String(s.property.clone()));
+    }
     let r = sh
         .host
         .with(|h| h.call(obj, name, &args))

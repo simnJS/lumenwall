@@ -26,6 +26,7 @@ use lumenwall_script::{
 
 use crate::scene::{FrameState, chain_visible, visibility_chain, world_transform};
 
+mod animation;
 mod dynamic;
 pub(crate) mod media;
 pub(crate) use dynamic::{Dynamic, Structure, workshop_ids};
@@ -123,7 +124,8 @@ struct HostData {
     changes: Changes,
     /// Text layers whose `text` setting a property script wrote (layer indices).
     text_written: Vec<usize>,
-    warned_effect_visibility: bool,
+    /// Timelines played by scripts (`getAnimation()`).
+    anims: animation::Animations,
 }
 
 impl HostData {
@@ -386,6 +388,41 @@ impl HostView<'_> {
         }
     }
 
+    /// Setting a `getAnimation(name)` call on `obj` designates: a layer member, the `visible` or
+    /// a constant of an effect, a constant of one of its materials.
+    fn animated_setting(&self, obj: ObjectRef, name: &str) -> Option<SettingId> {
+        match obj {
+            ObjectRef::Layer(id) => {
+                let l = self.data.layer(id)?;
+                Some(match name {
+                    "origin" => l.origin,
+                    "scale" => l.scale[0],
+                    "angles" => l.angles[0],
+                    "visible" => l.visible[0],
+                    "alpha" => l.alpha?,
+                    "color" => l.color?,
+                    "brightness" => l.brightness?,
+                    "parallaxDepth" => l.parallax_depth?,
+                    "pointsize" => l.point_size?,
+                    _ => return None,
+                })
+            }
+            ObjectRef::Effect { layer, effect } => {
+                let e = self.image_effects(layer).get(effect as usize)?;
+                if name == "visible" {
+                    return Some(e.visible);
+                }
+                (0..e.overrides.len() as u32).find_map(|p| self.constant(layer, effect, p, name))
+            }
+            ObjectRef::Material {
+                layer,
+                effect,
+                material,
+            } => self.constant(layer, effect, material, name),
+            _ => None,
+        }
+    }
+
     /// Writes `ILayer.alignment` of an image: the anchor of its rectangle.
     fn set_alignment(&mut self, idx: ObjectIndex, value: &Value) -> bool {
         let Value::String(s) = value else {
@@ -491,6 +528,7 @@ impl SceneHost for HostView<'_> {
             } => self
                 .constant(layer, effect, material, member(name))
                 .map(|id| to_script(settings.value(id))),
+            ObjectRef::Animation(id) => self.data.anims.get(self.project, id, name),
             _ => None,
         }
     }
@@ -559,14 +597,9 @@ impl SceneHost for HostView<'_> {
                 else {
                     return false;
                 };
-                let changed = assign(self.project, id, value);
-                if changed == Some(true) && !self.data.warned_effect_visibility {
-                    self.data.warned_effect_visibility = true;
-                    tracing::info!(
-                        "script changed the visibility of an effect of layer {layer}: effect chains are fixed at load, the change is not drawn"
-                    );
-                }
-                changed.is_some()
+                // The renderer reads the setting every frame and switches the chain of the
+                // image (`lumenwall-scene` `image_passes_with`); nothing else to flag.
+                assign(self.project, id, value).is_some()
             }
             ObjectRef::Material {
                 layer,
@@ -584,12 +617,32 @@ impl SceneHost for HostView<'_> {
                     None => false,
                 }
             }
+            ObjectRef::Animation(id) => self.data.anims.set(id, name, value),
             _ => false,
         }
     }
 
     fn call(&mut self, obj: ObjectRef, method: &str, args: &[Value]) -> Option<Value> {
         match (obj, method) {
+            (ObjectRef::Animation(id), m) => {
+                let (v, changed) = self.data.anims.call(self.project, id, m, args);
+                if changed {
+                    self.data.changes.uniforms = true;
+                    self.data.changes.transforms = true;
+                }
+                v
+            }
+            (
+                obj @ (ObjectRef::Layer(_) | ObjectRef::Effect { .. } | ObjectRef::Material { .. }),
+                "getAnimation",
+            ) => {
+                let Some(Value::String(name)) = args.first() else {
+                    return None;
+                };
+                let setting = self.animated_setting(obj, member(name))?;
+                let id = self.data.anims.acquire(self.project, setting)?;
+                Some(Value::Object(ObjectRef::Animation(id)))
+            }
             (ObjectRef::Scene, "createLayer") => self.create_layer(args.first()?),
             (ObjectRef::Scene, "destroyLayer") => {
                 Some(Value::Bool(self.destroy_layer(args.first()?)))
@@ -955,7 +1008,7 @@ impl SceneScripts {
                     uniforms: true,
                 },
                 text_written: Vec::new(),
-                warned_effect_visibility: false,
+                anims: animation::Animations::default(),
             },
             texts: Vec::new(),
             sink: None,
@@ -1044,6 +1097,7 @@ impl SceneScripts {
     /// layers, queued events).
     pub(crate) fn needs_frames(&self) -> bool {
         self.engine.has_work()
+            || self.data.anims.playing()
             || !self.texts.is_empty()
             || !self.pending.properties.is_empty()
             || self.pending.media.is_some()
@@ -1159,6 +1213,11 @@ impl SceneScripts {
         }
         cursor_events(engine, &mut host, cursor, build, world, f.screen.left_down);
         engine.tick(&mut host);
+        // Timelines scripts play: values of this frame (a `play()` above starts at 0).
+        if host.data.anims.advance(host.project, f.dt.max(0.0)) {
+            host.data.changes.uniforms = true;
+            host.data.changes.transforms = true;
+        }
 
         // Text layers tick only while visible (spec 06 §9.5).
         for t in texts.iter() {
@@ -1921,5 +1980,82 @@ mod tests {
         }
         let n = ALLOCS.with(Cell::get) - before;
         assert_eq!(n, 0, "{n} heap allocations in 100 frames");
+    }
+
+    /// The cover effects of "Soren <3": the effect is hidden at load, its `visible` script turns
+    /// it on when a cover arrives and off again a second later; the fade of `multiply` is a
+    /// timeline its script restarts with `thisObject.getAnimation()`.
+    #[test]
+    fn media_thumbnail_scripts_toggle_an_effect_and_play_its_fade() {
+        let fade = r#"{ "value": 0, "animation": { "c0": [
+                { "frame": 0, "value": 1 }, { "frame": 15, "value": 0 } ],
+                "options": { "fps": 15, "length": 15, "mode": "single", "startpaused": true } },
+            "script": "export function mediaThumbnailChanged(event) { if (event.hasThumbnail) { var anim = thisObject.getAnimation(); anim.stop(); anim.play(); } }" }"#;
+        let visible = scripted(
+            "false",
+            "var last; export function mediaThumbnailChanged(event) {
+                if (last) { last(); last = undefined; }
+                thisObject.visible = event.hasThumbnail;
+                if (event.hasThumbnail) last = engine.setTimeout(() => { thisObject.visible = false; }, 1000);
+            }",
+        );
+        let effect = format!(
+            r#", "effects": [ {{ "file": "effects/e/effect.json", "visible": {visible},
+                "passes": [ {{ "constantshadervalues": {{ "multiply": {fade} }} }} ] }} ]"#
+        );
+        let (mut p, b) = load(&[image(1, "cover", &effect)]);
+        let mut s = scripts(&mut p, &b);
+        let fx = img(&p, 0).effects[0].visible;
+        let multiply = img(&p, 0).effects[0].overrides[0].constants[0].setting;
+        assert!(!p.settings.value(fx).boolean(), "hidden at load");
+        tick(&mut s, &mut p, &b, 0.0);
+        assert!(!p.settings.value(fx).boolean());
+        assert_eq!(
+            p.settings.value(multiply).float(),
+            0.0,
+            "not animated before a cover"
+        );
+        let mut media = lumenwall_script::MediaSnapshot::default();
+        media.thumbnail.has_thumbnail = true;
+        s.media_changed(media.clone());
+        let c = tick(&mut s, &mut p, &b, 1.0);
+        assert!(c.uniforms, "the fade started");
+        assert!(p.settings.value(fx).boolean(), "shown by the script");
+        assert!(s.needs_frames());
+        eprintln!("DBG {:?} anim={:?}", eval(&mut s, &mut p, "const a = thisScene.getLayer('cover').getEffect(0).getMaterial(0).getAnimation('multiply'); [a.fps, a.isPlaying(), a.getFrame()]"), p.settings.animation(multiply).is_some());
+        let first = p.settings.value(multiply).float();
+        assert!(
+            first > 0.9,
+            "previous cover fully there at the start: {first}"
+        );
+        // Half a second later (15 frames/s at 30 fps ticks): half way.
+        let mut last = first;
+        for i in 1..=15 {
+            tick(&mut s, &mut p, &b, 1.0 + f64::from(i) / 30.0);
+            let v = p.settings.value(multiply).float();
+            assert!(v <= last + 1e-5, "fading");
+            last = v;
+        }
+        assert!((0.3..0.7).contains(&last), "{last}");
+        for i in 16..=40 {
+            tick(&mut s, &mut p, &b, 1.0 + f64::from(i) / 30.0);
+        }
+        assert_eq!(p.settings.value(multiply).float(), 0.0, "fade over");
+        assert!(
+            !p.settings.value(fx).boolean(),
+            "hidden again after a second"
+        );
+        // A new cover before the timeout cancels it (the script's `lastHideEvent()`).
+        s.media_changed(media.clone());
+        tick(&mut s, &mut p, &b, 3.0);
+        assert!(p.settings.value(fx).boolean());
+        assert!(p.settings.value(multiply).float() > 0.9, "restarted");
+        s.media_changed(media);
+        tick(&mut s, &mut p, &b, 3.5);
+        tick(&mut s, &mut p, &b, 4.2);
+        assert!(
+            p.settings.value(fx).boolean(),
+            "the first timeout was cancelled"
+        );
     }
 }
