@@ -300,14 +300,27 @@ The system's now-playing session (Windows: Global System Media Transport Control
 - Tests: the cover's lifecycle on the GPU (creation on first use, change of cover, same cover, no art, memory given back), no cost for scenes without thumbnails, and an ignored headless render of 3372348904 with the media tests' fake source (no real player).
 - Not done: playback control (play/pause/next from a wallpaper). Not tested: a playing session's timeline events on Windows, session changes between players, every MPRIS player; the MPRIS bus glue was only type-checked (`lumenwall-audio` README, "Not tested").
 
+## Quality settings
+
+`EngineSettings { quality: QualitySettings }` (`build_scene_with`; `build_scene` reads the developer variables below). `Default` costs exactly what the engine cost before the settings existed. Wallpaper Engine's own preset names are not verified against a public list; the person's WE runs `msaa x2`, `resolution full`, `postprocessing ultra`, `reflection true` (its `config.json`), and Lumenwall's defaults stay cheaper than that.
+
+| Setting (`QualitySettings`) | Values (default first) | Effect | Developer variable |
+|---|---|---|---|
+| `msaa` | `off`, `x2`, `x4`, `x8` | Multisampled scene target (`_rt_FullFrameBuffer`): passes draw into a companion texture resolved after every render pass, so copies and samplers see the resolved image. Clamped to what the adapter supports for the target format. A scene with multisampling records through wgpu (the direct Vulkan path has no multisampled attachments: `WgpuReason::Quality`). Image chains stay single-sampled (axis-aligned layers gain nothing: 3018340632 changes by 0.001/255 on average). | `LUMENWALL_MSAA` |
+| `texture_resolution` | `full`, `half`, `quarter` | The top 1 or 2 mip levels of every `.tex` are not uploaded (textures without mips stay full). The declared size does not change: texture coordinates and `g_Texture0Resolution` stay. | `LUMENWALL_TEXTURE_RESOLUTION` |
+| `hdr` | `off`, `scene` | `scene`: scenes with `general.hdr` render into 16-bit float targets (bloom and effects keep values above 1; 3018340632 differs visibly from the 8-bit render). Direct Vulkan path off for those scenes. | `LUMENWALL_HDR` |
+| `native_resolution` | `false`, `true` | Image composites and effect targets at the scene's own size instead of the displayed size (Perf A level 2; the scene target still follows the output). | `LUMENWALL_FULL_SIZE_CHAINS=1` |
+
+Reflections: `_rt_Reflection` is always on for 3D scenes (no knob yet).
+
 ## Not done yet
 
 | Feature | Current behaviour |
 |---|---|
 | 3D: integer colour properties | `"1 0 0"` is read as 0–255 (spec 02 Q1): `fantasticcar`'s body, `demon_core`'s core and `retro`'s stripes (through `usershadervalues`) come out black while their previews show red. Renders with `--set "carbodycolor=1.0 0.0 0.0"` match. To settle in spec 02 Q1 (the 3D previews are evidence for floats). `usershadervalues` are applied to 3D passes only for now (images would turn `retro` black). |
 | 3D: P2/P3 of spec 09 | No fog (keys unknown), no `_rt_MipMappedFrameBuffer` mips (no installed scene reads it), no shadows, volumetrics or HDR, spot/tube/directional lights skipped, no parallax in perspective (`parallaxDepth` of models ignored), models without skeleton animation, no `TEX<n>FORMAT` from `formatcombo` (materials that need it set it, e.g. `fantasticcar`). |
-| Text layer growth | The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
-| Text styling | `opaquebackground`/`backgroundcolor`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign` are not drawn; the object's own `angles` are not applied (the parents' are). |
+| Text layer growth | (Moved to board task 56013678.) The glyph texture keeps the size reserved at load (text, editor `size`, 1.5× + 1 em for scripted or bound texts, `maxwidth`); a longer string is drawn smaller to fit instead of growing the layer. |
+| Text styling | Not done (no spec, unused by the person's wallpapers): `opaquebackground`/`backgroundcolor`/`backgroundbrightness`, outline, drop shadow, MSDF, colour (emoji) fonts and `blockalign`. None of the installed wallpapers' text objects has an outline or shadow key or turns the background on (their title "shadows" are separate text layers with `blurprecise`). The object's own `angles` are not applied (the parents' are). |
 | Puppet extras (spec 08 §11) | Bone physics, inverse kinematics, blend rules, blend shapes (`MORPHING`) and `SKINNING_ALPHA` have no known format: not implemented. Particles attached to bones are not wired (images only). The SceneScript bone and layer API waits for `lumenwall-script` integration. |
 | Video textures in scenes (spec 07 §14.2) | Texture skipped. `lumenwall-video` plays them from memory (`VideoInput::Memory`); binding its output to the scene texture slot is not wired. |
 | Web wallpapers on Windows | Frames of a Vulkan device come from the web host's D3D11 shared textures (zero copy into the render target); a DX12 device has no import and uses shared-memory frames. On a machine with several GPUs the host is not yet told the render adapter's LUID. Mouse input and a desktop run (only headless rendering and the host alone were run) are not tested (`lumenwall-web` README). |

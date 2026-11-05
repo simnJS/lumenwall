@@ -42,6 +42,8 @@ pub enum WgpuReason {
     /// A pipeline, layout or bind group could not be created through wgpu-hal, or the frame
     /// uses an image two ways in one step: the scene went back to wgpu.
     Unsupported,
+    /// A quality setting the direct path does not implement (HDR targets, multisampling).
+    Quality,
 }
 
 /// The path a new scene takes, before any object is created.

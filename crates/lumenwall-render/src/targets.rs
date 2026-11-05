@@ -16,6 +16,14 @@ use crate::texture::SamplerKey;
 
 /// Format of every render target (spec 04 §15).
 pub const RT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Format of the render targets of a scene with HDR targets.
+pub const RT_FORMAT_HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Bytes per texel of a render target format.
+#[must_use]
+pub fn texel_bytes(format: wgpu::TextureFormat) -> u64 {
+    format.block_copy_size(None).map_or(4, u64::from)
+}
 
 /// Handle of a render target in a [`RenderTargetPool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -43,6 +51,12 @@ pub struct RenderTarget {
     shares: Option<RtId>,
     /// Rendered below its nominal size: its actual size may grow to share a texture.
     flexible: bool,
+    /// Texel format (the pool's when it was created).
+    format: wgpu::TextureFormat,
+    /// Samples per pixel of the drawing surface (1 = none). Above 1 the target keeps a
+    /// multisampled companion texture that its render passes draw into and resolve to `gpu`.
+    samples: u32,
+    msaa: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 impl RenderTarget {
@@ -55,6 +69,18 @@ impl RenderTarget {
     #[must_use]
     pub fn texture(&self) -> &wgpu::Texture {
         &self.gpu().0
+    }
+
+    /// Samples per pixel of the drawing surface.
+    #[must_use]
+    pub fn samples(&self) -> u32 {
+        self.samples
+    }
+
+    /// The multisampled view render passes draw into (resolving to [`Self::view`]), if any.
+    #[must_use]
+    pub fn msaa_view(&self) -> Option<&wgpu::TextureView> {
+        self.msaa.as_ref().map(|m| &m.1)
     }
 
     #[must_use]
@@ -320,6 +346,8 @@ pub struct RenderTargetPool {
     deferred: bool,
     /// Targets that may share memory with others ([`Self::mark_transient`]).
     transient: HashSet<RtId>,
+    /// Texel format of every target created from now on ([`RT_FORMAT`] unless HDR).
+    format: wgpu::TextureFormat,
 }
 
 impl Default for RenderTargetPool {
@@ -337,6 +365,7 @@ impl RenderTargetPool {
             scratch: HashMap::new(),
             deferred: false,
             transient: HashSet::new(),
+            format: RT_FORMAT,
         }
     }
 
@@ -347,6 +376,23 @@ impl RenderTargetPool {
             deferred: true,
             ..Self::new()
         }
+    }
+
+    /// Gives `id` a multisampled drawing surface of `samples` per pixel. Before materialization.
+    pub fn set_samples(&mut self, id: RtId, samples: u32) {
+        self.targets[id.0 as usize].samples = samples.max(1);
+    }
+
+    /// Format of the targets created from now on: call before creating any. 16-bit float
+    /// targets keep values above 1 (HDR scenes).
+    pub fn set_format(&mut self, format: wgpu::TextureFormat) {
+        self.format = format;
+    }
+
+    /// Texel format of the targets.
+    #[must_use]
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
     }
 
     /// Whether the targets are still waiting for [`Self::materialize`].
@@ -455,7 +501,7 @@ impl RenderTargetPool {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: RT_FORMAT,
+            format: t.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC
@@ -465,10 +511,31 @@ impl RenderTargetPool {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         ctx.note_resources(2);
         t.gpu = Some((texture, view));
-        t._memory = Some(
-            ctx.memory()
-                .track(u64::from(t.width) * u64::from(t.height) * 4),
-        );
+        t.msaa = (t.samples > 1).then(|| {
+            let ms = ctx.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("{} (msaa)", t.label)),
+                size: wgpu::Extent3d {
+                    width: t.width,
+                    height: t.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: t.samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: t.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = ms.create_view(&wgpu::TextureViewDescriptor::default());
+            ctx.note_resources(2);
+            (ms, view)
+        });
+        t._memory = Some(ctx.memory().track(
+            u64::from(t.width)
+                * u64::from(t.height)
+                * texel_bytes(t.format)
+                * u64::from(1 + if t.samples > 1 { t.samples } else { 0 }),
+        ));
         t.shares = None;
     }
 
@@ -505,6 +572,9 @@ impl RenderTargetPool {
             _memory: None,
             shares: None,
             flexible: false,
+            format: self.format,
+            samples: 1,
+            msaa: None,
         };
         if !self.deferred {
             Self::allocate_gpu(ctx, &mut t);

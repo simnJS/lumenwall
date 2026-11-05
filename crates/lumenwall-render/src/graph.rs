@@ -27,10 +27,11 @@ use crate::hal::{
     VertexBuffer, WgpuReason,
 };
 use crate::math::{SKIN_VERTEX_SIZE, SkinVertex, VERTEX_SIZE, Vertex};
+use crate::quality::QualitySettings;
 use crate::shader::{MAX_SLOTS, PassShader, ShaderDesc, ShaderInterface, VertexAttr};
 use crate::targets::{
-    ALIAS_AREA_SLACK, Access, AliasPlan, AliasSize, RT_FORMAT, RenderTargetPool, RtId,
-    plan_aliasing,
+    ALIAS_AREA_SLACK, Access, AliasPlan, AliasSize, RT_FORMAT_HDR, RenderTargetPool, RtId,
+    plan_aliasing, texel_bytes,
 };
 use crate::texture::{
     GpuTexture, SamplerKey, TextureUpload, VolumeUpload, default_texture, default_volume,
@@ -169,7 +170,7 @@ struct DepthBuffer {
     _memory: MemoryToken,
 }
 
-fn create_depth(ctx: &GpuContext, target: RtId, size: (u32, u32)) -> DepthBuffer {
+fn create_depth(ctx: &GpuContext, target: RtId, size: (u32, u32), samples: u32) -> DepthBuffer {
     let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("lumenwall.depth"),
         size: wgpu::Extent3d {
@@ -178,7 +179,7 @@ fn create_depth(ctx: &GpuContext, target: RtId, size: (u32, u32)) -> DepthBuffer
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -398,6 +399,8 @@ pub struct SceneBuilder<'c> {
     direct: std::result::Result<(), WgpuReason>,
     /// `(shader id, final module, validation info)` of the shaders added, for wgpu-hal.
     direct_modules: Vec<(usize, naga::Module, naga::valid::ModuleInfo)>,
+    /// Quality settings (texture resolution applies to every texture added afterwards).
+    quality: QualitySettings,
 }
 
 /// Passes and frame operations added by [`RenderScene::extend`]. The operations are not
@@ -565,7 +568,50 @@ impl<'c> SceneBuilder<'c> {
             pass_base: 0,
             direct: crate::hal::choose(Recording::from_env(), ctx.adapter().get_info().backend),
             direct_modules: Vec::new(),
+            quality: QualitySettings::default(),
         }
+    }
+
+    /// Quality settings: call before adding textures.
+    pub fn set_quality(&mut self, quality: QualitySettings) {
+        if quality.msaa != crate::quality::Msaa::Off {
+            // Multisampled targets are recorded through wgpu only.
+            self.direct = Err(WgpuReason::Quality);
+        }
+        self.quality = quality;
+    }
+
+    /// 16-bit float render targets (scenes with `hdr`): bloom and effects keep values above 1.
+    /// Call before creating any target. The direct Vulkan path has no float targets: the scene
+    /// records through wgpu ([`WgpuReason::Quality`]).
+    pub fn use_hdr_targets(&mut self) {
+        self.targets.set_format(RT_FORMAT_HDR);
+        self.direct = Err(WgpuReason::Quality);
+    }
+
+    /// Multisampled drawing for target `id` (the scene target): `msaa` clamped to what the
+    /// adapter supports for the target format. Returns the level in force. Call before the
+    /// scene is built, after the target exists. Above 1 sample the scene records through wgpu
+    /// ([`WgpuReason::Quality`]); targets that are copy destinations stay single-sampled
+    /// (see [`Self::build`]).
+    pub fn enable_msaa(&mut self, id: RtId, msaa: crate::quality::Msaa) -> crate::quality::Msaa {
+        let flags = self
+            .ctx
+            .adapter()
+            .get_texture_format_features(self.targets.format())
+            .flags;
+        let level = msaa.clamp_to(|n| flags.sample_count_supported(n));
+        if level != crate::quality::Msaa::Off {
+            self.targets.set_samples(id, level.samples());
+            self.direct = Err(WgpuReason::Quality);
+        }
+        level
+    }
+
+    /// The quality settings in force.
+    #[must_use]
+    pub fn quality(&self) -> QualitySettings {
+        self.quality
     }
 
     /// How the built scene records its frames ([`Recording::Auto`] by default, unless
@@ -634,7 +680,23 @@ impl<'c> SceneBuilder<'c> {
 
     /// Upload a texture; the caller may drop its CPU copy right after.
     pub fn add_texture(&mut self, upload: &TextureUpload<'_>) -> Result<TextureId> {
-        let t = upload_texture(self.ctx, upload)?;
+        let skip = self.quality.texture_levels_to_skip(upload.levels.len());
+        let t = if skip == 0 {
+            upload_texture(self.ctx, upload)?
+        } else {
+            // Texture resolution: the top levels are not uploaded. The declared content size
+            // stays the original one, so texture coordinates and `g_Texture0Resolution` do not
+            // change.
+            let l0 = upload.levels[0];
+            upload_texture(
+                self.ctx,
+                &TextureUpload {
+                    levels: &upload.levels[skip..],
+                    content_size: upload.content_size.or(Some((l0.width, l0.height))),
+                    ..*upload
+                },
+            )?
+        };
         self.textures.push(t);
         Ok(TextureId(self.textures.len() as u32 - 1))
     }
@@ -787,6 +849,16 @@ impl<'c> SceneBuilder<'c> {
         // Fewer render passes (chains first, scene draws together), then GPU memory of the
         // render targets, transient ones sharing textures over the new lifetimes.
         self.reorder_ops();
+        // A copy into a multisampled target would leave its companion texture stale: that
+        // target stays single-sampled.
+        for op in &self.ops {
+            if let Op::Copy { dst, .. } = *op
+                && self.targets.get(dst).samples() > 1
+            {
+                tracing::warn!("multisampling off for a render target that is a copy destination");
+                self.targets.set_samples(dst, 1);
+            }
+        }
         let alias = self.alias_plan();
         self.targets.materialize(ctx, &alias.shares, &alias.sizes);
 
@@ -873,12 +945,20 @@ impl<'c> SceneBuilder<'c> {
         let depths = self
             .depth_targets
             .iter()
-            .map(|&t| create_depth(ctx, t, self.targets.get(t).size()))
+            .map(|&t| {
+                create_depth(
+                    ctx,
+                    t,
+                    self.targets.get(t).size(),
+                    self.targets.get(t).samples(),
+                )
+            })
             .collect();
         let mut scene = RenderScene {
             direct: None,
             direct_pipelines: HashMap::new(),
             wgpu_reason: None,
+            quality: self.quality,
             textures_written: false,
             default_texture: default_texture(ctx),
             default_volume,
@@ -1041,6 +1121,7 @@ impl<'c> SceneBuilder<'c> {
                 }
             }
         }
+        let format = targets.format();
         let order = crate::schedule::schedule(
             &accesses,
             |t| !targets.is_transient(RtId(t)),
@@ -1048,7 +1129,7 @@ impl<'c> SceneBuilder<'c> {
                 let id = RtId(t);
                 targets.is_transient(id).then(|| {
                     let (w, h) = targets.get(id).size();
-                    u64::from(w) * u64::from(h) * 4
+                    u64::from(w) * u64::from(h) * texel_bytes(format)
                 })
             },
             budget_mib << 20,
@@ -1346,6 +1427,8 @@ struct PipelineKey {
     front_face: wgpu::FrontFace,
     /// Depth state when the target has a depth buffer.
     depth: Option<DepthState>,
+    /// Samples per pixel of the pass's target.
+    samples: u32,
 }
 
 struct CompiledPass {
@@ -1527,6 +1610,8 @@ pub struct RenderScene {
     direct_pipelines: HashMap<PipelineKey, usize>,
     /// Why the scene records through wgpu (`None` on the direct path).
     wgpu_reason: Option<WgpuReason>,
+    /// Quality settings the scene was built with (textures added by extensions follow them).
+    quality: QualitySettings,
     /// [`Self::mark_dirty`] since the last frame: textures may have been written by the queue.
     textures_written: bool,
     targets: RenderTargetPool,
@@ -1794,6 +1879,7 @@ impl RenderScene {
                 mesh_layout,
                 front_face: desc.front_face,
                 depth,
+                samples: self.targets.get(desc.target).samples(),
             },
             buffers,
             unfed,
@@ -1819,7 +1905,7 @@ impl RenderScene {
                 bias: wgpu::DepthBiasState::default(),
             }),
             target: wgpu::ColorTargetState {
-                format: RT_FORMAT,
+                format: self.targets.format(),
                 blend: desc.blend.state(),
                 write_mask: desc.write_mask.writes(),
             },
@@ -1866,7 +1952,10 @@ impl RenderScene {
                 },
                 primitive: plan.primitive,
                 depth_stencil: plan.depth_stencil.clone(),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: plan.key.samples,
+                    ..Default::default()
+                },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader.module,
                     entry_point: Some(&shader.fragment_entry),
@@ -2206,7 +2295,8 @@ impl RenderScene {
             let target = self.depths[i].target;
             let size = self.targets.get(target).size();
             if self.depths[i].size != size {
-                self.depths[i] = create_depth(ctx, target, size);
+                self.depths[i] =
+                    create_depth(ctx, target, size, self.targets.get(target).samples());
             }
         }
         // Hazards: a pass sampling its own destination reads a copy (spec 04 §24.6).
@@ -2376,6 +2466,7 @@ impl RenderScene {
                 Some(r) => Err(r),
             },
             direct_modules: Vec::new(),
+            quality: self.quality,
             live: Some(self),
         };
         let r = f(&mut b);
@@ -2800,9 +2891,9 @@ impl RenderScene {
                             let mut enc = ctx.device().create_render_bundle_encoder(
                                 &wgpu::RenderBundleEncoderDescriptor {
                                     label: Some("lumenwall.bundle"),
-                                    color_formats: &[Some(RT_FORMAT)],
+                                    color_formats: &[Some(self.targets.format())],
                                     depth_stencil,
-                                    sample_count: 1,
+                                    sample_count: self.targets.get(target).samples(),
                                     multiview: None,
                                 },
                             );
@@ -3186,9 +3277,12 @@ impl RenderScene {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: None,
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: rt.view(),
+                            // Multisampled target: draw into the companion texture and
+                            // resolve into the target's own after every render pass, so
+                            // everything that samples or copies it sees the resolved image.
+                            view: rt.msaa_view().unwrap_or_else(|| rt.view()),
                             depth_slice: None,
-                            resolve_target: None,
+                            resolve_target: rt.msaa_view().map(|_| rt.view()),
                             ops: wgpu::Operations {
                                 load: clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
                                 store: wgpu::StoreOp::Store,

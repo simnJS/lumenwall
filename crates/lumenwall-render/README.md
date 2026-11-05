@@ -267,6 +267,10 @@ render passes, 156 draws), 0.72–0.88 → 0.37–0.41 ms on 3018340632 (24 rend
 projections: docs/PERFORMANCE.md, part D. Not measured on Linux, where the same code records (Vulkan); no Vulkan
 validation layer was available on the measuring PC.
 
+## Quality settings
+
+`QualitySettings` (`quality.rs`: `Msaa`, `TextureResolution`, `HdrMode`, `native_resolution`) is handed to the builder: `SceneBuilder::set_quality` (texture resolution: the top mip levels of every `add_texture` are dropped, declared size kept), `enable_msaa(rt, msaa)` (multisampled drawing for one target, returns the level in force), `use_hdr_targets()` (the pool's format becomes `Rgba16Float`, `RenderTargetPool::set_format`). Multisampling and HDR send the scene to the wgpu path (`WgpuReason::Quality`); defaults change nothing (`tests/quality_gpu.rs`). A target that is a copy destination stays single-sampled. Video and web texture helpers (`yuv.rs`, engine `web.rs`) still target `RT_FORMAT`: not for HDR scenes.
+
 ## Decisions on the open questions of spec 04
 
 Rules refer to `docs/PARITY-POLICY.md` (1 perf bugs never reproduced, 2 crashes fixed, 3 visible output reproduced, 4 WE gaps filled, 5 visible bugs follow WE when known, 6 frame-rate independence). Items owned by another crate are recorded here so the integration follows them.

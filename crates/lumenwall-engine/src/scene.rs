@@ -26,9 +26,9 @@ use lumenwall_render::math::{
 use lumenwall_render::targets::{ScopeId, composite_names, scaled_actual, scaled_size};
 use lumenwall_render::texture::{SamplerKey, TexFlags};
 use lumenwall_render::{
-    BlendMode, ClampMode, CullMode, GpuContext, ImageFrame, ImageHandle, ImageOptions, ImagePass,
-    ImageSpec, Op, PassId, PuppetGeometry, RenderScene, RtId, ScalingMode, SceneBuilder,
-    SkinVertex, SlotSource, TextureRef, Vertex, add_image_with_options,
+    BlendMode, ClampMode, CullMode, GpuContext, HdrMode, ImageFrame, ImageHandle, ImageOptions,
+    ImagePass, ImageSpec, Msaa, Op, PassId, PuppetGeometry, QualitySettings, RenderScene, RtId,
+    ScalingMode, SceneBuilder, SkinVertex, SlotSource, TextureRef, Vertex, add_image_with_options,
 };
 use lumenwall_scene::{
     BuildOptions, ConstantSource, ImagePasses, MAX_PARENT_DEPTH, MainTextureFormat, ObjectIndex,
@@ -93,10 +93,52 @@ fn target_aliasing_disabled() -> bool {
     std::env::var_os("LUMENWALL_NO_TARGET_ALIASING").is_some_and(|v| v != "0")
 }
 
-/// `LUMENWALL_FULL_SIZE_CHAINS=1`: image composites and effect targets at the scene's own size (the
-/// scene target still follows the output): sharper fine detail, more GPU time and memory.
-fn full_size_chains_forced() -> bool {
-    std::env::var_os("LUMENWALL_FULL_SIZE_CHAINS").is_some_and(|v| v != "0")
+/// Engine-wide settings fed to [`build_scene_with`]: today the quality settings, the place the
+/// CLI, `config.toml` and the application hand their choices to the engine.
+///
+/// `Default` costs exactly what rendering cost before the settings existed (no anti-aliasing,
+/// full-size textures, 8-bit targets, scenes rendered at the displayed size).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineSettings {
+    pub quality: QualitySettings,
+}
+
+impl EngineSettings {
+    /// Developer overrides, used by [`build_scene`] (the entry point without settings):
+    /// `LUMENWALL_MSAA=off|x2|x4|x8`, `LUMENWALL_TEXTURE_RESOLUTION=full|half|quarter`,
+    /// `LUMENWALL_HDR=off|scene` and `LUMENWALL_FULL_SIZE_CHAINS=1` (image composites and effect
+    /// targets at the scene's own size: sharper fine detail, more GPU time and memory). An
+    /// unset or unreadable variable keeps the default.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] over any variable lookup.
+    #[must_use]
+    pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Self {
+        fn parsed<T: std::str::FromStr + Default>(v: Option<String>) -> T {
+            v.and_then(|v| v.parse().ok()).unwrap_or_default()
+        }
+        Self {
+            quality: QualitySettings {
+                msaa: parsed(get("LUMENWALL_MSAA")),
+                texture_resolution: parsed(get("LUMENWALL_TEXTURE_RESOLUTION")),
+                hdr: parsed(get("LUMENWALL_HDR")),
+                native_resolution: get("LUMENWALL_FULL_SIZE_CHAINS").is_some_and(|v| v != "0"),
+            },
+        }
+    }
+}
+
+/// Render scale of image composites and effect targets: the scene's displayed-size scale,
+/// or 1 when the native resolution is asked for.
+fn chain_scale_for(quality: &QualitySettings, scale: f32) -> f32 {
+    if quality.native_resolution {
+        1.0
+    } else {
+        scale
+    }
 }
 
 /// Displayed pixels per scene pixel of a scene of logical size `logical` shown on `display`
@@ -502,7 +544,8 @@ fn raw_objects(vfs: &Vfs, file: &str) -> HashMap<i64, Json> {
         .unwrap_or_default()
 }
 
-/// Builds the render graph of a scene project.
+/// Builds the render graph of a scene project with the developer overrides of
+/// [`EngineSettings::from_env`] (the defaults when none is set).
 pub fn build_scene(
     ctx: &GpuContext,
     project: &mut Project,
@@ -510,6 +553,26 @@ pub fn build_scene(
     shaders: &mut dyn ShaderProvider,
     opts: &SceneOptions,
 ) -> Result<SceneRuntime, String> {
+    build_scene_with(
+        ctx,
+        project,
+        vfs,
+        shaders,
+        opts,
+        &EngineSettings::from_env(),
+    )
+}
+
+/// Builds the render graph of a scene project with explicit engine settings.
+pub fn build_scene_with(
+    ctx: &GpuContext,
+    project: &mut Project,
+    vfs: &Arc<Vfs>,
+    shaders: &mut dyn ShaderProvider,
+    opts: &SceneOptions,
+    settings: &EngineSettings,
+) -> Result<SceneRuntime, String> {
+    let quality = settings.quality;
     // Scripts that add, remove or reorder layers after load: the scene keeps what that needs
     // (per-object frame operations, shader provider, texture cache).
     let dynamic_layers = project.settings.scripts().iter().any(|s| {
@@ -550,6 +613,11 @@ pub fn build_scene(
     let skylight = settings.value(general.skylight_color).vec3();
 
     let mut b = SceneBuilder::new(ctx, (size.x, size.y));
+    b.set_quality(quality);
+    // HDR: 16-bit float targets for the scenes that ask for `hdr` (bloom keeps values above 1).
+    if quality.hdr == HdrMode::Scene && general.hdr {
+        b.use_hdr_targets();
+    }
     let full_sampler = SamplerKey {
         address: opts.clamp.address(),
         nearest: false,
@@ -559,13 +627,8 @@ pub fn build_scene(
     let scale = render_scale(logical, opts.display);
     let rendered = scaled_actual(logical, scale);
     // Image composites and effect targets follow the same scale unless the scene's native
-    // resolution is asked for (`LUMENWALL_FULL_SIZE_CHAINS=1`, read here only: the place an
-    // engine setting will feed).
-    let chain_scale = if full_size_chains_forced() {
-        1.0
-    } else {
-        scale
-    };
+    // resolution is asked for (`QualitySettings::native_resolution`).
+    let chain_scale = chain_scale_for(&quality, scale);
     if rendered != logical {
         tracing::debug!(
             "scene {}x{} rendered at {}x{} (displayed size)",
@@ -578,6 +641,15 @@ pub fn build_scene(
     let st = b
         .targets
         .create_scene_targets_at(ctx, logical, rendered, full_sampler);
+    if quality.msaa != Msaa::Off {
+        let level = b.enable_msaa(st.full, quality.msaa);
+        if level != quality.msaa {
+            tracing::info!(
+                "anti-aliasing {} unsupported here: using {level}",
+                quality.msaa
+            );
+        }
+    }
     let root = b.targets.scene_scope();
     let mut textures = TextureCache::default();
     let mut stats = SceneStats::default();
@@ -2410,6 +2482,57 @@ mod tests {
             property_json(&Value::from_text("abc")),
             Json::String("abc".into())
         );
+    }
+
+    #[test]
+    fn engine_settings_default_costs_nothing_more() {
+        let s = EngineSettings::default();
+        assert!(s.quality.is_default());
+        assert_eq!(EngineSettings::from_vars(|_| None), s);
+        // Unreadable values keep the default.
+        let junk = EngineSettings::from_vars(|_| Some("junk".into()));
+        assert_eq!(junk.quality.msaa, Msaa::Off);
+        assert_eq!(
+            junk.quality.texture_resolution,
+            lumenwall_render::TextureResolution::Full
+        );
+        assert_eq!(junk.quality.hdr, HdrMode::Off);
+    }
+
+    #[test]
+    fn engine_settings_read_the_developer_variables() {
+        let vars = [
+            ("LUMENWALL_MSAA", "x4"),
+            ("LUMENWALL_TEXTURE_RESOLUTION", "half"),
+            ("LUMENWALL_HDR", "scene"),
+            ("LUMENWALL_FULL_SIZE_CHAINS", "1"),
+        ];
+        let s = EngineSettings::from_vars(|n| {
+            vars.iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| (*v).to_owned())
+        });
+        assert_eq!(s.quality.msaa, Msaa::X4);
+        assert_eq!(
+            s.quality.texture_resolution,
+            lumenwall_render::TextureResolution::Half
+        );
+        assert_eq!(s.quality.hdr, HdrMode::Scene);
+        assert!(s.quality.native_resolution);
+        let off =
+            EngineSettings::from_vars(|n| (n == "LUMENWALL_FULL_SIZE_CHAINS").then(|| "0".into()));
+        assert!(!off.quality.native_resolution);
+    }
+
+    #[test]
+    fn native_resolution_renders_chains_at_scene_size() {
+        let shown = 0.5;
+        assert_eq!(chain_scale_for(&QualitySettings::default(), shown), shown);
+        let native = QualitySettings {
+            native_resolution: true,
+            ..Default::default()
+        };
+        assert_eq!(chain_scale_for(&native, shown), 1.0);
     }
 
     #[test]
